@@ -26,4 +26,6 @@ def test_bot_config_accepts_shadow_strict_live_defaults(tmp_path: Path) -> None:
     assert config.exchange_venue == "binance_usdt_perp"
     assert config.exchange_symbol == "ETHUSDT"
     assert config.adapter_client_order_prefix == "ethbot"
-    assert config.recv_window_ms == 5000
+    assert config.exchange_api_key_env == "BINANCE_TRADE_API_KEY"
+    assert config.exchange_api_secret_env == "BINANCE_TRADE_API_SECRET"
+    assert config.recv_window_ms == 60000

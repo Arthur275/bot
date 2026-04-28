@@ -27,13 +27,13 @@ def test_state_store_records_shadow_cycle_and_persists_state(tmp_path: Path) -> 
             blocked=False,
         ),
         effective_action="entry_long",
-        plan_reason="entry_allowed",
+        plan_reason="quant_action_passthrough",
         needs_reconciliation=False,
         maintain_protective_stop=True,
     )
     assert updated.execution_state is ExecutionLayerState.ENTRY_PENDING
     assert updated.pending_action == "entry_long"
-    assert updated.last_plan_reason == "entry_allowed"
+    assert updated.last_plan_reason == "quant_action_passthrough"
     assert updated.protective_stop_required is True
     assert store.load().pending_action == "entry_long"
 
@@ -84,7 +84,7 @@ def test_state_store_marks_reconciling_state_when_runtime_needs_recovery(tmp_pat
             blocked=False,
         ),
         effective_action="wait",
-        plan_reason="recovery_reconciliation_required",
+        plan_reason="quant_action_passthrough",
         needs_reconciliation=True,
         maintain_protective_stop=True,
         runtime_snapshot=AdapterRuntimeSnapshot(
@@ -119,14 +119,14 @@ def test_state_store_marks_failed_execution_for_recovery(tmp_path: Path) -> None
             blocked=False,
         ),
         effective_action="entry_long",
-        plan_reason="entry_allowed",
+        plan_reason="quant_action_passthrough",
         execution_results=[
             CommandExecutionResult(
                 target="entry_order",
                 status="rejected",
                 accepted=False,
                 simulated=True,
-                reason="entry_allowed",
+                reason="quant_action_passthrough",
             )
         ],
     )
@@ -157,7 +157,7 @@ def test_state_store_marks_protective_stop_failure_for_reconciliation(tmp_path: 
             blocked=False,
         ),
         effective_action="entry_long",
-        plan_reason="entry_allowed",
+        plan_reason="quant_action_passthrough",
         maintain_protective_stop=True,
         execution_results=[
             CommandExecutionResult(
@@ -165,7 +165,7 @@ def test_state_store_marks_protective_stop_failure_for_reconciliation(tmp_path: 
                 status="simulated",
                 accepted=True,
                 simulated=True,
-                reason="entry_allowed",
+                reason="quant_action_passthrough",
             ),
             CommandExecutionResult(
                 target="maintain_protective_stop",
@@ -204,7 +204,7 @@ def test_state_store_marks_position_open_from_runtime_snapshot(tmp_path: Path) -
             blocked=False,
         ),
         effective_action="wait",
-        plan_reason="wait_or_noop",
+        plan_reason="quant_action_passthrough",
         runtime_snapshot=AdapterRuntimeSnapshot(
             position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
             protective_stop_present=True,
@@ -214,6 +214,298 @@ def test_state_store_marks_position_open_from_runtime_snapshot(tmp_path: Path) -
     assert updated.observed_position_state == "ENTERED"
     assert updated.observed_position_direction == "long"
     assert updated.observed_position_size_pct == 0.3
+
+
+def test_state_store_clears_entry_pending_after_successful_entry_snapshot(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:16:00",
+            "action": "entry_long",
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.0,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="entry_long",
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+            protective_stop_present=False,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+    assert updated.pending_action == ""
+    assert updated.recovery_required is False
+
+
+def test_state_store_keeps_entry_pending_when_success_still_needs_reconciliation(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:16:30",
+            "action": "entry_long",
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.0,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="entry_long",
+        needs_reconciliation=True,
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+            protective_stop_present=False,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.RECONCILING
+    assert updated.pending_action == "entry_long"
+
+
+def test_state_store_clears_exit_pending_after_successful_flat_snapshot(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:17:00",
+            "action": "exit",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="exit",
+        execution_results=[
+            CommandExecutionResult(
+                target="exit_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+            protective_stop_present=False,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.IDLE
+    assert updated.pending_action == ""
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_size_pct == 0.0
+
+
+
+def test_state_store_marks_exit_reconciling_when_auxiliary_command_fails_after_flattening(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:17:15",
+            "action": "exit",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="exit",
+        execution_results=[
+            CommandExecutionResult(
+                target="exit_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            ),
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="failed",
+                accepted=False,
+                simulated=False,
+                reason="reconciliation_required",
+            ),
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+            protective_stop_present=False,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.RECONCILING
+    assert updated.pending_action == ""
+    assert updated.recovery_required is True
+    assert updated.reconciliation_required is True
+    assert updated.protective_stop_required is False
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_size_pct == 0.0
+
+
+
+def test_state_store_clears_reduce_pending_after_reconciled_size_drop(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:18:00",
+            "action": "reduce",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="reduce",
+        execution_results=[
+            CommandExecutionResult(
+                target="reduce_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            ),
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={
+                    "response_summary": {
+                        "position_state": "ENTERED",
+                        "direction": "long",
+                        "size_pct": 0.15,
+                    }
+                },
+            ),
+        ],
+    )
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+    assert updated.pending_action == ""
+    assert updated.observed_position_size_pct == 0.15
+
+
+
+def test_state_store_marks_reduce_reconciling_when_auxiliary_command_fails_after_size_drop(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:18:15",
+            "action": "reduce",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="reduce",
+        execution_results=[
+            CommandExecutionResult(
+                target="reduce_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="quant_action_passthrough",
+            ),
+            CommandExecutionResult(
+                target="maintain_protective_stop",
+                status="failed",
+                accepted=False,
+                simulated=False,
+                reason="protective_stop_required",
+            ),
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.15),
+            protective_stop_present=False,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.RECONCILING
+    assert updated.pending_action == ""
+    assert updated.recovery_required is True
+    assert updated.reconciliation_required is True
+    assert updated.protective_stop_required is True
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_size_pct == 0.15
+
 
 
 def test_state_store_persists_recent_idempotency_keys(tmp_path: Path) -> None:
@@ -300,3 +592,277 @@ def test_state_store_records_recent_fill_summary(tmp_path: Path) -> None:
         "simulated": True,
         "details": {"fill_count": 3, "latest_trade_id": "abc123"},
     }
+
+
+def test_state_store_prefers_recent_fill_response_summary(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-04-26T12:26:00", "action": "wait"},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="sync_recent_fills",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={
+                    "response_summary": {
+                        "fill_count": 2,
+                        "latest_trade_id": "12",
+                        "latest_order_id": "102",
+                        "latest_realized_pnl": "2.50",
+                    },
+                    "response_payload": [{"id": 11}, {"id": 12}],
+                },
+            )
+        ],
+    )
+    assert updated.recent_fill_summary == {
+        "status": "accepted",
+        "accepted": True,
+        "simulated": False,
+        "details": {
+            "fill_count": 2,
+            "latest_trade_id": "12",
+            "latest_order_id": "102",
+            "latest_realized_pnl": "2.50",
+        },
+    }
+
+
+def test_state_store_marks_entered_from_reconciliation_summary(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:30:00",
+            "action": "wait",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={
+                    "response_summary": {
+                        "position_state": "ENTERED",
+                        "direction": "long",
+                        "size_pct": 0.15,
+                    }
+                },
+            )
+        ],
+    )
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_direction == "long"
+    assert updated.observed_position_size_pct == 0.15
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+
+
+def test_state_store_marks_flat_from_reconciliation_summary(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "short"
+    state.observed_position_size_pct = 0.2
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-04-26T12:35:00", "action": "wait"},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={
+                    "response_summary": {
+                        "position_state": "FLAT",
+                        "direction": "neutral",
+                    }
+                },
+            )
+        ],
+    )
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_direction == "neutral"
+    assert updated.observed_position_size_pct == 0.0
+    assert updated.execution_state is ExecutionLayerState.IDLE
+
+
+
+def test_state_store_uses_handoff_fallback_for_state_and_direction_when_no_other_source_exists(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:37:15",
+            "action": "wait",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.2,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=None,
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_direction == "long"
+    assert updated.observed_position_size_pct == 0.2
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+
+
+
+def test_state_store_does_not_let_handoff_fallback_override_existing_open_position(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:37:30",
+            "action": "wait",
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.0,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=None,
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_direction == "long"
+    assert updated.observed_position_size_pct == 0.3
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+
+
+def test_state_store_prefers_runtime_snapshot_over_reconciliation_and_handoff_when_no_reconciliation_result_is_present(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:36:00",
+            "action": "wait",
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.4,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=None,
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+            protective_stop_present=True,
+        ),
+    )
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_direction == "long"
+    assert updated.observed_position_size_pct == 0.3
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+
+
+
+def test_state_store_prefers_accepted_reconciliation_summary_over_runtime_snapshot(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-04-26T12:36:45", "action": "wait"},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={
+                    "response_summary": {
+                        "position_state": "ENTERED",
+                        "direction": "long",
+                        "size_pct": 0.15,
+                    }
+                },
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+            protective_stop_present=True,
+        ),
+    )
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.observed_position_direction == "long"
+    assert updated.observed_position_size_pct == 0.15
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+
+

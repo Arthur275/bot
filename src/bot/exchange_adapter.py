@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,7 +17,9 @@ class PositionSnapshot(BaseModel):
     position_state: str = "FLAT"
     direction: str = "neutral"
     size_pct: float = 0.0
+    position_amt: float | None = None
     entry_price: float | None = None
+    mark_price: float | None = None
     leverage: int | None = None
 
 
@@ -39,6 +42,7 @@ class AdapterRuntimeSnapshot(BaseModel):
     position: PositionSnapshot = Field(default_factory=PositionSnapshot)
     open_orders: list[OrderSnapshot] = Field(default_factory=list)
     protective_stop_present: bool = False
+    snapshot_valid: bool = True
 
 
 class ReconciliationResult(BaseModel):
@@ -86,6 +90,7 @@ class EntryOrderPayload(BaseModel):
 
     action: str
     initial_stop_loss: float | None = None
+    position_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
 
 
 class ReduceOrderPayload(BaseModel):
@@ -132,6 +137,8 @@ class TrailingStopPayload(BaseModel):
 
     direction: str = ""
     trailing_rule: str = ""
+    trailing_activation_ratio: float | None = None
+    trailing_callback_rate_pct: float | None = None
     tp_ladder: list[float] = Field(default_factory=list)
 
 
@@ -169,7 +176,7 @@ class AdapterCredentials(BaseModel):
     venue: str
     api_key_env: str
     api_secret_env: str
-    recv_window_ms: int = Field(default=5000, gt=0)
+    recv_window_ms: int = Field(default=60000, gt=0)
     timeout_sec: float = Field(default=15.0, gt=0.0)
     proxy_url: str | None = None
     api_base_url: str = "https://fapi.binance.com"
@@ -182,6 +189,10 @@ class AdapterCapabilities(BaseModel):
     supports_recent_fill_sync: bool = False
     supports_trailing_stop_update: bool = False
     supports_breakeven_update: bool = False
+
+
+class BinanceRequestMappingError(RuntimeError):
+    pass
 
 
 class PreparedAdapterRequest(BaseModel):
@@ -215,6 +226,7 @@ class BaseExchangeAdapter:
 
     def build_commands(self, *, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> list[ExecutionCommand]:
         commands: list[ExecutionCommand] = []
+        resolved_direction = self._resolve_handoff_direction(handoff)
         if execution_plan.place_entry_order:
             commands.append(
                 ExecutionCommand(
@@ -222,10 +234,11 @@ class BaseExchangeAdapter:
                     operation="place",
                     target="entry_order",
                     idempotency_key=self._build_idempotency_key(target="entry_order", handoff=handoff),
-                    reason=execution_plan.plan_reason,
+                    reason=self._resolve_primary_command_reason(execution_plan),
                     payload=EntryOrderPayload(
                         action=execution_plan.effective_action,
                         initial_stop_loss=(handoff or {}).get("initial_stop_loss"),
+                        position_size_pct=float((handoff or {}).get("position_size_pct") or 0.0),
                     ),
                 )
             )
@@ -236,10 +249,10 @@ class BaseExchangeAdapter:
                     operation="place",
                     target="reduce_order",
                     idempotency_key=self._build_idempotency_key(target="reduce_order", handoff=handoff),
-                    reason=execution_plan.plan_reason,
+                    reason=self._resolve_primary_command_reason(execution_plan),
                     payload=ReduceOrderPayload(
                         action=execution_plan.effective_action,
-                        direction=str((handoff or {}).get("direction") or ""),
+                        direction=resolved_direction,
                         reduce_conditions=list((handoff or {}).get("reduce_conditions", [])),
                     ),
                 )
@@ -251,10 +264,10 @@ class BaseExchangeAdapter:
                     operation="place",
                     target="exit_order",
                     idempotency_key=self._build_idempotency_key(target="exit_order", handoff=handoff),
-                    reason=execution_plan.plan_reason,
+                    reason=self._resolve_primary_command_reason(execution_plan),
                     payload=ExitOrderPayload(
                         action=execution_plan.effective_action,
-                        direction=str((handoff or {}).get("direction") or ""),
+                        direction=resolved_direction,
                     ),
                 )
             )
@@ -267,7 +280,7 @@ class BaseExchangeAdapter:
                     idempotency_key=self._build_idempotency_key(target="maintain_protective_stop", handoff=handoff),
                     reason="protective_stop_required",
                     payload=ProtectiveStopPayload(
-                        direction=str((handoff or {}).get("direction") or ""),
+                        direction=resolved_direction,
                         initial_stop_loss=(handoff or {}).get("initial_stop_loss"),
                         breakeven_trigger=(handoff or {}).get("breakeven_trigger"),
                         trailing_rule=(handoff or {}).get("trailing_rule") or "",
@@ -284,7 +297,7 @@ class BaseExchangeAdapter:
                     idempotency_key=self._build_idempotency_key(target="advance_breakeven_stop", handoff=handoff),
                     reason="breakeven_ready",
                     payload=BreakevenPayload(
-                        direction=str((handoff or {}).get("direction") or ""),
+                        direction=resolved_direction,
                         breakeven_trigger=(handoff or {}).get("breakeven_trigger"),
                         trailing_rule=(handoff or {}).get("trailing_rule") or "",
                     ),
@@ -299,8 +312,10 @@ class BaseExchangeAdapter:
                     idempotency_key=self._build_idempotency_key(target="advance_trailing_stop", handoff=handoff),
                     reason="trailing_ready",
                     payload=TrailingStopPayload(
-                        direction=str((handoff or {}).get("direction") or ""),
+                        direction=resolved_direction,
                         trailing_rule=(handoff or {}).get("trailing_rule") or "",
+                        trailing_activation_ratio=(handoff or {}).get("trailing_activation_ratio"),
+                        trailing_callback_rate_pct=(handoff or {}).get("trailing_callback_rate_pct"),
                         tp_ladder=list((handoff or {}).get("tp_ladder", [])),
                     ),
                 )
@@ -329,8 +344,13 @@ class BaseExchangeAdapter:
             )
         return commands
 
+    @staticmethod
+    def _resolve_primary_command_reason(execution_plan: ExecutionPlan) -> str:
+        action = execution_plan.effective_action or execution_plan.requested_action or "wait"
+        return f"effective_action:{action}"
+
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
-        return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0))
+        return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
 
     def assess_reconciliation(
         self,
@@ -340,6 +360,19 @@ class BaseExchangeAdapter:
         expected_direction: str,
         expected_size_pct: float,
     ) -> ReconciliationResult:
+        if not runtime_snapshot.snapshot_valid:
+            if not self.get_capabilities().supports_real_execution:
+                return ReconciliationResult(
+                    in_sync=True,
+                    protective_stop_present=False,
+                )
+            return ReconciliationResult(
+                in_sync=False,
+                protective_stop_present=False,
+                needs_position_sync=True,
+                needs_order_sync=False,
+                reason_codes=["runtime_snapshot_unavailable"],
+            )
         reason_codes: list[str] = []
         needs_position_sync = False
         needs_order_sync = False
@@ -370,10 +403,20 @@ class BaseExchangeAdapter:
         return AdapterCapabilities()
 
     @staticmethod
+    def _resolve_handoff_direction(handoff: dict[str, Any] | None) -> str:
+        primary = str((handoff or {}).get("direction") or "")
+        fallback = str((handoff or {}).get("current_position_direction") or "")
+        if primary in {"long", "short"}:
+            return primary
+        if fallback in {"long", "short"}:
+            return fallback
+        return primary or fallback
+
+    @staticmethod
     def _build_idempotency_key(*, target: str, handoff: dict[str, Any] | None) -> str:
         generated_at = str((handoff or {}).get("generated_at") or "")
         action = str((handoff or {}).get("action") or "wait")
-        direction = str((handoff or {}).get("direction") or "neutral")
+        direction = BaseExchangeAdapter._resolve_handoff_direction(handoff) or "neutral"
         return f"{target}:{generated_at}:{action}:{direction}"
 
 
@@ -431,8 +474,21 @@ class RealExchangeAdapter(BaseExchangeAdapter):
     def credentials(self) -> AdapterCredentials:
         return self._credentials
 
+    def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
+        return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
+
     def prepare_requests(self, *, commands: list[ExecutionCommand]) -> list[PreparedAdapterRequest]:
         raise NotImplementedError
+
+    def validate_prepared_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_mode: RuntimeMode,
+        runtime_snapshot: AdapterRuntimeSnapshot | None = None,
+    ) -> PreparedAdapterRequest:
+        return prepared
 
     def execute_commands(
         self,
@@ -444,9 +500,70 @@ class RealExchangeAdapter(BaseExchangeAdapter):
             return ExchangeAdapter().execute_commands(commands=commands, runtime_mode=runtime_mode)
         results: list[CommandExecutionResult] = []
         prepared_requests = self.prepare_requests(commands=commands)
+        runtime_snapshot: AdapterRuntimeSnapshot | None = None
         for command, prepared in zip(commands, prepared_requests, strict=False):
+            current_runtime_snapshot = runtime_snapshot
+            if runtime_mode == RuntimeMode.REAL and self._requires_runtime_snapshot(command):
+                if current_runtime_snapshot is None:
+                    try:
+                        current_runtime_snapshot = self.fetch_runtime_snapshot()
+                    except BinanceRequestConfigError as exc:
+                        results.append(
+                            self._build_execution_result(
+                                command=command,
+                                runtime_mode=runtime_mode,
+                                prepared=prepared,
+                                status="error",
+                                accepted=False,
+                                simulated=False,
+                                reason="request_signing_failed",
+                                extra_details={"error": str(exc)},
+                            )
+                        )
+                        continue
+                    except BinanceTransportError as exc:
+                        status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
+                        reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
+                        results.append(
+                            self._build_execution_result(
+                                command=command,
+                                runtime_mode=runtime_mode,
+                                prepared=prepared,
+                                status=status,
+                                accepted=False,
+                                simulated=False,
+                                reason=reason,
+                                extra_details={
+                                    "http_status": exc.http_status,
+                                    "response_payload": exc.payload,
+                                    "error": str(exc),
+                                },
+                            )
+                        )
+                        continue
+                    runtime_snapshot = current_runtime_snapshot
             try:
+                prepared = self.validate_prepared_request(
+                    command=command,
+                    prepared=prepared,
+                    runtime_mode=runtime_mode,
+                    runtime_snapshot=current_runtime_snapshot,
+                )
                 signed_request = self._signer.sign(prepared)
+            except BinanceRequestMappingError as exc:
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=runtime_mode,
+                        prepared=prepared,
+                        status="error",
+                        accepted=False,
+                        simulated=runtime_mode != RuntimeMode.REAL,
+                        reason="unsafe_request_mapping",
+                        extra_details={"error": str(exc)},
+                    )
+                )
+                continue
             except BinanceRequestConfigError as exc:
                 results.append(
                     self._build_execution_result(
@@ -458,6 +575,26 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                         simulated=runtime_mode != RuntimeMode.REAL,
                         reason="request_signing_failed",
                         extra_details={"error": str(exc)},
+                    )
+                )
+                continue
+            except BinanceTransportError as exc:
+                status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
+                reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=runtime_mode,
+                        prepared=prepared,
+                        status=status,
+                        accepted=False,
+                        simulated=runtime_mode != RuntimeMode.REAL,
+                        reason=reason,
+                        extra_details={
+                            "http_status": exc.http_status,
+                            "response_payload": exc.payload,
+                            "error": str(exc),
+                        },
                     )
                 )
                 continue
@@ -482,26 +619,53 @@ class RealExchangeAdapter(BaseExchangeAdapter):
             try:
                 response = self._transport.send(signed_request)
             except BinanceTransportError as exc:
-                status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
-                reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
-                results.append(
-                    self._build_execution_result(
-                        command=command,
-                        runtime_mode=runtime_mode,
-                        prepared=prepared,
-                        status=status,
-                        accepted=False,
-                        simulated=False,
-                        reason=reason,
-                        extra_details={
-                            "signed_request": signed_request.model_dump(mode="json"),
-                            "http_status": exc.http_status,
-                            "response_payload": exc.payload,
-                            "error": str(exc),
-                        },
+                if self._is_timestamp_outside_recv_window(exc):
+                    try:
+                        self._signer.refresh_timestamp_offset()
+                        signed_request = self._signer.sign(prepared)
+                        response = self._transport.send(signed_request)
+                    except (BinanceRequestConfigError, BinanceTransportError) as retry_exc:
+                        exc = retry_exc if isinstance(retry_exc, BinanceTransportError) else exc
+                    else:
+                        exc = None
+                if exc is not None:
+                    status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
+                    reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
+                    results.append(
+                        self._build_execution_result(
+                            command=command,
+                            runtime_mode=runtime_mode,
+                            prepared=prepared,
+                            status=status,
+                            accepted=False,
+                            simulated=False,
+                            reason=reason,
+                            extra_details={
+                                "signed_request": signed_request.model_dump(mode="json"),
+                                "http_status": exc.http_status,
+                                "response_payload": exc.payload,
+                                "error": str(exc),
+                            },
+                        )
                     )
-                )
-                continue
+                    continue
+
+            account_payload: Any = None
+            if command.target == "reconcile_position_and_orders":
+                current = response.payload[0] if isinstance(response.payload, list) and response.payload else response.payload
+                if BinancePerpAdapter._has_entered_position(current):
+                    try:
+                        account_response = self._transport.send(
+                            self._signer.sign(
+                                PreparedAdapterRequest(
+                                    method="GET",
+                                    path="/fapi/v2/account",
+                                )
+                            )
+                        )
+                        account_payload = account_response.payload
+                    except (BinanceRequestConfigError, BinanceTransportError):
+                        account_payload = None
 
             results.append(
                 self._build_execution_result(
@@ -516,11 +680,111 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                         "signed_request": signed_request.model_dump(mode="json"),
                         "http_status": response.http_status,
                         "response_payload": response.payload,
-                        "response_summary": self._summarize_response_payload(command=command, payload=response.payload),
+                        "response_summary": self._summarize_response_payload(
+                            command=command,
+                            payload=response.payload,
+                            account_payload=account_payload,
+                        ),
+                    },
+                )
+            )
+            if command.target == "entry_order":
+                runtime_snapshot = None
+        return results
+
+    def preflight_commands(self, *, commands: list[ExecutionCommand]) -> list[CommandExecutionResult]:
+        results: list[CommandExecutionResult] = []
+        prepared_requests = self.prepare_requests(commands=commands)
+        runtime_snapshot: AdapterRuntimeSnapshot | None = None
+        for command, prepared in zip(commands, prepared_requests, strict=False):
+            current_runtime_snapshot = runtime_snapshot
+            if self._requires_runtime_snapshot(command):
+                if current_runtime_snapshot is None:
+                    current_runtime_snapshot = self.fetch_runtime_snapshot()
+                    runtime_snapshot = current_runtime_snapshot
+            try:
+                prepared = self.validate_prepared_request(
+                    command=command,
+                    prepared=prepared,
+                    runtime_mode=RuntimeMode.REAL,
+                    runtime_snapshot=current_runtime_snapshot,
+                )
+                signed_request = self._signer.sign(prepared)
+            except BinanceRequestMappingError as exc:
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=RuntimeMode.REAL,
+                        prepared=prepared,
+                        status="error",
+                        accepted=False,
+                        simulated=True,
+                        reason="unsafe_request_mapping",
+                        extra_details={"error": str(exc), "preflight": True},
+                    )
+                )
+                continue
+            except BinanceRequestConfigError as exc:
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=RuntimeMode.REAL,
+                        prepared=prepared,
+                        status="error",
+                        accepted=False,
+                        simulated=True,
+                        reason="request_signing_failed",
+                        extra_details={"error": str(exc), "preflight": True},
+                    )
+                )
+                continue
+            except BinanceTransportError as exc:
+                status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
+                reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=RuntimeMode.REAL,
+                        prepared=prepared,
+                        status=status,
+                        accepted=False,
+                        simulated=True,
+                        reason=reason,
+                        extra_details={
+                            "http_status": exc.http_status,
+                            "response_payload": exc.payload,
+                            "error": str(exc),
+                            "preflight": True,
+                        },
+                    )
+                )
+                continue
+            results.append(
+                self._build_execution_result(
+                    command=command,
+                    runtime_mode=RuntimeMode.REAL,
+                    prepared=prepared,
+                    status="preflight_ready",
+                    accepted=True,
+                    simulated=True,
+                    reason=command.reason,
+                    extra_details={
+                        "signed_request": signed_request.model_dump(mode="json"),
+                        "preflight": True,
                     },
                 )
             )
         return results
+
+    @staticmethod
+    def _requires_runtime_snapshot(command: ExecutionCommand) -> bool:
+        return command.target in {"entry_order", "reduce_order", "exit_order", "maintain_protective_stop", "advance_breakeven_stop", "advance_trailing_stop"}
+
+    @staticmethod
+    def _is_timestamp_outside_recv_window(exc: BinanceTransportError) -> bool:
+        if exc.kind != "http_error" or not isinstance(exc.payload, dict):
+            return False
+        return exc.payload.get("code") == -1021
 
     def _build_execution_result(
         self,
@@ -555,13 +819,26 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         )
 
     @staticmethod
-    def _summarize_response_payload(*, command: ExecutionCommand, payload: Any) -> dict[str, Any]:
+    def _summarize_response_payload(*, command: ExecutionCommand, payload: Any, account_payload: Any = None) -> dict[str, Any]:
         if command.target == "sync_recent_fills" and isinstance(payload, list):
             latest = payload[-1] if payload else {}
+            distinct_order_count = len(
+                {
+                    str(item.get("orderId") or "")
+                    for item in payload
+                    if isinstance(item, dict) and str(item.get("orderId") or "")
+                }
+            )
             return {
                 "fill_count": len(payload),
+                "distinct_order_count": distinct_order_count,
                 "latest_trade_id": str((latest or {}).get("id") or ""),
                 "latest_order_id": str((latest or {}).get("orderId") or ""),
+                "latest_side": str((latest or {}).get("side") or ""),
+                "latest_price": str((latest or {}).get("price") or ""),
+                "latest_qty": str((latest or {}).get("qty") or ""),
+                "latest_quote_qty": str((latest or {}).get("quoteQty") or ""),
+                "latest_time": (latest or {}).get("time"),
                 "latest_realized_pnl": str((latest or {}).get("realizedPnl") or ""),
             }
         if command.target == "reconcile_position_and_orders" and isinstance(payload, list):
@@ -571,18 +848,21 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 position_amt = float(amt_raw or 0.0)
             except (TypeError, ValueError):
                 position_amt = 0.0
-            direction = "neutral"
-            if position_amt > 0:
-                direction = "long"
-            elif position_amt < 0:
-                direction = "short"
+            position_snapshot = BinancePerpAdapter._build_position_snapshot(payload, account_payload=account_payload)
+            account_equity, account_equity_source = BinancePerpAdapter._extract_account_equity_with_source(account_payload)
             return {
-                "position_state": "ENTERED" if position_amt != 0.0 else "FLAT",
-                "direction": direction,
+                "position_state": position_snapshot.position_state,
+                "direction": position_snapshot.direction,
+                "size_pct": position_snapshot.size_pct,
                 "position_amt": position_amt,
                 "entry_price": (current or {}).get("entryPrice"),
                 "break_even_price": (current or {}).get("breakEvenPrice"),
+                "mark_price": (current or {}).get("markPrice"),
+                "notional": (current or {}).get("notional"),
                 "unrealized_profit": (current or {}).get("unRealizedProfit"),
+                "leverage": position_snapshot.leverage,
+                "account_equity": account_equity,
+                "account_equity_source": account_equity_source,
             }
         if isinstance(payload, dict):
             summary: dict[str, Any] = {}
@@ -602,11 +882,694 @@ class RealExchangeAdapter(BaseExchangeAdapter):
 
 
 class BinancePerpAdapter(RealExchangeAdapter):
+    def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
+        fetched_at = datetime.now().replace(microsecond=0)
+        try:
+            position_request = self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v2/positionRisk",
+                    params={"symbol": "ETHUSDT"},
+                )
+            )
+            open_orders_request = self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v1/openOrders",
+                    params={"symbol": "ETHUSDT"},
+                )
+            )
+        except BinanceRequestConfigError:
+            raise
+        try:
+            position_response = self._transport.send(position_request)
+            open_orders_response = self._transport.send(open_orders_request)
+        except BinanceTransportError:
+            return AdapterRuntimeSnapshot(fetched_at=fetched_at, snapshot_valid=False)
+
+        account_payload: Any = None
+        raw_position = position_response.payload[0] if isinstance(position_response.payload, list) and position_response.payload else position_response.payload
+        if self._has_entered_position(raw_position):
+            try:
+                account_request = self._signer.sign(
+                    PreparedAdapterRequest(
+                        method="GET",
+                        path="/fapi/v2/account",
+                    )
+                )
+                account_response = self._transport.send(account_request)
+                account_payload = account_response.payload
+            except BinanceRequestConfigError:
+                raise
+            except BinanceTransportError:
+                account_payload = None
+
+        open_orders = self._build_open_orders_snapshot(open_orders_response.payload)
+        return AdapterRuntimeSnapshot(
+            fetched_at=fetched_at,
+            position=self._build_position_snapshot(position_response.payload, account_payload=account_payload),
+            open_orders=open_orders,
+            protective_stop_present=self._has_protective_stop(open_orders),
+        )
+
     def prepare_requests(self, *, commands: list[ExecutionCommand]) -> list[PreparedAdapterRequest]:
         requests: list[PreparedAdapterRequest] = []
         for command in commands:
             requests.append(self._map_command_to_request(command))
         return requests
+
+    @staticmethod
+    def _build_position_snapshot(payload: Any, *, account_payload: Any = None) -> PositionSnapshot:
+        current = payload[0] if isinstance(payload, list) and payload else payload if isinstance(payload, dict) else {}
+        amt_raw = (current or {}).get("positionAmt")
+        try:
+            position_amt = float(amt_raw or 0.0)
+        except (TypeError, ValueError):
+            position_amt = 0.0
+        direction = "neutral"
+        if position_amt > 0:
+            direction = "long"
+        elif position_amt < 0:
+            direction = "short"
+        entry_price = BinancePerpAdapter._to_optional_float((current or {}).get("entryPrice"))
+        leverage = BinancePerpAdapter._to_optional_int((current or {}).get("leverage"))
+        size_pct = BinancePerpAdapter._resolve_position_size_pct(current=current, account_payload=account_payload, leverage=leverage)
+        return PositionSnapshot(
+            position_state="ENTERED" if position_amt != 0.0 else "FLAT",
+            direction=direction,
+            size_pct=size_pct,
+            position_amt=position_amt,
+            entry_price=entry_price,
+            mark_price=BinancePerpAdapter._to_optional_float((current or {}).get("markPrice")),
+            leverage=leverage,
+        )
+
+    @staticmethod
+    def _has_entered_position(payload: Any) -> bool:
+        current = payload if isinstance(payload, dict) else {}
+        try:
+            return float((current or {}).get("positionAmt") or 0.0) != 0.0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _resolve_position_size_pct(*, current: dict[str, Any], account_payload: Any, leverage: int | None) -> float:
+        notional = BinancePerpAdapter._to_optional_float(current.get("notional"))
+        if notional is None:
+            entry_price = BinancePerpAdapter._to_optional_float(current.get("entryPrice"))
+            position_amt = BinancePerpAdapter._to_optional_float(current.get("positionAmt"))
+            if entry_price is not None and position_amt is not None:
+                notional = abs(entry_price * position_amt)
+        if notional is None or notional <= 0.0:
+            return 0.0
+        account_equity = BinancePerpAdapter._extract_account_equity(account_payload)
+        if account_equity is None or account_equity <= 0.0:
+            return 0.0
+        live_leverage = leverage or BinancePerpAdapter._to_optional_int(current.get("leverage")) or 10
+        denominator = account_equity * float(live_leverage)
+        if denominator <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, round(abs(notional) / denominator, 4)))
+
+    @staticmethod
+    def _extract_account_equity(account_payload: Any) -> float | None:
+        value, _ = BinancePerpAdapter._extract_account_equity_with_source(account_payload)
+        return value
+
+    @staticmethod
+    def _extract_account_equity_with_source(account_payload: Any) -> tuple[float | None, str]:
+        if not isinstance(account_payload, dict):
+            return None, ""
+        for key in ("totalWalletBalance", "totalMarginBalance", "totalCrossWalletBalance"):
+            value = BinancePerpAdapter._to_optional_float(account_payload.get(key))
+            if value is not None and value > 0.0:
+                return value, key
+        assets = account_payload.get("assets")
+        if isinstance(assets, list):
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                if str(asset.get("asset") or "") != "USDT":
+                    continue
+                for key in ("walletBalance", "marginBalance", "crossWalletBalance"):
+                    value = BinancePerpAdapter._to_optional_float(asset.get(key))
+                    if value is not None and value > 0.0:
+                        return value, f"assets.USDT.{key}"
+        return None, ""
+
+    @staticmethod
+    def _build_open_orders_snapshot(payload: Any) -> list[OrderSnapshot]:
+        if not isinstance(payload, list):
+            return []
+        orders: list[OrderSnapshot] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            reduce_only = BinancePerpAdapter._to_bool(item.get("reduceOnly")) or BinancePerpAdapter._to_bool(item.get("closePosition"))
+            orders.append(
+                OrderSnapshot(
+                    order_id=str(item.get("orderId") or ""),
+                    order_type=str(item.get("type") or ""),
+                    status=str(item.get("status") or "open"),
+                    side=str(item.get("side") or ""),
+                    reduce_only=reduce_only,
+                    price=BinancePerpAdapter._to_optional_float(item.get("price")),
+                    trigger_price=BinancePerpAdapter._to_optional_float(item.get("stopPrice")),
+                )
+            )
+        return orders
+
+    @staticmethod
+    def _has_protective_stop(open_orders: list[OrderSnapshot]) -> bool:
+        protective_types = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET"}
+        return any(order.reduce_only and order.order_type in protective_types for order in open_orders)
+
+    @staticmethod
+    def _to_optional_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return None if parsed == 0.0 else parsed
+
+    @staticmethod
+    def _to_optional_int(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return None if parsed == 0 else parsed
+
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() == "true"
+
+    def validate_prepared_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_mode: RuntimeMode,
+        runtime_snapshot: AdapterRuntimeSnapshot | None = None,
+    ) -> PreparedAdapterRequest:
+        if runtime_mode != RuntimeMode.REAL:
+            return prepared
+        if command.target == "entry_order":
+            return self._resolve_entry_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "reduce_order":
+            return self._resolve_reduce_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "exit_order":
+            return self._resolve_exit_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "maintain_protective_stop":
+            return self._resolve_protective_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "advance_breakeven_stop":
+            return self._resolve_breakeven_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "advance_trailing_stop":
+            return self._resolve_trailing_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        return prepared
+
+    def _resolve_entry_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, EntryOrderPayload):
+            raise BinanceRequestMappingError("Entry order payload is required for real entry execution")
+        runtime_snapshot = self._require_valid_runtime_snapshot(
+            runtime_snapshot=runtime_snapshot,
+            error_context="Entry order",
+        )
+        if runtime_snapshot.position.position_state == "ENTERED":
+            raise BinanceRequestMappingError("Real entry order requires a flat live position")
+        position_size_pct = float(payload.position_size_pct or 0.0)
+        if position_size_pct <= 0.0:
+            raise BinanceRequestMappingError("Real entry order requires a positive position_size_pct")
+        account_equity = self._fetch_account_equity_for_entry()
+        symbol_contract = self._fetch_symbol_contract()
+        leverage = self._resolve_entry_leverage(runtime_snapshot)
+        mark_price = self._resolve_entry_mark_price(symbol_contract=symbol_contract, runtime_snapshot=runtime_snapshot)
+        quantity = self._derive_entry_quantity(
+            position_size_pct=position_size_pct,
+            account_equity=account_equity,
+            leverage=leverage,
+            mark_price=mark_price,
+            min_qty=symbol_contract["min_qty"],
+            step_size=symbol_contract["step_size"],
+        )
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "quantity": quantity,
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_quantity": quantity,
+                    "resolved_mark_price": format(mark_price, "f"),
+                    "resolved_account_equity": format(account_equity, "f"),
+                    "resolved_leverage": leverage,
+                    "resolved_step_size": format(symbol_contract["step_size"], "f"),
+                    "resolved_min_qty": format(symbol_contract["min_qty"], "f"),
+                    "resolution_mode": "entry_quantity_from_size_pct",
+                },
+            }
+        )
+
+    def _resolve_exit_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, ExitOrderPayload):
+            raise BinanceRequestMappingError("Exit order payload is required for real exit execution")
+        position = self._resolve_live_position_for_exit(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+        )
+        quantity = self._format_exit_quantity(position.position_amt)
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "side": self._resolve_close_side(position.direction),
+                    "quantity": quantity,
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_position_amt": quantity,
+                    "resolution_mode": "exit_quantity_from_live_position",
+                },
+            }
+        )
+
+    def _resolve_reduce_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, ReduceOrderPayload):
+            raise BinanceRequestMappingError("Reduce order payload is required for real reduce execution")
+        self._resolve_live_position_for_exit(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+        )
+        raise BinanceRequestMappingError(
+            "Real reduce order requires an explicit reduce quantity contract from quant handoff"
+        )
+
+    @staticmethod
+    def _resolve_entry_leverage(runtime_snapshot: AdapterRuntimeSnapshot) -> int:
+        leverage = runtime_snapshot.position.leverage or 10
+        if leverage <= 0:
+            raise BinanceRequestMappingError("Real entry order requires a positive live leverage")
+        return leverage
+
+    @staticmethod
+    def _resolve_entry_mark_price(*, symbol_contract: dict[str, Decimal], runtime_snapshot: AdapterRuntimeSnapshot) -> Decimal:
+        runtime_mark_price = runtime_snapshot.position.mark_price
+        if runtime_mark_price is not None and runtime_mark_price > 0.0:
+            return Decimal(str(runtime_mark_price))
+        mark_price = symbol_contract["mark_price"]
+        if mark_price <= 0:
+            raise BinanceRequestMappingError("Real entry order requires a positive mark price")
+        return mark_price
+
+    def _fetch_account_equity_for_entry(self) -> Decimal:
+        account_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v2/account",
+                )
+            )
+        )
+        account_equity = self._extract_account_equity(account_response.payload)
+        if account_equity is None or account_equity <= 0.0:
+            raise BinanceRequestMappingError("Real entry order requires a positive account equity")
+        return Decimal(str(account_equity))
+
+    def _fetch_symbol_contract(self) -> dict[str, Decimal]:
+        exchange_info_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v1/exchangeInfo",
+                    requires_auth=False,
+                )
+            )
+        )
+        premium_index_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v1/premiumIndex",
+                    requires_auth=False,
+                    params={"symbol": "ETHUSDT"},
+                )
+            )
+        )
+        return self._extract_symbol_contract(exchange_info_response.payload, premium_index_response.payload)
+
+    @staticmethod
+    def _extract_symbol_contract(exchange_info_payload: Any, premium_index_payload: Any) -> dict[str, Decimal]:
+        if not isinstance(exchange_info_payload, dict):
+            raise BinanceRequestMappingError("Real entry order requires valid exchangeInfo payload")
+        symbols = exchange_info_payload.get("symbols")
+        if not isinstance(symbols, list):
+            raise BinanceRequestMappingError("Real entry order requires exchangeInfo symbols metadata")
+        current = next((item for item in symbols if isinstance(item, dict) and str(item.get("symbol") or "") == "ETHUSDT"), None)
+        if current is None:
+            raise BinanceRequestMappingError("Real entry order requires ETHUSDT symbol metadata")
+        filters = current.get("filters")
+        if not isinstance(filters, list):
+            raise BinanceRequestMappingError("Real entry order requires ETHUSDT filters metadata")
+        lot_filter = next(
+            (
+                item for item in filters
+                if isinstance(item, dict) and str(item.get("filterType") or "") in {"MARKET_LOT_SIZE", "LOT_SIZE"}
+            ),
+            None,
+        )
+        if lot_filter is None:
+            raise BinanceRequestMappingError("Real entry order requires ETHUSDT lot size metadata")
+        step_size = BinancePerpAdapter._to_positive_decimal(lot_filter.get("stepSize"), error_message="Real entry order requires a positive stepSize")
+        min_qty = BinancePerpAdapter._to_positive_decimal(lot_filter.get("minQty"), error_message="Real entry order requires a positive minQty")
+        mark_price = BinancePerpAdapter._extract_mark_price_decimal(premium_index_payload)
+        return {
+            "step_size": step_size,
+            "min_qty": min_qty,
+            "mark_price": mark_price,
+        }
+
+    @staticmethod
+    def _extract_mark_price_decimal(premium_index_payload: Any) -> Decimal:
+        if not isinstance(premium_index_payload, dict):
+            raise BinanceRequestMappingError("Real entry order requires valid premium index payload")
+        return BinancePerpAdapter._to_positive_decimal(
+            premium_index_payload.get("markPrice"),
+            error_message="Real entry order requires a positive mark price",
+        )
+
+    @staticmethod
+    def _derive_entry_quantity(
+        *,
+        position_size_pct: float,
+        account_equity: Decimal,
+        leverage: int,
+        mark_price: Decimal,
+        min_qty: Decimal,
+        step_size: Decimal,
+    ) -> str:
+        try:
+            size_pct = Decimal(str(position_size_pct))
+            leverage_decimal = Decimal(str(leverage))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Real entry order size inputs are not valid decimals") from exc
+        if size_pct <= 0 or size_pct > 1:
+            raise BinanceRequestMappingError("Real entry order requires position_size_pct between 0 and 1")
+        if account_equity <= 0 or leverage_decimal <= 0 or mark_price <= 0:
+            raise BinanceRequestMappingError("Real entry order requires positive equity, leverage, and mark price")
+        quantity = (size_pct * account_equity * leverage_decimal / mark_price).quantize(step_size, rounding=ROUND_DOWN)
+        if quantity < min_qty:
+            raise BinanceRequestMappingError("Real entry order resolved quantity is below Binance minQty")
+        if quantity <= 0:
+            raise BinanceRequestMappingError("Real entry order resolved quantity must be positive")
+        return format(quantity, "f")
+
+    @staticmethod
+    def _to_positive_decimal(value: Any, *, error_message: str) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise BinanceRequestMappingError(error_message) from exc
+        if parsed <= 0:
+            raise BinanceRequestMappingError(error_message)
+        return parsed
+
+    def _resolve_protective_stop_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, ProtectiveStopPayload):
+            raise BinanceRequestMappingError("Protective stop payload is required for real protective stop execution")
+        if payload.trailing_rule or payload.breakeven_trigger is not None or payload.tp_ladder:
+            raise BinanceRequestMappingError(
+                "Protective stop semantics are still strategy-relative and cannot be sent to Binance real mode safely yet"
+            )
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Protective stop",
+        )
+        stop_ratio = payload.initial_stop_loss
+        if stop_ratio is None:
+            raise BinanceRequestMappingError("Real protective stop requires initial_stop_loss")
+        stop_price = self._derive_stop_price(direction=position.direction, reference_price=position.entry_price, stop_ratio=stop_ratio)
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "side": self._resolve_close_side(position.direction),
+                    "stopPrice": stop_price,
+                    "closePosition": "true",
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_stop_price": stop_price,
+                },
+            }
+        )
+
+    def _resolve_breakeven_stop_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, BreakevenPayload):
+            raise BinanceRequestMappingError("Breakeven payload is required for real breakeven execution")
+        if payload.breakeven_trigger is None:
+            raise BinanceRequestMappingError("Real breakeven stop requires breakeven_trigger")
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Breakeven stop",
+        )
+        stop_price = self._format_live_entry_stop_price(position.entry_price)
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "side": self._resolve_close_side(position.direction),
+                    "stopPrice": stop_price,
+                    "closePosition": "true",
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_stop_price": stop_price,
+                    "resolution_mode": "breakeven_from_live_entry",
+                },
+            }
+        )
+
+    @staticmethod
+    def _require_valid_runtime_snapshot(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        error_context: str,
+    ) -> AdapterRuntimeSnapshot:
+        if runtime_snapshot is None or not runtime_snapshot.snapshot_valid:
+            raise BinanceRequestMappingError(
+                f"A valid runtime snapshot is required before sending a real {error_context.lower()}"
+            )
+        return runtime_snapshot
+
+    @staticmethod
+    def _resolve_live_position_for_stop(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        payload_direction: str,
+        error_context: str,
+    ) -> PositionSnapshot:
+        runtime_snapshot = BinancePerpAdapter._require_valid_runtime_snapshot(
+            runtime_snapshot=runtime_snapshot,
+            error_context=error_context,
+        )
+        position = runtime_snapshot.position
+        if position.position_state != "ENTERED":
+            raise BinanceRequestMappingError(f"Real {error_context.lower()} requires an existing entered position")
+        if position.direction not in {"long", "short"}:
+            raise BinanceRequestMappingError(f"Real {error_context.lower()} requires a known position direction")
+        if payload_direction and payload_direction != position.direction:
+            raise BinanceRequestMappingError(f"{error_context} direction does not match live position direction")
+        reference_price = position.entry_price
+        if reference_price is None or reference_price <= 0.0:
+            raise BinanceRequestMappingError(f"Real {error_context.lower()} requires a valid live entry price")
+        return position.model_copy(update={"entry_price": reference_price})
+
+    @staticmethod
+    def _resolve_live_position_for_exit(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        payload_direction: str,
+    ) -> PositionSnapshot:
+        runtime_snapshot = BinancePerpAdapter._require_valid_runtime_snapshot(
+            runtime_snapshot=runtime_snapshot,
+            error_context="Exit order",
+        )
+        position = runtime_snapshot.position
+        if position.position_state != "ENTERED":
+            raise BinanceRequestMappingError("Real exit order requires an existing entered position")
+        if position.direction not in {"long", "short"}:
+            raise BinanceRequestMappingError("Real exit order requires a known position direction")
+        if payload_direction and payload_direction != position.direction:
+            raise BinanceRequestMappingError("Exit order direction does not match live position direction")
+        return position
+
+    @staticmethod
+    def _format_exit_quantity(position_amt: float | None) -> str:
+        try:
+            quantity = Decimal(str(position_amt or 0.0)).copy_abs()
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Real exit order position amount is not a valid decimal") from exc
+        if quantity <= 0:
+            raise BinanceRequestMappingError("Real exit order requires a positive live position amount")
+        normalized = quantity.normalize()
+        return format(normalized, "f")
+
+    @staticmethod
+    def _resolve_close_side(direction: str) -> str:
+        if direction == "long":
+            return "SELL"
+        if direction == "short":
+            return "BUY"
+        raise BinanceRequestMappingError("Close order direction must be long or short")
+
+    @staticmethod
+    def _format_live_entry_stop_price(reference_price: float) -> str:
+        try:
+            reference = Decimal(str(reference_price))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Breakeven stop price input is not a valid decimal") from exc
+        if reference <= 0:
+            raise BinanceRequestMappingError("Breakeven stop requires a positive live entry price")
+        return format(reference, "f")
+
+    def _resolve_trailing_stop_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, TrailingStopPayload):
+            raise BinanceRequestMappingError("Trailing stop payload is required for real trailing execution")
+        if payload.trailing_activation_ratio is None:
+            raise BinanceRequestMappingError("Real trailing stop requires trailing_activation_ratio")
+        if payload.trailing_callback_rate_pct is None:
+            raise BinanceRequestMappingError("Real trailing stop requires trailing_callback_rate_pct")
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Trailing stop",
+        )
+        activation_price = self._derive_trailing_activation_price(
+            direction=position.direction,
+            reference_price=position.entry_price,
+            activation_ratio=payload.trailing_activation_ratio,
+        )
+        callback_rate = self._format_callback_rate_pct(payload.trailing_callback_rate_pct)
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "side": self._resolve_close_side(position.direction),
+                    "activationPrice": activation_price,
+                    "callbackRate": callback_rate,
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_activation_price": activation_price,
+                    "resolved_callback_rate": callback_rate,
+                    "resolution_mode": "trailing_from_quant_contract",
+                },
+            }
+        )
+
+    @staticmethod
+    def _format_callback_rate_pct(callback_rate_pct: float) -> str:
+        try:
+            callback_rate = Decimal(str(callback_rate_pct))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Trailing stop callback rate is not a valid decimal") from exc
+        if callback_rate <= 0 or callback_rate > 10:
+            raise BinanceRequestMappingError("Trailing stop callback rate must be between 0 and 10")
+        return format(callback_rate.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP), "f")
+
+    @staticmethod
+    def _derive_trailing_activation_price(*, direction: str, reference_price: float, activation_ratio: float) -> str:
+        try:
+            reference = Decimal(str(reference_price))
+            ratio = Decimal(str(activation_ratio))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Trailing stop activation price inputs are not valid decimals") from exc
+        if reference <= 0:
+            raise BinanceRequestMappingError("Trailing stop requires a positive reference price")
+        if direction == "long":
+            if ratio <= 1:
+                raise BinanceRequestMappingError("Long trailing activation ratio must be greater than 1")
+        elif direction == "short":
+            if ratio <= 0 or ratio >= 1:
+                raise BinanceRequestMappingError("Short trailing activation ratio must be between 0 and 1")
+        else:
+            raise BinanceRequestMappingError("Trailing stop direction must be long or short")
+        resolved = (reference * ratio).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if resolved <= 0:
+            raise BinanceRequestMappingError("Resolved trailing activation price must be positive")
+        return format(resolved, "f")
+
+    @staticmethod
+    def _derive_stop_price(*, direction: str, reference_price: float, stop_ratio: float) -> str:
+        try:
+            reference = Decimal(str(reference_price))
+            ratio = Decimal(str(stop_ratio))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Protective stop price inputs are not valid decimals") from exc
+        if reference <= 0:
+            raise BinanceRequestMappingError("Protective stop requires a positive reference price")
+        if direction == "long":
+            if ratio <= 0 or ratio >= 1:
+                raise BinanceRequestMappingError("Long protective stop ratio must be between 0 and 1")
+        elif direction == "short":
+            if ratio <= 1:
+                raise BinanceRequestMappingError("Short protective stop ratio must be greater than 1")
+        else:
+            raise BinanceRequestMappingError("Protective stop direction must be long or short")
+        resolved = (reference * ratio).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if resolved <= 0:
+            raise BinanceRequestMappingError("Resolved protective stop price must be positive")
+        return format(resolved, "f")
 
     def _map_command_to_request(self, command: ExecutionCommand) -> PreparedAdapterRequest:
         if command.target == "entry_order":
@@ -647,7 +1610,6 @@ class BinancePerpAdapter(RealExchangeAdapter):
                     "symbol": "ETHUSDT",
                     "side": side,
                     "reduceOnly": "true",
-                    "closePosition": "true",
                     "type": "MARKET",
                     "newClientOrderId": command.idempotency_key,
                     "newOrderRespType": "RESULT",
@@ -670,7 +1632,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
                 body=command.payload.model_dump(mode="json"),
                 idempotency_key=command.idempotency_key,
             )
-        if command.target in {"advance_breakeven_stop", "advance_trailing_stop"}:
+        if command.target == "advance_breakeven_stop":
             side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
             return PreparedAdapterRequest(
                 method="POST",
@@ -679,6 +1641,22 @@ class BinancePerpAdapter(RealExchangeAdapter):
                     "symbol": "ETHUSDT",
                     "side": side,
                     "type": "STOP_MARKET",
+                    "workingType": "MARK_PRICE",
+                    "reduceOnly": "true",
+                    "newClientOrderId": command.idempotency_key,
+                },
+                body=command.payload.model_dump(mode="json"),
+                idempotency_key=command.idempotency_key,
+            )
+        if command.target == "advance_trailing_stop":
+            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
+            return PreparedAdapterRequest(
+                method="POST",
+                path="/fapi/v1/order",
+                params={
+                    "symbol": "ETHUSDT",
+                    "side": side,
+                    "type": "TRAILING_STOP_MARKET",
                     "workingType": "MARK_PRICE",
                     "reduceOnly": "true",
                     "newClientOrderId": command.idempotency_key,

@@ -76,18 +76,22 @@ class BinanceRequestSigner:
         *,
         env_getter: Callable[[str], str | None] | None = None,
         clock: Callable[[], int] | None = None,
+        opener_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._credentials = credentials
         self._env_getter = env_getter or os.environ.get
         self._clock = clock or self._utc_timestamp_ms
+        self._opener_factory = opener_factory or request.build_opener
+        self._timestamp_offset_ms = 0
+        self._offset_synced_at_ms: int | None = None
 
     def sign(self, prepared_request: PreparedRequestLike) -> SignedAdapterRequest:
-        params = {**prepared_request.params, **prepared_request.body}
+        params = dict(prepared_request.params)
         headers: dict[str, str] = {}
         if prepared_request.requires_auth:
             api_key = self._read_required_env(self._credentials.api_key_env)
             api_secret = self._read_required_env(self._credentials.api_secret_env)
-            params["timestamp"] = self._clock()
+            params["timestamp"] = self._resolve_timestamp_ms()
             params["recvWindow"] = self._credentials.recv_window_ms
             query_string = parse.urlencode(self._normalize_params(params), doseq=True)
             signature = hmac.new(api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -108,6 +112,40 @@ class BinanceRequestSigner:
         if not value:
             raise BinanceRequestConfigError(f"Missing required environment variable: {key}")
         return value
+
+    def refresh_timestamp_offset(self) -> None:
+        self._refresh_time_offset(self._clock())
+
+    def _resolve_timestamp_ms(self) -> int:
+        local_timestamp_ms = self._clock()
+        if self._should_refresh_time_offset(local_timestamp_ms):
+            self._refresh_time_offset(local_timestamp_ms)
+        return local_timestamp_ms + self._timestamp_offset_ms
+
+    def _should_refresh_time_offset(self, local_timestamp_ms: int) -> bool:
+        if self._offset_synced_at_ms is None:
+            return True
+        return abs(local_timestamp_ms - self._offset_synced_at_ms) >= 60_000
+
+    def _refresh_time_offset(self, local_timestamp_ms: int) -> None:
+        try:
+            opener = self._build_opener()
+            req = request.Request(f"{self._credentials.api_base_url.rstrip('/')}/fapi/v1/time", method="GET")
+            with opener.open(req, timeout=self._credentials.timeout_sec) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return
+        server_time = payload.get("serverTime") if isinstance(payload, dict) else None
+        if not isinstance(server_time, int):
+            return
+        self._timestamp_offset_ms = server_time - local_timestamp_ms
+        self._offset_synced_at_ms = local_timestamp_ms
+
+    def _build_opener(self):
+        proxy_url = self._credentials.proxy_url
+        if proxy_url:
+            return self._opener_factory(request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        return self._opener_factory()
 
     @staticmethod
     def _normalize_params(params: dict[str, Any]) -> dict[str, Any]:

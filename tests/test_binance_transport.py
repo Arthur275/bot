@@ -43,6 +43,23 @@ class FakeOpener:
         return self._response
 
 
+class QueueOpener:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.requests = []
+        self.timeouts = []
+
+    def open(self, req, timeout):
+        self.requests.append(req)
+        self.timeouts.append(timeout)
+        if not self._responses:
+            raise AssertionError("No queued response")
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class FakeHttpError(error.HTTPError):
     def __init__(self, *, code: int, body: str) -> None:
         super().__init__(url="https://fapi.binance.com/fapi/v1/order", code=code, msg="bad request", hdrs=None, fp=None)
@@ -57,7 +74,7 @@ def _credentials() -> AdapterCredentials:
         venue="binance_usdt_perp",
         api_key_env="BINANCE_API_KEY",
         api_secret_env="BINANCE_API_SECRET",
-        recv_window_ms=5000,
+        recv_window_ms=60000,
         timeout_sec=12.5,
         proxy_url="http://127.0.0.1:7897",
         api_base_url="https://fapi.binance.com",
@@ -69,6 +86,7 @@ def test_signer_adds_signature_headers_and_auth_params() -> None:
         _credentials(),
         env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
         clock=lambda: 1714132800000,
+        opener_factory=lambda *handlers: QueueOpener([TimeoutError("timed out")]),
     )
     prepared = PreparedAdapterRequest(
         method="POST",
@@ -81,9 +99,47 @@ def test_signer_adds_signature_headers_and_auth_params() -> None:
 
     assert signed.headers == {"X-MBX-APIKEY": "key123"}
     assert signed.params["timestamp"] == 1714132800000
-    assert signed.params["recvWindow"] == 5000
-    assert signed.params["signature"] == "6664b21c4e78a4f1524c7adfd684b3a2a3be07dcc736de57e3d2923d75abeda1"
+    assert signed.params["recvWindow"] == 60000
+    assert signed.params["signature"] == "03591f63d8ecbcbfb658816e15f476c961ac6953723c261353602d7ad3bafe4c"
     assert signed.url == "https://fapi.binance.com/fapi/v1/order"
+
+
+def test_signer_does_not_include_body_fields_in_signed_params() -> None:
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+        opener_factory=lambda *handlers: QueueOpener([TimeoutError("timed out")]),
+    )
+    prepared = PreparedAdapterRequest(
+        method="POST",
+        path="/fapi/v1/order",
+        params={"symbol": "ETHUSDT", "side": "BUY", "quantity": "0.048"},
+        body={"resolved_quantity": "0.048", "resolution_mode": "entry_quantity_from_size_pct"},
+        idempotency_key="abc",
+    )
+
+    signed = signer.sign(prepared)
+
+    assert signed.params["symbol"] == "ETHUSDT"
+    assert signed.params["side"] == "BUY"
+    assert signed.params["quantity"] == "0.048"
+    assert "resolved_quantity" not in signed.params
+    assert "resolution_mode" not in signed.params
+
+
+    opener = QueueOpener([TimeoutError("timed out")])
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+        opener_factory=lambda *handlers: opener,
+    )
+
+    signed = signer.sign(PreparedAdapterRequest(method="GET", path="/fapi/v2/positionRisk", params={"symbol": "ETHUSDT"}))
+
+    assert signed.params["timestamp"] == 1714132800000
+
 
 
 def test_signer_skips_signature_for_public_request() -> None:

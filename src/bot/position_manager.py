@@ -67,6 +67,16 @@ class PositionManager:
                 notes=list(guard.reason_codes),
             )
 
+        if requested_action in {"entry_long", "entry_short", "small_probe"} and needs_recovery_reconciliation:
+            return ExecutionPlan(
+                requested_action=requested_action,
+                effective_action="wait",
+                plan_reason="entry_blocked_until_reconciliation",
+                maintain_protective_stop=needs_protective_stop,
+                needs_reconciliation=True,
+                recovery_action="reconcile_before_reentry",
+            )
+
         if requested_action == "reduce" and not guard.allow_reduce:
             return ExecutionPlan(
                 requested_action=requested_action,
@@ -89,95 +99,30 @@ class PositionManager:
                 notes=list(guard.reason_codes),
             )
 
-        if requested_action in {"observe_only", "paper_only"}:
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="wait",
-                plan_reason="non_executable_observation_action",
-                maintain_protective_stop=needs_protective_stop,
-                needs_reconciliation=needs_recovery_reconciliation,
-                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
-                notes=[requested_action],
-            )
-
-        if requested_action == "small_probe":
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="small_probe",
-                plan_reason="probe_allowed_in_shadow_only",
-                place_entry_order=True,
-                maintain_protective_stop=True,
-                notes=["probe_action"],
-            )
-
-        if requested_action in {"entry_long", "entry_short"}:
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action=requested_action,
-                plan_reason="entry_allowed",
-                place_entry_order=True,
-                maintain_protective_stop=True,
-            )
-
-        if requested_action == "reduce":
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="reduce",
-                plan_reason="reduce_allowed",
-                place_reduce_order=True,
-                maintain_protective_stop=True,
-                advance_breakeven=breakeven_ready,
-                advance_trailing_stop=trailing_ready,
-                sync_recent_fills=recent_fill_sync_required,
-                needs_reconciliation=needs_recovery_reconciliation,
-                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
-            )
-
-        if requested_action == "exit":
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="exit",
-                plan_reason="exit_allowed",
-                place_exit_order=True,
-                maintain_protective_stop=True,
-                sync_recent_fills=recent_fill_sync_required,
-                needs_reconciliation=needs_recovery_reconciliation,
-                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
-            )
-
-        if needs_recovery_reconciliation:
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="wait",
-                plan_reason="recovery_reconciliation_required",
-                maintain_protective_stop=needs_protective_stop,
-                advance_breakeven=breakeven_ready and has_open_risk,
-                advance_trailing_stop=trailing_ready and has_open_risk,
-                sync_recent_fills=recent_fill_sync_required,
-                needs_reconciliation=True,
-                recovery_action="reconcile_runtime_state",
-            )
-
-        if has_open_risk and (breakeven_ready or trailing_ready or recent_fill_sync_required):
-            return ExecutionPlan(
-                requested_action=requested_action,
-                effective_action="wait",
-                plan_reason="risk_management_only",
-                maintain_protective_stop=needs_protective_stop,
-                advance_breakeven=breakeven_ready,
-                advance_trailing_stop=trailing_ready,
-                sync_recent_fills=recent_fill_sync_required,
-            )
-
+        effective_action = requested_action or "wait"
         return ExecutionPlan(
             requested_action=requested_action,
-            effective_action="wait",
-            plan_reason="wait_or_noop",
-            maintain_protective_stop=needs_protective_stop,
+            effective_action=effective_action,
+            plan_reason=self._resolve_passthrough_reason(effective_action),
+            place_entry_order=effective_action in {"entry_long", "entry_short", "small_probe"},
+            place_reduce_order=effective_action == "reduce",
+            place_exit_order=effective_action == "exit",
+            maintain_protective_stop=needs_protective_stop or effective_action in {"entry_long", "entry_short", "small_probe", "reduce", "exit"},
+            advance_breakeven=breakeven_ready and has_open_risk,
+            advance_trailing_stop=trailing_ready and has_open_risk,
+            sync_recent_fills=recent_fill_sync_required and (has_open_risk or effective_action in {"reduce", "exit"}),
+            needs_reconciliation=needs_recovery_reconciliation,
+            recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
         )
+
+    @staticmethod
+    def _resolve_passthrough_reason(effective_action: str) -> str:
+        return "quant_action_passthrough"
 
     @staticmethod
     def _has_open_risk(runtime_state: dict[str, Any], handoff: dict[str, Any] | None) -> bool:
         observed_size = float(runtime_state.get("observed_position_size_pct") or 0.0)
         handoff_size = float((handoff or {}).get("position_size_pct") or 0.0)
-        return observed_size > 0.0 or handoff_size > 0.0
+        observed_state = str(runtime_state.get("observed_position_state") or "")
+        handoff_state = str((handoff or {}).get("position_state") or "")
+        return observed_size > 0.0 or handoff_size > 0.0 or observed_state == "ENTERED" or handoff_state == "ENTERED"

@@ -27,9 +27,9 @@ class BotConfig(BaseModel):
     exchange_symbol: str = "ETHUSDT"
     exchange_api_base_url: str = "https://fapi.binance.com"
     adapter_client_order_prefix: str = "ethbot"
-    exchange_api_key_env: str = "BINANCE_API_KEY"
-    exchange_api_secret_env: str = "BINANCE_API_SECRET"
-    recv_window_ms: int = Field(default=5000, gt=0)
+    exchange_api_key_env: str = "BINANCE_TRADE_API_KEY"
+    exchange_api_secret_env: str = "BINANCE_TRADE_API_SECRET"
+    recv_window_ms: int = Field(default=60000, gt=0)
     timeframe: str = "15m"
     risk_check_timeframe: str = "5m"
     runtime_mode: RuntimeMode = RuntimeMode.SHADOW
