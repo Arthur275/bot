@@ -14,6 +14,7 @@ $pythonExe = Join-Path $workspaceRoot "quant_system_rebuild\.venv_win\Scripts\py
 $watchRoot = Join-Path $botRoot "runtime\reports\protective_stop_replace_watch"
 $controlRoot = Join-Path $env:USERPROFILE ".codex\memories\eth_trading_bot_watch"
 $pidPath = Join-Path $controlRoot "watch.pid"
+$autoReplaceLockPath = Join-Path $watchRoot "auto_replace.lock"
 $stdoutPath = Join-Path $watchRoot "watch_stdout.log"
 $stderrPath = Join-Path $watchRoot "watch_stderr.log"
 
@@ -71,6 +72,9 @@ if (@($existing).Count -gt 0) {
     Write-Output ("protective stop watcher: already running pid={0}" -f (@($existing)[0].Id))
     exit 0
 }
+
+Remove-Item -LiteralPath $autoReplaceLockPath -Force -ErrorAction SilentlyContinue
+Write-Output "protective stop watcher: fresh evaluation on start; stale in-flight action lock cleared"
 
 $env:PYTHONDONTWRITEBYTECODE = "1"
 $env:PYTHONPATH = "$botRoot\src"

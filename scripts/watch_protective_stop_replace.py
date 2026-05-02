@@ -89,6 +89,7 @@ def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: An
 
     state = WatchState()
     auto_state = AutoReplaceState()
+    print("[WATCHER STARTED] Re-evaluating from fresh exchange snapshot. No in-flight action will be resumed.")
     print("[WATCHING] Protective stop replace readiness")
     print(f"State path: {state_path}")
     print(f"Report root: {report_root}")

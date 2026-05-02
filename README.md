@@ -258,3 +258,37 @@ short:
 4. Windows service / supervisor 常驻
 
 越往后风险越高，必须单独做 review 和实盘前演练。
+
+## 高风险动作地基
+
+trailing / reduce / exit 不直接接入 watcher 自动执行。真实执行前必须先通过统一 `HighRiskGate`：
+
+- `handoff_id` 必须存在并且未执行过
+- `expires_at` 必须未过期
+- `runtime_mode=real` 时只能消费 `strict-live`
+- kill switch 文件存在时全部 blocked
+- 任一高风险动作 lock 存在时全部 blocked
+- `NetworkGuard` degraded / blocked 时全部 blocked
+- confirm 前必须重新拉 position / orders / account snapshot
+- 执行后必须 re-fetch verify
+- handoff schema 必须冻结，不接受自由 JSON
+
+trailing 到期规则：
+
+- trailing 规则过期但交易所仍有 active trailing stop：不替换，标记 `trailing_rule_expired`，等待新 handoff 或人工处理
+- trailing 不存在且无 fixed stop：只允许补 fixed stop
+- fixed stop 只能补到当前 ratchet stage 目标价
+- 如果存在 `last_known_protected_price` 且 ratchet 目标价更差，必须 blocked，不能自动降级保护水平
+
+reduce 后保护止损规则：
+
+- reduce 成功后必须重建保护止损数量
+- 流程为 `reduce verify -> cancel old stop -> verify removed -> place new stop with new position qty -> verify active -> state write`
+- reduce 和 protective stop replace 共用 high-risk lock，不能并行
+
+watcher 重启规则：
+
+- watcher 不恢复 `PREFLIGHT / CONFIRMING` 等内存状态
+- 启动后永远 fresh snapshot -> evaluate
+- stale auto replace lock 会在启动时清理
+- 发现已有 watcher 进程时拒绝双开
