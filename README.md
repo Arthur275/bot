@@ -1,254 +1,228 @@
-# ETH Trading Bot Framework
+# ETH Trading Bot
 
-独立交易机器人框架，服务于 `D:\quant_system_rebuild` 已经收口的 research / judgement 能力。
+ETH Trading Bot 是一个面向实盘执行的机器人壳层，负责消费 `quant_system_rebuild` 输出的 judgement / execution handoff，并把它转换为可审计、可降级、可恢复的交易执行流程。
 
-这个项目的目标不是重写策略，也不是复制 research pipeline，而是把当前量化仓已经稳定的判断契约，包装成一个可安全执行、可审计、可降级、可回放的交易机器人壳层。
+本仓库不重新发明策略，不生成 research bundle，也不把 sample-fallback 当成实时交易信号。策略判断、research readiness、execution handoff 语义由量化仓库负责；本仓库只处理执行边界、交易所适配、本地状态、审计日志、保护止损和故障降级。
 
-## 项目边界
+## 当前边界
 
-### 只做这些
-- 只做 **ETH**
-- 只做 **10x 永续**
-- **15m** 是唯一主决策周期
-- **5m** 只做持仓后的风险辅助、保护单健康检查、断连恢复后对账
-- 网络抖动、代理切换、端口漂移视为常态输入
-- 优先支持 **shadow mode / replay mode / strict-live consumption**，再进入真实执行
+当前硬边界：
 
-### 明确不做这些
-- 不在本项目里重写 `research bundle`、`feature matrix`、`policy engine`
-- 不把 `sample-fallback` 当实时交易信号
-- 不做多交易所泛化抽象
-- 不支持 BTC 主交易、山寨币扩展、跨周期多机器人
-- 不把执行异常反向改写成策略异常
+- 交易标的：`ETH`
+- 合约：Binance USDT perpetual，默认 `ETHUSDT`
+- 杠杆：`10x`
+- 主决策周期：`15m`
+- 风险辅助周期：`5m`
+- 默认运行模式：`shadow`
+- 真实执行只允许消费 `strict-live`
 
-## 与 `D:\quant_system_rebuild` 的分工
+明确不做：
 
-### 原仓继续负责
-- research bundle / readiness gate
-- live judgement
-- execution handoff contract
-- observation / comparison / review
-- scheduler 与 artifact 语义
+- 不支持多币种泛化
+- 不支持把 `sample-fallback` 输出直接用于实盘
+- 不在 bot 内复制量化策略逻辑
+- 不在网络异常时自行改变策略方向
+- 不在本地动态放宽止损或扩大风险
 
-### 新机器人项目负责
-- orchestration
-- exchange adapter
-- position / order state store
-- network guard / degrade guard
-- protective stop 管理
-- 审计日志
-- shadow / replay / real execution 切换
+## 仓库结构
 
-## 复用的核心入口
+```text
+src/bot/
+  config.py             # 运行配置与安全边界
+  engine_client.py      # 调用 quant_system_rebuild judgement / handoff
+  orchestrator.py       # shadow / simulated-real / real 编排
+  exchange_adapter.py   # Binance USDT perpetual 适配
+  binance_transport.py  # Binance REST 签名请求
+  position_manager.py   # 仓位、订单、保护止损计划
+  network_guard.py      # 网络/代理/数据源降级
+  state_store.py        # 本地状态持久化
+  audit_logger.py       # JSONL 审计日志与脱敏
+  execution_risk_gate.py
+  execution_summary.py
+  action_enums.py
 
-新机器人只消费现有稳定入口，不复制其内部逻辑：
+scripts/
+  run_shadow_preflight_cycle.py
+  run_shadow_live_cycle.py
+  run_manual_entry_cycle.py
+  preview_protective_stop_replace.py
+  adopt_protective_stop.py
+  watch_protective_stop_replace.py
+  start_protective_stop_watch_readonly.ps1
+  start_protective_stop_watch_readonly.cmd
 
-- `src/interfaces/live_judgement.py`
-  - `run_live_judgement(...)`
-- `src/interfaces/research_bundle.py`
-  - `ensure_research_bundle_ready(...)`
-- `src/interfaces/runner.py`
-  - `build_execution_handoff(...)`
-- `src/interfaces/scheduler.py`
-  - `run_scheduler_cycle(...)`
-- `src/interfaces/execution_tracking.py`
-  - observation / review 相关批次能力
+tests/
+  pytest regression tests
 
-其中最关键的是两层契约：
+runtime/
+  本地运行状态、审计日志、报告。默认不应作为源码提交。
+```
 
-1. **judgement payload**
-   - 给出 `status / mode / research_bundle / decision / diagnostic / issues`
-2. **execution handoff**
-   - 给出 `action / direction / position_state / risk_filter_status / initial_stop_loss / breakeven_trigger / trailing_rule / tp_ladder / invalidate_conditions / reduce_conditions`
+## 安装
+
+建议和量化仓库放在同一父目录：
+
+```text
+D:\开发\eth_trading_bot
+D:\开发\quant_system_rebuild
+```
+
+安装依赖：
+
+```powershell
+cd D:\开发\eth_trading_bot
+D:\开发\quant_system_rebuild\.venv_win\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+也可以用当前 Python：
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+## 环境变量
+
+真实交易执行使用交易专用 key：
+
+```powershell
+BINANCE_TRADE_API_KEY
+BINANCE_TRADE_API_SECRET
+```
+
+不要把数据查询 key 和交易执行 key 混用。README 只记录环境变量名，不应记录任何真实 key 明文。
+
+常用可选项：
+
+```powershell
+$env:PYTHONPATH="D:\开发\eth_trading_bot\src"
+```
+
+如果量化仓库没有安装为 editable package，也需要让 bot 能找到量化源码：
+
+```powershell
+$env:PYTHONPATH="D:\开发\eth_trading_bot\src;D:\开发\quant_system_rebuild\src"
+```
 
 ## 运行模式
 
-### 1. strict-live
-- 读取真实网络和实时快照
-- 只有该模式下的判断，才有资格进入实时交易语境
-- 网络异常、代理失败、数据源异常必须进入诊断和降级分支
+### shadow
 
-### 2. sample-fallback
-- 只用于工程链路回放、shadow 验证、comparison、报告联调
-- 它依赖本地样本和已有 research alias
-- 它不是假数据生成器，但也不是实时市场
+只生成执行计划、状态迁移和审计日志，不调用真实下单接口。用于验证 judgement 到 execution plan 的映射。
 
-### 3. shadow mode
-- 机器人消费判断，但不真实下单
-- 只生成 execution plan、状态迁移和审计日志
-- 用来验证策略动作和执行动作映射是否稳定
+### simulated-real
 
-## 决策与执行分层
+更接近真实执行路径，但仍受测试/模拟边界约束。用于验证风控门、确认 token、状态写入、审计日志和异常分支。
 
-### 策略层动作
-由原仓输出，机器人不得修改语义。
+### real
 
-当前应以 `PositionAction` 的真实契约值为准：
-- `entry_long`
-- `entry_short`
-- `wait`
-- `reduce`
-- `exit`
-- `observe_only`
-- `paper_only`
-- `small_probe`
+真实执行模式。只允许 `engine_mode=strict-live`，并受以下边界保护：
 
-其中首版真实执行优先围绕：
-- `entry_long`
-- `entry_short`
-- `wait`
-- `reduce`
-- `exit`
+- 必须使用 `BINANCE_TRADE_API_KEY / BINANCE_TRADE_API_SECRET`
+- 默认需要人工确认 token 才允许主动 entry
+- 网络、research readiness、runtime guard 异常时禁止新开仓
+- 入场后优先维护交易所侧保护止损
 
-对 `observe_only / paper_only / small_probe`，必须显式建模处理规则，不能默默当成普通开仓动作。
+## 常用命令
 
-### 执行层状态
-由机器人本地维护：
-- `idle`
-- `entry_pending`
-- `position_open`
-- `reduce_pending`
-- `exit_pending`
-- `degraded`
-- `blocked`
+运行测试：
 
-原则：
-- 策略说什么，执行层只负责安全消费
-- 执行失败不等于策略失效
-- 网络抖动不等于市场观点切换
+```powershell
+cd D:\开发\eth_trading_bot
+D:\开发\quant_system_rebuild\.venv_win\Scripts\python.exe -m pytest -q
+```
 
-## 15m / 5m 责任边界
+只跑保护止损 watcher 相关测试：
 
-### 15m 主循环
-每轮只做一次主判断：
-1. 拉取 `strict-live` judgement
-2. 校验 research readiness
-3. 构造 execution handoff
-4. 结合真实仓位与挂单状态生成 execution plan
-5. 写入 audit log
+```powershell
+D:\开发\quant_system_rebuild\.venv_win\Scripts\python.exe -m pytest tests\test_watch_protective_stop_replace_script.py tests\test_preview_protective_stop_replace_script.py -q
+```
 
-### 5m 风险辅助循环
-只有以下条件满足时才运行：
-- 已有持仓
-- 已有挂单待确认
-- 上轮处于 `degraded`
-- 网络恢复后需要重新对账
+启动只读保护止损 watcher：
 
-5m 循环只允许：
-- 检查 protective stop 是否存在
-- 触发 breakeven 推进
-- 触发 trailing 收紧
-- 触发 reduce 条件后的减仓动作
-- 校验本地状态与交易所状态一致性
+```powershell
+D:\开发\eth_trading_bot\scripts\start_protective_stop_watch_readonly.cmd
+```
 
-5m 循环不允许：
-- 生成新的独立开仓观点
-- 脱离 15m judgement 自行改方向
-- 因临时抖动而放宽止损
+测试 watcher 一轮后退出：
 
-## 止盈止损原则
+```powershell
+D:\开发\eth_trading_bot\scripts\start_protective_stop_watch_readonly.cmd -MaxIterations 1
+```
 
-机器人不重新发明一套 exit 语义，而是直接围绕 handoff 字段执行：
-- `initial_stop_loss`
-- `breakeven_trigger`
-- `trailing_rule`
-- `tp_ladder`
-- `invalidate_conditions`
-- `reduce_conditions`
+只读 watcher 明确不会调用撤单/下单端点。看到下面输出代表处于只读监控：
 
-执行原则：
-1. 入场后优先落交易所侧硬保护单
-2. 本地动态管理只做收紧，不做放宽
-3. 网络不稳时，不扩大风险暴露
-4. 网络恢复后，先对账，再继续动作
+```text
+Mode: read-only. No cancel/place endpoint is called.
+```
 
-## 弱网与降级
+## 保护止损流程
 
-网络不稳不是例外，而是正式状态机输入。
+当前第一版目标是：
 
-### 典型输入
-- 代理不可用
-- Clash 节点切换
-- 端口漂移
-- 单次请求超时
-- 连续 transport error
-- data source 缺字段
-- pipeline 自身 blocked
+```text
+原始保护止损 -> 达标后自动推进到保本/小幅锁盈
+```
 
-### 推荐响应
-- `transport`：有限重试，连续失败后进入 `degraded`，禁止新 entry
-- `data_source`：保持仓位保护，不推进新仓位扩张
-- `pipeline`：直接 `blocked`
-- research bundle 非 ready：禁止新 entry，仅允许风险收敛动作
+核心原则：
 
-### 降级底线
-- 不加仓
-- 不取消 protective stop
-- 不把网络问题写成策略反转
-- 恢复后必须先同步 position / open orders / recent fills
+- 所有替换动作必须先 preview
+- 真实替换必须走 cancel verify -> place verify -> state write
+- 本地只允许收紧保护，不允许放宽止损
+- 如果交易所已有多张冲突保护单，停止自动处理并要求人工确认
+- 保护止损丢失、state 不一致、网络异常都必须进入审计日志
 
-## 计划中的模块
+当前启动脚本默认是只读 watcher，用于观察是否达到替换条件，不会撤单或下单。
 
-- `src/bot/config.py`
-- `src/bot/engine_client.py`
-- `src/bot/orchestrator.py`
-- `src/bot/network_guard.py`
-- `src/bot/state_store.py`
-- `src/bot/position_manager.py`
-- `src/bot/exchange_adapter.py`
-- `src/bot/audit_logger.py`
+## 与量化仓库的分工
 
-详见 `docs/system_design.md`。
+`quant_system_rebuild` 负责：
 
-## 推荐推进顺序
+- strict-live / sample-fallback judgement
+- research bundle readiness
+- feature matrix
+- policy decision
+- execution handoff
+- scheduler / observation / comparison
 
-### Phase A
-- 配置层
-- engine client
-- state store
-- audit logger
+`eth_trading_bot` 负责：
 
-### Phase B
-- shadow mode
-- decision → execution plan 映射
-- replay / review 验证
+- 消费 judgement / handoff
+- 映射执行计划
+- 维护本地 state
+- 审计执行链路
+- Binance adapter
+- 保护止损维护
+- 网络和 runtime 降级
 
-### Phase C
-- 最小 exchange adapter
-- entry / stop / reduce / exit
-- 幂等下单与状态同步
+## 安全约束
 
-### Phase D
-- 5m 风险辅助循环
-- breakeven / trailing / reduce 管理
-- 断连恢复后的重新对账
+实盘相关改动必须遵守：
 
-### Phase E
-- 代码审查
-- 弱网演练
-- shadow 稳定性复核
-- 实盘前收口
-
-## 文档
-
-- `docs/system_design.md`：系统设计、状态机、模块边界
-- `docs/code_review_checklist.md`：开发与代码审查清单
+- 新开仓只能来自 strict-live judgement
+- sample-fallback 只能用于回放、smoke、shadow、报告链路
+- 网络异常时禁止扩大风险
+- 执行失败不代表策略失败，必须分开记录
+- 本地 state 与交易所状态冲突时，优先停止自动动作并做 reconcile
+- 日志必须脱敏，不能写入真实 API secret
 
 ## 当前状态
 
-当前仓库已经完成 shadow-first 核心框架首版：
-- `config.py`
-- `engine_client.py`
-- `network_guard.py`
-- `state_store.py`
-- `position_manager.py`
-- `exchange_adapter.py`
-- `audit_logger.py`
-- `orchestrator.py`
-- 对应单元测试
+仓库已经具备：
 
-当前仍未完成：
-- 真实交易所 adapter 对接
-- 幂等下单与真实仓位/挂单同步
-- 5m 风险辅助循环的真实保护单推进
-- 与 `quant_system_rebuild` observation/review 的实盘级联调
+- bot config / state / audit / network guard
+- Binance transport 和 exchange adapter
+- shadow / simulated-real / real 边界
+- manual entry confirmation token
+- 保护止损 preview / adopt / watch 脚本
+- 只读 watcher Windows 启动脚本
+- 对应 pytest 覆盖
+
+仍建议分阶段推进：
+
+1. 多阶段锁盈
+2. 保护止损丢失时自动补单
+3. trailing stop 接管
+4. reduce / exit 自动执行
+5. supervisor 常驻和异常通知
+
+越往后风险越高，必须单独做 review 和实盘前演练。
