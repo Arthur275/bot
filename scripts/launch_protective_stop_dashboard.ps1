@@ -1,7 +1,9 @@
 param(
     [switch]$AllowMissingRepair,
     [switch]$OpenReportFolder,
-    [switch]$Stop
+    [switch]$Stop,
+    [switch]$Loop,
+    [int]$EverySec = 60
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +16,8 @@ $statePath = Join-Path $botRoot "runtime\shared_state\bot_state.json"
 $stdoutPath = Join-Path $watchRoot "watch_stdout.log"
 $stderrPath = Join-Path $watchRoot "watch_stderr.log"
 $latestPreview = Join-Path $replaceRoot "latest_preview.json"
+$pythonExe = Join-Path (Split-Path -Parent $botRoot) "quant_system_rebuild\.venv_win\Scripts\python.exe"
+$previewScript = Join-Path $botRoot "scripts\preview_protective_stop_replace.py"
 
 function Write-Section([string]$Title) {
     Write-Host ""
@@ -43,6 +47,20 @@ function Show-Status {
     } else {
         Write-Host "Status: STOPPED"
     }
+}
+
+function Refresh-Preview {
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        Write-Host ("Preview skipped: python not found: {0}" -f $pythonExe)
+        return
+    }
+    $env:PYTHONDONTWRITEBYTECODE = "1"
+    $env:PYTHONPATH = (Join-Path $botRoot "src") + ";" + $botRoot
+    & $pythonExe $previewScript `
+        --state-path $statePath `
+        --report-root $replaceRoot `
+        --proxy-url "http://127.0.0.1:7897" `
+        --json | Out-Null
 }
 
 function Show-ReadableSnapshot {
@@ -114,9 +132,22 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Protective stop watcher is already running."
 }
 
-Show-Status
-Show-ReadableSnapshot
-Show-Paths
+do {
+    if ($Loop) {
+        Clear-Host
+    }
+    Write-Host ("Updated at: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
+    Refresh-Preview
+    Show-Status
+    Show-ReadableSnapshot
+    Show-Paths
+
+    if ($Loop) {
+        Write-Host ""
+        Write-Host ("Auto refresh: every {0} seconds. Press Ctrl+C to close this display window only; background watcher keeps running." -f $EverySec)
+        Start-Sleep -Seconds $EverySec
+    }
+} while ($Loop)
 
 if ($OpenReportFolder) {
     explorer $watchRoot
