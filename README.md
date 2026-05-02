@@ -292,3 +292,32 @@ watcher 重启规则：
 - 启动后永远 fresh snapshot -> evaluate
 - stale auto replace lock 会在启动时清理
 - 发现已有 watcher 进程时拒绝双开
+### High-risk preview script
+
+`scripts/preview_high_risk_handoff.py` is read-only. It evaluates a trailing / reduce / exit handoff against:
+
+- frozen `version=1` handoff schema
+- `handoff_id`, `generated_at`, `expires_at`
+- `runtime_mode=real` and `engine_mode=strict-live`
+- kill switch, in-flight action lock, and `NetworkGuard`
+- live exchange position snapshot
+- a single live exchange protective algo stop from `openAlgoOrders`
+- action-specific checks for trailing and reduce
+
+Example:
+
+```powershell
+cd D:\开发\eth_trading_bot
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='D:\开发\eth_trading_bot\src'
+
+D:\开发\quant_system_rebuild\.venv_win\Scripts\python.exe scripts\preview_high_risk_handoff.py `
+  --handoff-file D:\path\to\high_risk_handoff.json `
+  --state-path D:\开发\eth_trading_bot\runtime\shared_state\bot_state.json `
+  --report-root D:\开发\eth_trading_bot\runtime\reports\high_risk_handoff_preview `
+  --proxy-url http://127.0.0.1:7897
+```
+
+Reports are written to `runtime/reports/high_risk_handoff_preview/latest_preview.json`.
+
+Important: preview output never enables real trailing / reduce / exit execution. It only states whether the handoff passes the gate and what the expected post-action state would be.
