@@ -19,8 +19,40 @@ $stdoutPath = Join-Path $watchRoot "watch_stdout.log"
 $stderrPath = Join-Path $watchRoot "watch_stderr.log"
 
 function Get-WatchProcess {
+    param(
+        [switch]$PrimaryOnly
+    )
     $processes = @()
-    if (Test-Path -LiteralPath $pidPath) {
+    if ($PrimaryOnly -and (Test-Path -LiteralPath $pidPath)) {
+        $rawPid = (Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $processId = 0
+        if ([int]::TryParse([string]$rawPid, [ref]$processId)) {
+            $pidProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($null -ne $pidProcess) {
+                return @($pidProcess)
+            }
+        }
+    }
+    $escapedScript = "*watch_protective_stop_replace.py*"
+    $cmdMatches = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -like $escapedScript -and $_.CommandLine -like "*$botRoot*"
+        }
+    )
+    if ($PrimaryOnly -and @($cmdMatches).Count -gt 0) {
+        $primary = @($cmdMatches | Where-Object { $_.ExecutablePath -ne $pythonExe } | Sort-Object ProcessId | Select-Object -First 1)
+        if (@($primary).Count -eq 0) {
+            $primary = @($cmdMatches | Sort-Object ProcessId -Descending | Select-Object -First 1)
+        }
+        $cmdMatches = $primary
+    }
+    foreach ($match in @($cmdMatches)) {
+        $proc = Get-Process -Id $match.ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $proc) {
+            $processes += $proc
+        }
+    }
+    if ((@($processes).Count -eq 0 -or -not $PrimaryOnly) -and (Test-Path -LiteralPath $pidPath)) {
         $rawPid = (Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1)
         $processId = 0
         if ([int]::TryParse([string]$rawPid, [ref]$processId)) {
@@ -30,15 +62,6 @@ function Get-WatchProcess {
             }
         }
     }
-    $escapedScript = "*watch_protective_stop_replace.py*"
-    $cmdMatches = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like $escapedScript -and $_.CommandLine -like "*$botRoot*" }
-    foreach ($match in $cmdMatches) {
-        $proc = Get-Process -Id $match.ProcessId -ErrorAction SilentlyContinue
-        if ($null -ne $proc) {
-            $processes += $proc
-        }
-    }
     return @($processes | Sort-Object Id -Unique)
 }
 
@@ -46,7 +69,7 @@ New-Item -ItemType Directory -Force -Path $watchRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $controlRoot | Out-Null
 
 if ($Action -eq "status") {
-    $proc = Get-WatchProcess
+    $proc = Get-WatchProcess -PrimaryOnly
     if (@($proc).Count -eq 0) {
         Write-Output "protective stop watcher: stopped"
         exit 1
