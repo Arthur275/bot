@@ -157,21 +157,38 @@ Mode: read-only. No cancel/place endpoint is called.
 
 ## 保护止损流程
 
-当前第一版目标是：
+合并版第一版目标：
 
 ```text
-原始保护止损 -> 达标后自动推进到保本/小幅锁盈
+原始保护止损 -> 保本/小幅锁盈 -> 多阶段锁盈 -> 止损丢失补单
 ```
 
-核心原则：
+当前内置 ratchet 阶段：
 
-- 所有替换动作必须先 preview
-- 真实替换必须走 cancel verify -> place verify -> state write
-- 本地只允许收紧保护，不允许放宽止损
-- 如果交易所已有多张冲突保护单，停止自动处理并要求人工确认
-- 保护止损丢失、state 不一致、网络异常都必须进入审计日志
+```text
+long:
++0.50% mark buffer -> stop = entry +0.30%
++0.90% mark buffer -> stop = entry +0.60%
++1.30% mark buffer -> stop = entry +0.90%
 
-当前启动脚本默认是只读 watcher，用于观察是否达到替换条件，不会撤单或下单。
+short:
+-0.50% mark buffer -> stop = entry -0.30%
+-0.90% mark buffer -> stop = entry -0.60%
+-1.30% mark buffer -> stop = entry -0.90%
+```
+
+硬规则：
+
+- 多阶段锁盈只进不退，mark 回撤不会下移 stop
+- stage 状态写入 `metadata.protective_stop.lock_stage`
+- 理论锁盈价写入 `metadata.protective_stop.lock_target_price`
+- 目标价计算使用交易所 position snapshot 的 `entry_price`
+- 正常替换走 `cancel -> verify removed -> place -> verify active -> state write`
+- 保护止损丢失补单走 `place -> verify active -> state write`，不执行 cancel
+- 交易所有多张保护单时停止自动处理并要求人工确认
+- 无法确认 entry / direction / quantity / snapshot freshness 时 blocked
+
+只读 watcher 用于观察是否达到下一阶段或是否需要缺失补单，不会撤单或下单。显式开启自动替换时仍需要 `--auto-confirm-replace --accept-gap-risk`，缺失补单还需要 `--allow-missing-repair`。
 
 ## 与量化仓库的分工
 
@@ -213,16 +230,17 @@ Mode: read-only. No cancel/place endpoint is called.
 - Binance transport 和 exchange adapter
 - shadow / simulated-real / real 边界
 - manual entry confirmation token
-- 保护止损 preview / adopt / watch 脚本
+- 保护止损 adopt / preview / watch 脚本
+- ratchet 多阶段锁盈
+- 保护止损丢失 place-only 补单
 - 只读 watcher Windows 启动脚本
 - 对应 pytest 覆盖
 
-仍建议分阶段推进：
+仍不包含：
 
-1. 多阶段锁盈
-2. 保护止损丢失时自动补单
-3. trailing stop 接管
-4. reduce / exit 自动执行
-5. supervisor 常驻和异常通知
+1. trailing stop 接管
+2. reduce / exit 自动执行
+3. 自动开仓
+4. Windows service / supervisor 常驻
 
 越往后风险越高，必须单独做 review 和实盘前演练。
