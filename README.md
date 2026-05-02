@@ -143,6 +143,20 @@ D:\开发\quant_system_rebuild\.venv_win\Scripts\python.exe -m pytest tests\test
 D:\开发\eth_trading_bot\scripts\start_protective_stop_watch_readonly.cmd
 ```
 
+后台管理 watcher：
+
+```powershell
+D:\开发\eth_trading_bot\scripts\manage_protective_stop_watch.cmd start
+D:\开发\eth_trading_bot\scripts\manage_protective_stop_watch.cmd status
+D:\开发\eth_trading_bot\scripts\manage_protective_stop_watch.cmd stop
+```
+
+允许保护止损丢失补单的后台监控：
+
+```powershell
+D:\开发\eth_trading_bot\scripts\manage_protective_stop_watch.cmd start -AllowMissingRepair
+```
+
 测试 watcher 一轮后退出：
 
 ```powershell
