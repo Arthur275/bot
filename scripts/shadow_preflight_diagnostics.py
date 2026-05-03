@@ -12,6 +12,8 @@ HANDOFF_BASE_FIELDS = (
     "execution_warnings",
     "position_size_pct",
     "executable_size_pct",
+    "sizing_tier",
+    "sizing_bias",
     "initial_stop_loss",
     "stop_distance_pct",
     "estimated_cost_pct",

@@ -173,6 +173,8 @@ def test_shadow_preflight_script_skips_preflight_when_shadow_cycle_has_no_comman
         "'execution_block_reason': 'not_entry_action',"
         "'position_size_pct': 0.0,"
         "'executable_size_pct': 0.0,"
+        "'sizing_tier': 'none',"
+        "'sizing_bias': 'none',"
         "'initial_stop_loss': 0.9809,"
         "'stop_distance_pct': 0.0191,"
         "'research_gate_status': 'open',"
@@ -204,6 +206,8 @@ def test_shadow_preflight_script_skips_preflight_when_shadow_cycle_has_no_comman
     assert payload["judgement"]["diagnostic_status"] == "success"
     assert payload["judgement"]["diagnostic_source"] == "coingecko"
     assert payload["handoff"]["execution_block_reason"] == "not_entry_action"
+    assert payload["handoff"]["sizing_tier"] == "none"
+    assert payload["handoff"]["sizing_bias"] == "none"
     assert payload["handoff"]["execution_layer_reasoning"] == "waiting_for_trigger"
     assert payload["handoff"]["trigger_ready"] is False
     assert payload["handoff"]["breakout_support"] is False
@@ -224,6 +228,8 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
         "'execution_allowed': True,"
         "'position_size_pct': 0.2,"
         "'executable_size_pct': 0.02,"
+        "'sizing_tier': 'probe',"
+        "'sizing_bias': 'conservative',"
         "'max_account_risk_pct_per_trade': 0.01,"
         "'initial_stop_loss': 1.018,"
         "'stop_distance_pct': 0.018"
@@ -247,6 +253,8 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
     assert payload["requested_action"] == "small_probe"
     assert payload["effective_action"] == "small_probe"
     assert payload["execution_plan"]["executable_size_pct"] == 0.909091
+    assert payload["handoff"]["sizing_tier"] == "probe"
+    assert payload["handoff"]["sizing_bias"] == "conservative"
     assert "fixed_margin_budget_sizing" in payload["execution_plan"]["notes"]
     assert calls == [["entry_order", "maintain_protective_stop"]]
     assert payload["command_targets"] == ["entry_order", "maintain_protective_stop"]
