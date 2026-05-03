@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime
 
 from bot.config import BotConfig
@@ -16,6 +17,17 @@ class FakeHandoff:
     def model_dump(self, *, mode: str) -> dict:
         assert mode == "json"
         return dict(self._payload)
+
+
+def test_engine_client_requires_injected_engine_functions(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="必须注入"):
+        EngineClient(
+            BotConfig(
+                state_store_path=tmp_path / "state.json",
+                audit_log_path=tmp_path / "audit.jsonl",
+                artifacts_root=tmp_path / "runtime",
+            )
+        )
 
 
 def test_engine_client_returns_handoff_when_judgement_is_ok(tmp_path) -> None:
@@ -79,7 +91,7 @@ def test_engine_client_skips_handoff_when_judgement_is_blocked(tmp_path) -> None
     assert result.judgement["status"] == "blocked"
 
 
-def test_engine_client_fetch_risk_cycle_reuses_current_position_state(tmp_path) -> None:
+def test_engine_client_fetch_cycle_reuses_current_position_state(tmp_path) -> None:
     observed_calls: dict = {}
 
     def fake_run_live_judgement(**kwargs):
@@ -101,7 +113,7 @@ def test_engine_client_fetch_risk_cycle_reuses_current_position_state(tmp_path) 
         build_execution_handoff_fn=lambda envelope: envelope,
         decision_envelope_factory=lambda payload: payload,
     )
-    client.fetch_risk_cycle(
+    client.fetch_cycle(
         current_state="ENTERED",
         current_position_size_pct=0.3,
         current_position_direction="long",

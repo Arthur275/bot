@@ -34,6 +34,13 @@ class FakeTransport:
         self.requests.append(signed_request)
         if self._exc is not None:
             raise self._exc
+        if signed_request.path == "/fapi/v1/openAlgoOrders":
+            if self._responses and self._looks_like_open_algo_response(self._responses[0]):
+                response = self._responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                return response
+            return TransportResponse(http_status=200, payload=[])
         if self._responses:
             response = self._responses.pop(0)
             if isinstance(response, Exception):
@@ -41,6 +48,15 @@ class FakeTransport:
             return response
         assert self._response is not None
         return self._response
+
+    @staticmethod
+    def _looks_like_open_algo_response(response) -> bool:
+        if isinstance(response, Exception):
+            return True
+        payload = getattr(response, "payload", None)
+        if not isinstance(payload, list):
+            return False
+        return any(isinstance(item, dict) and ("algoId" in item or "algoStatus" in item or "clientAlgoId" in item) for item in payload)
 
 
 def _credentials() -> AdapterCredentials:
@@ -150,13 +166,14 @@ def test_exchange_adapter_uses_typed_entry_payload() -> None:
             effective_action="entry_long",
             plan_reason="quant_action_passthrough",
             place_entry_order=True,
+            executable_size_pct=0.05,
         ),
         handoff={"initial_stop_loss": 0.97, "position_size_pct": 0.15},
     )
     assert isinstance(commands[0].payload, EntryOrderPayload)
     assert commands[0].reason == "effective_action:entry_long"
     assert commands[0].payload.initial_stop_loss == 0.97
-    assert commands[0].payload.position_size_pct == 0.15
+    assert commands[0].payload.position_size_pct == 0.05
 
 
 def test_exchange_adapter_uses_typed_exit_payload() -> None:
@@ -245,18 +262,10 @@ def test_exchange_adapter_treats_invalid_runtime_snapshot_as_unavailable() -> No
 
 
 
-def test_real_capable_exchange_adapter_reports_runtime_snapshot_unavailable() -> None:
+def test_real_capable_exchange_adapter_requires_runtime_snapshot_override() -> None:
     adapter = RealExchangeAdapter(_credentials())
-    result = adapter.assess_reconciliation(
-        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
-        expected_position_state="ENTERED",
-        expected_direction="long",
-        expected_size_pct=0.3,
-    )
-    assert result.in_sync is False
-    assert result.needs_position_sync is True
-    assert result.needs_order_sync is False
-    assert result.reason_codes == ["runtime_snapshot_unavailable"]
+    with pytest.raises(NotImplementedError):
+        adapter.fetch_runtime_snapshot()
 
 
 def test_exchange_adapter_detects_reconciliation_gaps() -> None:
@@ -358,6 +367,32 @@ def test_exchange_adapter_uses_current_position_direction_in_idempotency_key() -
     assert key == "reduce_order:2026-04-26T12:17:30:reduce:long"
 
 
+def test_binance_entry_side_uses_direction_for_small_probe() -> None:
+    command = ExchangeAdapter().build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="small_probe",
+            effective_action="small_probe",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+            executable_size_pct=0.012821,
+        ),
+        handoff={
+            "generated_at": "2026-05-02T00:36:58",
+            "action": "small_probe",
+            "direction": "long",
+            "initial_stop_loss": 0.9844,
+            "position_size_pct": 0.1,
+            "executable_size_pct": 0.012821,
+        },
+    )[0]
+
+    request = BinancePerpAdapter(_credentials())._map_command_to_request(command)
+
+    assert isinstance(command.payload, EntryOrderPayload)
+    assert command.payload.direction == "long"
+    assert request.params["side"] == "BUY"
+
+
 
 def test_exchange_adapter_prefers_current_position_direction_over_neutral_direction() -> None:
     commands = ExchangeAdapter().build_commands(
@@ -391,7 +426,37 @@ def test_exchange_adapter_prefers_current_position_direction_over_neutral_direct
 
 
 def test_real_exchange_adapter_executes_simulated_real_without_dispatch() -> None:
-    transport = FakeTransport(response=TransportResponse(http_status=200, payload={"orderId": 1}))
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3120.5",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "3120.5"}),
+        ]
+    )
     signer = BinanceRequestSigner(
         _credentials(),
         env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
@@ -419,8 +484,15 @@ def test_real_exchange_adapter_executes_simulated_real_without_dispatch() -> Non
     assert results[0].simulated is True
     assert results[0].details["venue"] == "binance_usdt_perp"
     assert results[0].details["prepared_request"]["path"] == "/fapi/v1/order"
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
     assert results[0].details["signed_request"]["headers"] == {"X-MBX-APIKEY": "key123"}
-    assert transport.requests == []
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v2/positionRisk",
+        "/fapi/v1/openOrders",
+        "/fapi/v2/account",
+        "/fapi/v1/exchangeInfo",
+        "/fapi/v1/premiumIndex",
+    ]
 
 
 def test_real_exchange_adapter_preflight_entry_order_resolves_request_without_dispatch() -> None:
@@ -499,6 +571,166 @@ def test_real_exchange_adapter_preflight_entry_order_resolves_request_without_di
     ]
 
 
+def test_real_exchange_adapter_preflight_entry_order_uses_executable_size_contract() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3120.5",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "3120.5"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+            executable_size_pct=0.05,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:30:30",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.15,
+            "execution_warnings": ["route_c_missing"],
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].status == "preflight_ready"
+    assert results[0].accepted is True
+    assert results[0].simulated is True
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.016"
+    client_order_id = results[0].details["prepared_request"]["params"]["newClientOrderId"]
+    assert client_order_id.startswith("ethbot-eo-")
+    assert len(client_order_id) <= 36
+    assert results[0].details["prepared_request"]["idempotency_key"] == "entry_order:2026-04-26T13:30:30:entry_long:long"
+    assert results[0].details["prepared_request"]["body"]["resolved_account_equity"] == "100.0"
+    assert results[0].details["prepared_request"]["body"]["resolved_leverage"] == 10
+    assert results[0].details["payload"]["execution_warnings"] == ["route_c_missing"]
+    assert results[0].details["signed_request"]["params"]["quantity"] == "0.016"
+    assert results[0].details["signed_request"]["params"]["newClientOrderId"] == client_order_id
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v2/positionRisk",
+        "/fapi/v1/openOrders",
+        "/fapi/v2/account",
+        "/fapi/v1/exchangeInfo",
+        "/fapi/v1/premiumIndex",
+    ]
+
+
+def test_real_exchange_adapter_preflight_refreshes_timestamp_offset_on_recv_window_error() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3120.5",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            BinanceTransportError(
+                kind="http_error",
+                message="HTTP 400",
+                http_status=400,
+                payload={"code": -1021, "msg": "Timestamp ahead of server time"},
+            ),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "3120.5"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    refreshed = {"count": 0}
+
+    def refresh() -> None:
+        refreshed["count"] += 1
+
+    signer.refresh_timestamp_offset = refresh  # type: ignore[method-assign]
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:31:00",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.15,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert refreshed["count"] == 1
+    assert results[0].status == "preflight_ready"
+    assert results[0].accepted is True
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v2/positionRisk",
+        "/fapi/v1/openOrders",
+        "/fapi/v2/account",
+        "/fapi/v2/account",
+        "/fapi/v1/exchangeInfo",
+        "/fapi/v1/premiumIndex",
+    ]
+
+
 def test_real_exchange_adapter_executes_real_entry_order() -> None:
     transport = FakeTransport(
         responses=[
@@ -564,6 +796,42 @@ def test_real_exchange_adapter_executes_real_entry_order() -> None:
     assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/exchangeInfo", "/fapi/v1/premiumIndex", "/fapi/v1/order"]
 
 
+def test_real_exchange_adapter_blocks_real_entry_order_when_route_c_missing_warning() -> None:
+    transport = FakeTransport(response=TransportResponse(http_status=200, payload={"orderId": 12345}))
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:00:15",
+            "action": "entry_long",
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+            "position_size_pct": 0.15,
+            "execution_warnings": ["route_c_missing"],
+        },
+    )
+
+    results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
+
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].simulated is False
+    assert results[0].reason == "unsafe_request_mapping"
+    assert results[0].details["reason_code"] == "route_c_missing"
+    assert "Route C/orderbook" in results[0].details["error"]
+    assert transport.requests == []
+
+
 def test_real_exchange_adapter_executes_real_exit_order_from_live_position() -> None:
     transport = FakeTransport(
         responses=[
@@ -615,7 +883,7 @@ def test_real_exchange_adapter_executes_real_exit_order_from_live_position() -> 
     assert "closePosition" not in results[0].details["prepared_request"]["params"]
     assert results[0].details["prepared_request"]["body"]["resolved_position_amt"] == "0.048"
     assert results[0].details["prepared_request"]["body"]["resolution_mode"] == "exit_quantity_from_live_position"
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/order"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders", "/fapi/v1/order"]
 
 
 
@@ -714,7 +982,7 @@ def test_real_exchange_adapter_blocks_reduce_order_without_explicit_quantity_con
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "explicit reduce quantity contract" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_real_exchange_adapter_blocks_exit_order_without_live_position() -> None:
@@ -722,6 +990,7 @@ def test_real_exchange_adapter_blocks_exit_order_without_live_position() -> None
         responses=[
             TransportResponse(http_status=200, payload=[{"positionAmt": "0", "entryPrice": "0", "markPrice": "3120.5", "leverage": "10"}]),
             TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -751,7 +1020,7 @@ def test_real_exchange_adapter_blocks_exit_order_without_live_position() -> None
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "existing entered position" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
 
 
 def test_real_exchange_adapter_blocks_exit_order_with_invalid_runtime_snapshot() -> None:
@@ -952,7 +1221,7 @@ def test_real_exchange_adapter_blocks_entry_order_without_flat_live_position() -
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "flat live position" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_real_exchange_adapter_blocks_entry_order_with_invalid_runtime_snapshot() -> None:
@@ -1002,6 +1271,7 @@ def test_real_exchange_adapter_blocks_entry_order_with_invalid_runtime_snapshot(
                 ],
             ),
             TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1030,7 +1300,7 @@ def test_real_exchange_adapter_blocks_entry_order_with_invalid_runtime_snapshot(
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "positive position_size_pct" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
 
 
 def test_real_exchange_adapter_blocks_entry_order_below_binance_min_qty() -> None:
@@ -1275,12 +1545,77 @@ def test_real_exchange_adapter_maps_protective_stop_for_live_position() -> None:
     assert results[0].status == "accepted"
     assert results[0].accepted is True
     assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
-    assert results[0].details["prepared_request"]["params"]["stopPrice"] == "3028.8"
-    assert results[0].details["prepared_request"]["params"]["closePosition"] == "true"
+    assert results[0].details["prepared_request"]["params"]["triggerPrice"] == "3028.8"
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.015"
+    assert results[0].details["prepared_request"]["params"]["reduceOnly"] == "true"
+    assert "closePosition" not in results[0].details["prepared_request"]["params"]
+    assert results[0].details["prepared_request"]["params"]["algoType"] == "CONDITIONAL"
+    assert results[0].details["prepared_request"]["path"] == "/fapi/v1/algoOrder"
     assert results[0].details["prepared_request"]["body"]["resolved_from_entry_price"] == 3120.5
     assert results[0].details["prepared_request"]["body"]["resolved_stop_price"] == "3028.8"
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/order"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders", "/fapi/v1/algoOrder"]
 
+
+
+def test_real_exchange_adapter_preflight_protective_stop_resolves_request_without_dispatch() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0.048",
+                        "entryPrice": "3120.5",
+                        "markPrice": "3122.0",
+                        "leverage": "10",
+                        "notional": "149.856",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="wait",
+            effective_action="wait",
+            plan_reason="quant_action_passthrough",
+            maintain_protective_stop=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:01:00",
+            "action": "wait",
+            "direction": "long",
+            "initial_stop_loss": 0.9706,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].target == "maintain_protective_stop"
+    assert results[0].status == "preflight_ready"
+    assert results[0].accepted is True
+    assert results[0].simulated is True
+    assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
+    assert results[0].details["prepared_request"]["params"]["triggerPrice"] == "3028.8"
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
+    assert "closePosition" not in results[0].details["prepared_request"]["params"]
+    client_order_id = results[0].details["prepared_request"]["params"]["clientAlgoId"]
+    assert client_order_id.startswith("ethbot-ps-")
+    assert len(client_order_id) <= 36
+    assert results[0].details["prepared_request"]["idempotency_key"] == "maintain_protective_stop:2026-04-26T13:01:00:wait:long"
+    assert results[0].details["prepared_request"]["body"]["resolved_from_entry_price"] == 3120.5
+    assert results[0].details["prepared_request"]["body"]["resolved_stop_price"] == "3028.8"
+    assert results[0].details["signed_request"]["params"]["triggerPrice"] == "3028.8"
+    assert results[0].details["signed_request"]["params"]["quantity"] == "0.048"
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_real_exchange_adapter_blocks_protective_stop_with_invalid_runtime_snapshot() -> None:
@@ -1362,7 +1697,7 @@ def test_real_exchange_adapter_blocks_protective_stop_with_invalid_runtime_snaps
     assert results[0].status == "accepted"
     assert results[0].accepted is True
     assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
-    assert results[0].details["prepared_request"]["params"]["stopPrice"] == "3028.8"
+    assert results[0].details["prepared_request"]["params"]["triggerPrice"] == "3028.8"
 
 
 def test_real_exchange_adapter_refreshes_runtime_snapshot_after_real_entry_before_protective_stop() -> None:
@@ -1443,7 +1778,7 @@ def test_real_exchange_adapter_refreshes_runtime_snapshot_after_real_entry_befor
     assert [result.target for result in results] == ["entry_order", "maintain_protective_stop"]
     assert [result.status for result in results] == ["accepted", "accepted"]
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
-    assert results[1].details["prepared_request"]["params"]["stopPrice"] == "3028.8"
+    assert results[1].details["prepared_request"]["params"]["triggerPrice"] == "3028.8"
     assert results[1].details["prepared_request"]["body"]["resolved_from_entry_price"] == 3120.5
     assert [request.path for request in transport.requests] == [
         "/fapi/v2/positionRisk",
@@ -1455,7 +1790,8 @@ def test_real_exchange_adapter_refreshes_runtime_snapshot_after_real_entry_befor
         "/fapi/v2/positionRisk",
         "/fapi/v1/openOrders",
         "/fapi/v2/account",
-        "/fapi/v1/order",
+        "/fapi/v1/openAlgoOrders",
+        "/fapi/v1/algoOrder",
     ]
 
 
@@ -1537,7 +1873,7 @@ def test_real_exchange_adapter_blocks_same_batch_protective_stop_when_entry_fail
 
 
 
-def test_real_exchange_adapter_blocks_unresolved_stop_semantics_in_real_mode() -> None:
+def test_real_exchange_adapter_ignores_strategy_metadata_for_initial_protective_stop() -> None:
     transport = FakeTransport(
         responses=[
             TransportResponse(
@@ -1555,6 +1891,7 @@ def test_real_exchange_adapter_blocks_unresolved_stop_semantics_in_real_mode() -
             ),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(http_status=200, payload={"orderId": 1, "status": "NEW"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1584,16 +1921,20 @@ def test_real_exchange_adapter_blocks_unresolved_stop_semantics_in_real_mode() -
     results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
     assert results[0].target == "maintain_protective_stop"
-    assert results[0].status == "error"
-    assert results[0].accepted is False
-    assert results[0].reason == "unsafe_request_mapping"
-    assert "strategy-relative" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert results[0].status == "accepted"
+    assert results[0].accepted is True
+    assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
+    assert results[0].details["prepared_request"]["params"]["triggerPrice"] == "3028.8"
+    assert results[0].details["prepared_request"]["body"]["resolution_mode"] == "initial_stop_from_live_entry"
+    assert results[0].details["prepared_request"]["body"]["trailing_rule"] == "trail_with_trigger"
+    assert results[0].details["prepared_request"]["body"]["breakeven_trigger"] == 1.01
+    assert results[0].details["prepared_request"]["body"]["tp_ladder"] == [1.01, 1.02]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders", "/fapi/v1/algoOrder"]
 
 
 
 
-def test_real_exchange_adapter_maps_breakeven_stop_to_live_entry_price_in_real_mode() -> None:
+def test_real_exchange_adapter_blocks_breakeven_stop_until_algo_replace_is_supported() -> None:
     transport = FakeTransport(
         responses=[
             TransportResponse(
@@ -1611,7 +1952,6 @@ def test_real_exchange_adapter_maps_breakeven_stop_to_live_entry_price_in_real_m
             ),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
-            TransportResponse(http_status=200, payload={"orderId": 1, "status": "NEW"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1639,19 +1979,68 @@ def test_real_exchange_adapter_maps_breakeven_stop_to_live_entry_price_in_real_m
     results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
     assert results[0].target == "advance_breakeven_stop"
-    assert results[0].status == "accepted"
-    assert results[0].accepted is True
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].reason == "unsafe_request_mapping"
+    assert "Algo stop cancel/replace" in results[0].details["error"]
     assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
-    assert results[0].details["prepared_request"]["params"]["stopPrice"] == "3120.5"
-    assert results[0].details["prepared_request"]["params"]["closePosition"] == "true"
-    assert results[0].details["prepared_request"]["body"]["resolved_from_entry_price"] == 3120.5
-    assert results[0].details["prepared_request"]["body"]["resolved_stop_price"] == "3120.5"
-    assert results[0].details["prepared_request"]["body"]["resolution_mode"] == "breakeven_from_live_entry"
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/order"]
+    assert results[0].details["prepared_request"]["params"]["type"] == "STOP_MARKET"
+    assert "stopPrice" not in results[0].details["prepared_request"]["params"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
+
+
+def test_simulated_real_exchange_adapter_uses_real_validation_for_breakeven_stop() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0.015",
+                        "entryPrice": "3120.5",
+                        "leverage": "10",
+                        "notional": "46.8075",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="wait",
+            effective_action="wait",
+            plan_reason="quant_action_passthrough",
+            advance_breakeven=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:10:00",
+            "action": "wait",
+            "direction": "long",
+            "breakeven_trigger": 1.01,
+        },
+    )
+
+    results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.SIMULATED_REAL)
+
+    assert results[0].target == "advance_breakeven_stop"
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].simulated is True
+    assert results[0].reason == "unsafe_request_mapping"
+    assert "Algo stop cancel/replace" in results[0].details["error"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 
-def test_real_exchange_adapter_maps_breakeven_stop_without_handoff_direction() -> None:
+def test_real_exchange_adapter_blocks_breakeven_stop_without_handoff_direction_until_algo_replace_is_supported() -> None:
     transport = FakeTransport(
         responses=[
             TransportResponse(
@@ -1669,7 +2058,6 @@ def test_real_exchange_adapter_maps_breakeven_stop_without_handoff_direction() -
             ),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
-            TransportResponse(http_status=200, payload={"orderId": 1, "status": "NEW"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1696,10 +2084,11 @@ def test_real_exchange_adapter_maps_breakeven_stop_without_handoff_direction() -
     results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
     assert results[0].target == "advance_breakeven_stop"
-    assert results[0].status == "accepted"
-    assert results[0].accepted is True
-    assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
-    assert results[0].details["prepared_request"]["params"]["stopPrice"] == "3120.5"
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].reason == "unsafe_request_mapping"
+    assert "Algo stop cancel/replace" in results[0].details["error"]
+    assert "stopPrice" not in results[0].details["prepared_request"]["params"]
 
 
 def test_real_exchange_adapter_blocks_breakeven_stop_without_live_position_in_real_mode() -> None:
@@ -1707,6 +2096,7 @@ def test_real_exchange_adapter_blocks_breakeven_stop_without_live_position_in_re
         responses=[
             TransportResponse(http_status=200, payload=[{"positionAmt": "0", "entryPrice": "0", "leverage": "10"}]),
             TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1737,7 +2127,7 @@ def test_real_exchange_adapter_blocks_breakeven_stop_without_live_position_in_re
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "existing entered position" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
 
 
 def test_real_exchange_adapter_blocks_breakeven_stop_when_direction_mismatches_live_position() -> None:
@@ -1786,7 +2176,7 @@ def test_real_exchange_adapter_blocks_breakeven_stop_when_direction_mismatches_l
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "direction does not match live position direction" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_real_exchange_adapter_blocks_breakeven_stop_without_trigger_in_real_mode() -> None:
@@ -1834,10 +2224,10 @@ def test_real_exchange_adapter_blocks_breakeven_stop_without_trigger_in_real_mod
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "requires breakeven_trigger" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
-def test_real_exchange_adapter_maps_trailing_stop_in_real_mode() -> None:
+def test_real_exchange_adapter_blocks_trailing_stop_until_algo_replace_is_supported() -> None:
     transport = FakeTransport(
         responses=[
             TransportResponse(
@@ -1853,7 +2243,6 @@ def test_real_exchange_adapter_maps_trailing_stop_in_real_mode() -> None:
             ),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
-            TransportResponse(http_status=200, payload={"orderId": 1, "status": "NEW"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1883,20 +2272,19 @@ def test_real_exchange_adapter_maps_trailing_stop_in_real_mode() -> None:
     results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
     assert results[0].target == "advance_trailing_stop"
-    assert results[0].status == "accepted"
-    assert results[0].accepted is True
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].reason == "unsafe_request_mapping"
+    assert "Algo stop cancel/replace" in results[0].details["error"]
     assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
     assert results[0].details["prepared_request"]["params"]["type"] == "TRAILING_STOP_MARKET"
-    assert results[0].details["prepared_request"]["params"]["activationPrice"] == "3151.7"
-    assert results[0].details["prepared_request"]["params"]["callbackRate"] == "0.5"
-    assert results[0].details["prepared_request"]["body"]["resolved_activation_price"] == "3151.7"
-    assert results[0].details["prepared_request"]["body"]["resolved_callback_rate"] == "0.5"
-    assert results[0].details["prepared_request"]["body"]["resolution_mode"] == "trailing_from_quant_contract"
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/order"]
+    assert "activationPrice" not in results[0].details["prepared_request"]["params"]
+    assert "callbackRate" not in results[0].details["prepared_request"]["params"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 
-def test_real_exchange_adapter_maps_trailing_stop_without_handoff_direction() -> None:
+def test_real_exchange_adapter_blocks_trailing_stop_without_handoff_direction_until_algo_replace_is_supported() -> None:
     transport = FakeTransport(
         responses=[
             TransportResponse(
@@ -1912,7 +2300,6 @@ def test_real_exchange_adapter_maps_trailing_stop_without_handoff_direction() ->
             ),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
-            TransportResponse(http_status=200, payload={"orderId": 1, "status": "NEW"}),
         ]
     )
     signer = BinanceRequestSigner(
@@ -1941,10 +2328,11 @@ def test_real_exchange_adapter_maps_trailing_stop_without_handoff_direction() ->
     results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
     assert results[0].target == "advance_trailing_stop"
-    assert results[0].status == "accepted"
-    assert results[0].accepted is True
-    assert results[0].details["prepared_request"]["params"]["side"] == "SELL"
-    assert results[0].details["prepared_request"]["params"]["activationPrice"] == "3151.7"
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].reason == "unsafe_request_mapping"
+    assert "Algo stop cancel/replace" in results[0].details["error"]
+    assert "activationPrice" not in results[0].details["prepared_request"]["params"]
 
 
 def test_real_exchange_adapter_blocks_trailing_stop_without_activation_ratio_in_real_mode() -> None:
@@ -1995,7 +2383,7 @@ def test_real_exchange_adapter_blocks_trailing_stop_without_activation_ratio_in_
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "requires trailing_activation_ratio" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_real_exchange_adapter_blocks_trailing_stop_without_callback_rate_in_real_mode() -> None:
@@ -2046,7 +2434,7 @@ def test_real_exchange_adapter_blocks_trailing_stop_without_callback_rate_in_rea
     assert results[0].accepted is False
     assert results[0].reason == "unsafe_request_mapping"
     assert "requires trailing_callback_rate_pct" in results[0].details["error"]
-    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account", "/fapi/v1/openAlgoOrders"]
 
 
 def test_binance_perp_adapter_fetches_runtime_snapshot() -> None:
@@ -2113,6 +2501,162 @@ def test_binance_perp_adapter_fetches_runtime_snapshot() -> None:
     assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v2/account"]
 
 
+def test_binance_perp_adapter_detects_protective_stop_from_open_algo_orders() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0.043",
+                        "entryPrice": "2300.26",
+                        "markPrice": "2298.99",
+                        "leverage": "10",
+                        "notional": "98.85657",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "11.135"}),
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "algoId": 1000001522632139,
+                        "clientAlgoId": "ethbotps20260502142000",
+                        "algoStatus": "NEW",
+                        "orderType": "STOP_MARKET",
+                        "side": "SELL",
+                        "quantity": "0.043",
+                        "triggerPrice": "2264.6",
+                        "reduceOnly": True,
+                    }
+                ],
+            ),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    snapshot = adapter.fetch_runtime_snapshot()
+
+    assert snapshot.protective_stop_present is True
+    assert [order.order_id for order in snapshot.open_orders] == ["algo:1000001522632139"]
+    assert snapshot.open_orders[0].order_type == "STOP_MARKET"
+    assert snapshot.open_orders[0].trigger_price == 2264.6
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v2/positionRisk",
+        "/fapi/v1/openOrders",
+        "/fapi/v2/account",
+        "/fapi/v1/openAlgoOrders",
+    ]
+
+
+def test_binance_perp_adapter_fetches_open_algo_orders_raw() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "algoId": 1000001522632139,
+                        "clientAlgoId": "ethbotps20260502142000",
+                        "algoStatus": "NEW",
+                        "orderType": "STOP_MARKET",
+                        "side": "SELL",
+                        "quantity": "0.043",
+                        "triggerPrice": "2264.6",
+                        "reduceOnly": True,
+                        "closePosition": False,
+                    }
+                ],
+            )
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    payload = adapter.fetch_open_algo_orders_raw()
+
+    assert payload == [
+        {
+            "algoId": 1000001522632139,
+            "clientAlgoId": "ethbotps20260502142000",
+            "algoStatus": "NEW",
+            "orderType": "STOP_MARKET",
+            "side": "SELL",
+            "quantity": "0.043",
+            "triggerPrice": "2264.6",
+            "reduceOnly": True,
+            "closePosition": False,
+        }
+    ]
+    assert [request.path for request in transport.requests] == ["/fapi/v1/openAlgoOrders"]
+    assert transport.requests[0].params["algoType"] == "CONDITIONAL"
+
+
+def test_binance_perp_adapter_rejects_malformed_open_algo_orders_raw_payload() -> None:
+    class MalformedTransport:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def send(self, signed_request):
+            self.requests.append(signed_request)
+            return TransportResponse(http_status=200, payload={"unexpected": []})
+
+    transport = MalformedTransport()
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    with pytest.raises(BinanceTransportError, match="Malformed open algo orders response"):
+        adapter.fetch_open_algo_orders_raw()
+
+
+def test_binance_perp_adapter_refreshes_timestamp_offset_for_open_algo_orders_raw() -> None:
+    transport = FakeTransport(
+        responses=[
+            BinanceTransportError(
+                kind="http_error",
+                message="HTTP 400",
+                http_status=400,
+                payload={"code": -1021, "msg": "Timestamp ahead of server time"},
+            ),
+            TransportResponse(http_status=200, payload=[]),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    refreshed = {"count": 0}
+
+    def refresh() -> None:
+        refreshed["count"] += 1
+
+    signer.refresh_timestamp_offset = refresh  # type: ignore[method-assign]
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    assert adapter.fetch_open_algo_orders_raw() == []
+    assert refreshed["count"] == 1
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v1/openAlgoOrders",
+        "/fapi/v1/openAlgoOrders",
+    ]
+
+
 def test_binance_perp_adapter_keeps_zero_size_pct_when_account_equity_unavailable() -> None:
     transport = FakeTransport(
         responses=[
@@ -2127,6 +2671,7 @@ def test_binance_perp_adapter_keeps_zero_size_pct_when_account_equity_unavailabl
                     }
                 ],
             ),
+            TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload=[]),
             TransportResponse(http_status=200, payload={}),
         ]
@@ -2161,6 +2706,93 @@ def test_binance_perp_adapter_returns_empty_runtime_snapshot_on_transport_error(
     assert snapshot.position.position_state == "FLAT"
     assert snapshot.open_orders == []
     assert snapshot.protective_stop_present is False
+    assert snapshot.snapshot_valid is False
+    assert snapshot.error_endpoint == "/fapi/v2/positionRisk"
+    assert snapshot.error_kind == "timeout"
+    assert snapshot.error_message == "timed out"
+
+
+def test_binance_perp_adapter_marks_open_orders_runtime_snapshot_error() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "leverage": "10",
+                        "notional": "0",
+                    }
+                ],
+            ),
+            BinanceTransportError(kind="http_error", message="HTTP 401", http_status=401, payload={"code": -2015}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    snapshot = adapter.fetch_runtime_snapshot()
+
+    assert snapshot.snapshot_valid is False
+    assert snapshot.error_endpoint == "/fapi/v1/openOrders"
+    assert snapshot.error_kind == "http_error"
+    assert snapshot.error_http_status == 401
+    assert snapshot.error_payload == {"code": -2015}
+    assert [request.path for request in transport.requests] == ["/fapi/v2/positionRisk", "/fapi/v1/openOrders"]
+
+
+def test_binance_perp_adapter_refreshes_timestamp_offset_for_open_orders_snapshot() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3120.5",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            BinanceTransportError(
+                kind="http_error",
+                message="HTTP 400",
+                http_status=400,
+                payload={"code": -1021, "msg": "Timestamp ahead of server time"},
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "11.0"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    refreshed = {"count": 0}
+
+    def refresh() -> None:
+        refreshed["count"] += 1
+
+    signer.refresh_timestamp_offset = refresh  # type: ignore[method-assign]
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+
+    snapshot = adapter.fetch_runtime_snapshot()
+
+    assert snapshot.snapshot_valid is True
+    assert refreshed["count"] == 1
+    assert [request.path for request in transport.requests] == [
+        "/fapi/v2/positionRisk",
+        "/fapi/v1/openOrders",
+        "/fapi/v1/openOrders",
+        "/fapi/v2/account",
+    ]
 
 
 def test_binance_perp_adapter_prepares_requests_for_supported_targets() -> None:
@@ -2201,7 +2833,7 @@ def test_binance_perp_adapter_prepares_requests_for_supported_targets() -> None:
     requests = adapter.prepare_requests(commands=commands)
     assert [(request.method, request.path) for request in requests] == [
         ("POST", "/fapi/v1/order"),
-        ("POST", "/fapi/v1/order"),
+        ("POST", "/fapi/v1/algoOrder"),
         ("POST", "/fapi/v1/order"),
         ("POST", "/fapi/v1/order"),
         ("GET", "/fapi/v1/userTrades"),

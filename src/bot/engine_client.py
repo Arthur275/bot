@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -37,7 +34,7 @@ class EngineClient:
             or self._build_execution_handoff is None
             or self._decision_envelope_factory is None
         ):
-            self._load_engine_contracts(config.engine_src_path)
+            raise RuntimeError("必须注入 live_judgement / build_execution_handoff 函数")
 
     def fetch_cycle(
         self,
@@ -78,29 +75,3 @@ class EngineClient:
         else:
             handoff_payload = dict(handoff)
         return EngineCyclePayload(judgement=judgement, handoff=handoff_payload)
-
-    def fetch_risk_cycle(
-        self,
-        *,
-        current_state: str,
-        current_position_size_pct: float,
-        current_position_direction: str,
-        generated_at: datetime | None = None,
-    ) -> EngineCyclePayload:
-        return self.fetch_cycle(
-            current_state=current_state,
-            current_position_size_pct=current_position_size_pct,
-            current_position_direction=current_position_direction,
-            generated_at=generated_at,
-        )
-
-    def _load_engine_contracts(self, engine_src_path: Path) -> None:
-        normalized_engine_src_path = str(engine_src_path)
-        if normalized_engine_src_path not in sys.path:
-            sys.path.insert(0, normalized_engine_src_path)
-        live_judgement_module = importlib.import_module("interfaces.live_judgement")
-        runner_module = importlib.import_module("interfaces.runner")
-        execution_contracts_module = importlib.import_module("contracts.execution")
-        self._run_live_judgement = live_judgement_module.run_live_judgement
-        self._build_execution_handoff = runner_module.build_execution_handoff
-        self._decision_envelope_factory = execution_contracts_module.DecisionEnvelope.model_validate

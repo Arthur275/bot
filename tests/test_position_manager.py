@@ -1,10 +1,12 @@
 from bot.network_guard import GuardDecision
 from bot.position_manager import PositionManager
+from bot.execution_risk_gate import ExecutionRiskGate, ExecutionRiskGateConfig
+from bot.exchange_adapter import EntryOrderPayload, ExchangeAdapter
 
 
 def test_position_manager_maps_entry_to_entry_plan() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={"action": "entry_long", "position_size_pct": 0.0},
+        handoff={"action": "entry_long", "position_size_pct": 0.2, "initial_stop_loss": 0.98},
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,
@@ -15,6 +17,132 @@ def test_position_manager_maps_entry_to_entry_plan() -> None:
     assert plan.effective_action == "entry_long"
     assert plan.place_entry_order is True
     assert plan.maintain_protective_stop is True
+
+
+def test_position_manager_blocks_entry_when_execution_risk_gate_blocks() -> None:
+    plan = PositionManager(
+        ExecutionRiskGate(ExecutionRiskGateConfig(require_execution_allowed=True))
+    ).build_execution_plan(
+        handoff={"action": "entry_long", "position_size_pct": 0.2, "initial_stop_loss": 0.98},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+    )
+    assert plan.effective_action == "wait"
+    assert plan.place_entry_order is False
+    assert plan.maintain_protective_stop is False
+    assert plan.plan_reason == "entry_blocked_by_execution_risk_gate"
+    assert plan.notes == ["execution_allowed_missing"]
+
+
+def test_position_manager_exposes_execution_risk_gate_result_on_entry_plan() -> None:
+    plan = PositionManager(
+        ExecutionRiskGate(
+            ExecutionRiskGateConfig(
+                leverage=10,
+                entry_margin_budget_usdt=None,
+                max_account_risk_pct_per_trade=0.01,
+                require_execution_allowed=True,
+            )
+        )
+    ).build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "position_size_pct": 0.8,
+            "initial_stop_loss": 0.98,
+            "execution_allowed": True,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+    )
+    assert plan.effective_action == "entry_long"
+    assert plan.executable_size_pct == 0.05
+    assert plan.stop_distance_pct == 0.02
+    assert plan.account_risk_pct == 0.01
+    assert plan.notes == ["execution_risk_gate_pass"]
+
+
+def test_position_manager_blocks_entry_below_exchange_min_qty() -> None:
+    plan = PositionManager(
+        ExecutionRiskGate(
+            ExecutionRiskGateConfig(
+                leverage=10,
+                entry_margin_budget_usdt=None,
+                max_probe_account_risk_pct=0.002,
+                max_probe_size_pct=0.02,
+                require_execution_allowed=True,
+                exchange_min_order_qty=0.001,
+                exchange_qty_step_size=0.001,
+            )
+        )
+    ).build_execution_plan(
+        handoff={
+            "action": "small_probe",
+            "direction": "long",
+            "position_size_pct": 0.1,
+            "initial_stop_loss": 0.9844,
+            "execution_allowed": True,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "runtime_account_equity": 10.0,
+            "runtime_mark_price": 2300.0,
+            "runtime_leverage": 10,
+        },
+    )
+
+    assert plan.effective_action == "wait"
+    assert plan.place_entry_order is False
+    assert plan.plan_reason == "entry_blocked_by_execution_risk_gate"
+    assert plan.notes == ["account_too_small_for_exchange_min_qty"]
+
+
+def test_entry_handoff_uses_risk_sized_executable_size_in_adapter_payload() -> None:
+    handoff = {
+        "action": "entry_long",
+        "direction": "long",
+        "position_size_pct": 0.8,
+        "initial_stop_loss": 0.98,
+        "execution_allowed": True,
+        "max_account_risk_pct_per_trade": 0.01,
+    }
+    plan = PositionManager(
+        ExecutionRiskGate(
+            ExecutionRiskGateConfig(
+                leverage=10,
+                entry_margin_budget_usdt=None,
+                max_account_risk_pct_per_trade=0.01,
+                require_execution_allowed=True,
+            )
+        )
+    ).build_execution_plan(
+        handoff=handoff,
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+    )
+
+    commands = ExchangeAdapter().build_commands(execution_plan=plan, handoff=handoff)
+
+    assert plan.place_entry_order is True
+    assert plan.executable_size_pct == 0.05
+    assert isinstance(commands[0].payload, EntryOrderPayload)
+    assert commands[0].payload.position_size_pct == 0.05
 
 
 def test_position_manager_keeps_observe_only_as_quant_action() -> None:
@@ -128,6 +256,30 @@ def test_position_manager_keeps_execution_hygiene_actions_under_wait() -> None:
     assert plan.sync_recent_fills is True
 
 
+def test_position_manager_does_not_maintain_existing_protective_stop_under_wait() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "wait",
+            "position_state": "ENTERED",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_size_pct": 0.3,
+            "protective_stop_present": True,
+            "protective_stop_required": False,
+        },
+    )
+    assert plan.effective_action == "wait"
+    assert plan.maintain_protective_stop is False
+
+
 def test_position_manager_treats_entered_state_as_open_risk_without_size_pct() -> None:
     plan = PositionManager().build_execution_plan(
         handoff={"action": "wait", "position_state": "ENTERED", "position_size_pct": 0.0},
@@ -219,3 +371,64 @@ def test_position_manager_keeps_exit_available_during_recovery() -> None:
     assert plan.maintain_protective_stop is True
     assert plan.needs_reconciliation is True
     assert plan.recovery_action == "reconcile_runtime_state"
+
+
+def test_position_manager_exits_expired_contrarian_probe() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={"action": "wait", "position_state": "ENTERED", "position_size_pct": 0.0025},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_size_pct": 0.0025,
+            "runtime_now": "2026-05-02T04:01:00",
+            "metadata": {
+                "active_probe_source": "contrarian_short_probe",
+                "active_probe_expires_at": "2026-05-02T04:00:00",
+            },
+        },
+    )
+
+    assert plan.effective_action == "exit"
+    assert plan.place_exit_order is True
+    assert plan.plan_reason == "contrarian_probe_expired"
+    assert plan.notes == ["contrarian_probe_expired"]
+
+
+def test_position_manager_rolls_expired_contrarian_probe_when_signal_continues() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "small_probe",
+            "direction": "short",
+            "probe_source": "contrarian_short_probe",
+            "position_state": "ENTERED",
+            "position_size_pct": 0.0025,
+            "initial_stop_loss": 1.01,
+            "execution_allowed": True,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_size_pct": 0.0025,
+            "runtime_now": "2026-05-02T04:01:00",
+            "metadata": {
+                "active_probe_source": "contrarian_short_probe",
+                "active_probe_expires_at": "2026-05-02T04:00:00",
+            },
+        },
+    )
+
+    assert plan.effective_action == "small_probe"
+    assert plan.place_entry_order is False
+    assert plan.place_exit_order is False
+    assert plan.plan_reason == "contrarian_probe_rolled_forward"
+    assert plan.notes == ["contrarian_probe_expiry_rolled_forward"]

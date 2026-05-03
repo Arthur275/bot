@@ -2,6 +2,7 @@ from .audit_logger import AuditEvent, AuditLogger
 from .binance_transport import BinanceRequestConfigError, BinanceRequestSigner, BinanceTransport, BinanceTransportError, SignedAdapterRequest, TransportResponse
 from .config import BotConfig, EngineMode, RuntimeMode
 from .engine_client import EngineClient, EngineCyclePayload
+from .execution_risk_gate import ExecutionRiskDecision, ExecutionRiskGate, ExecutionRiskGateConfig
 from .exchange_adapter import (
     AdapterAction,
     AdapterCapabilities,
@@ -53,6 +54,9 @@ __all__ = [
     "ExecutionCommand",
     "ExecutionLayerState",
     "ExecutionPlan",
+    "ExecutionRiskDecision",
+    "ExecutionRiskGate",
+    "ExecutionRiskGateConfig",
     "ExitOrderPayload",
     "GuardDecision",
     "NetworkGuard",

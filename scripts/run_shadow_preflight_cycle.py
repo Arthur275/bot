@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+try:
+    from .shadow_preflight_diagnostics import summarize_handoff, summarize_judgement
+except ImportError:
+    from shadow_preflight_diagnostics import summarize_handoff, summarize_judgement
+
+
+DEFAULT_QUANT_ROOT = "D:/\u5f00\u53d1/quant_system_rebuild"
+
+
+class ParsedArgs(argparse.Namespace):
+    quant_root: str
+    output_root: str
+    proxy_url: str
+    include_okx_overlay: bool
+    include_coinglass_overlay: bool
+    api_key_env: str | None
+    api_secret_env: str | None
+
+
+def default_output_root() -> str:
+    return str(Path.home() / ".codex" / "memories" / "eth_bot_shadow_preflight")
+
+
+def _add_src_paths(*, bot_root: Path, quant_root: Path) -> None:
+    for src_path in (bot_root / "src", quant_root / "src"):
+        normalized = str(src_path)
+        if normalized not in sys.path:
+            sys.path.insert(0, normalized)
+
+
+def _load_latest_audit_event(audit_path: Path) -> dict[str, Any]:
+    if not audit_path.exists():
+        return {}
+    lines = [line for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        return {}
+    return json.loads(lines[-1])
+
+
+def _summarize_preflight_result(result: Any) -> dict[str, Any]:
+    details = result.details or {}
+    prepared = details.get("prepared_request") or {}
+    signed = details.get("signed_request") or {}
+    prepared_params = prepared.get("params") or {}
+    signed_params = signed.get("params") or {}
+    body = prepared.get("body") or {}
+    return {
+        "target": result.target,
+        "status": result.status,
+        "accepted": result.accepted,
+        "simulated": result.simulated,
+        "reason": result.reason,
+        "method": prepared.get("method"),
+        "path": prepared.get("path"),
+        "side": prepared_params.get("side"),
+        "type": prepared_params.get("type"),
+        "quantity": prepared_params.get("quantity"),
+        "stopPrice": prepared_params.get("stopPrice"),
+        "closePosition": prepared_params.get("closePosition"),
+        "newClientOrderId": prepared_params.get("newClientOrderId"),
+        "signed_quantity": signed_params.get("quantity"),
+        "signed_stopPrice": signed_params.get("stopPrice"),
+        "resolution_mode": body.get("resolution_mode"),
+        "resolved_account_equity": body.get("resolved_account_equity"),
+        "resolved_leverage": body.get("resolved_leverage"),
+        "resolved_mark_price": body.get("resolved_mark_price"),
+        "resolved_stop_price": body.get("resolved_stop_price"),
+        "error": details.get("error"),
+        "http_status": details.get("http_status"),
+        "runtime_snapshot": details.get("runtime_snapshot"),
+    }
+
+
+def _load_binance_perp_adapter() -> Any:
+    from bot.exchange_adapter import BinancePerpAdapter
+
+    return BinancePerpAdapter
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run one quant strict-live -> bot shadow -> Binance preflight cycle without submitting orders."
+    )
+    parser.add_argument("--quant-root", default=DEFAULT_QUANT_ROOT)
+    parser.add_argument("--output-root", default=default_output_root())
+    parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
+    parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--api-key-env", default=None)
+    parser.add_argument("--api-secret-env", default=None)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args(namespace=ParsedArgs())
+    payload = run_cycle(args=args, bot_root=Path(__file__).resolve().parents[1])
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
+    quant_root = Path(args.quant_root)
+    _add_src_paths(bot_root=bot_root, quant_root=quant_root)
+
+    from bot.config import BotConfig
+    from bot.engine_client import EngineClient
+    from bot.exchange_adapter import AdapterCredentials, ExchangeAdapter
+    from bot.orchestrator import ShadowOrchestrator
+    from bot.position_manager import ExecutionPlan
+    from contracts.execution import DecisionEnvelope
+    from interfaces.live_judgement import run_live_judgement
+    from interfaces.runner import build_execution_handoff
+
+    output_root = Path(args.output_root)
+    if not output_root.is_absolute():
+        output_root = bot_root / output_root
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    config = BotConfig(
+        audit_log_path=output_root / "audit.jsonl",
+        state_store_path=output_root / "state.json",
+        artifacts_root=output_root / "artifacts",
+        proxy_url=args.proxy_url or None,
+        include_okx_overlay=bool(args.include_okx_overlay),
+        include_coinglass_overlay=bool(args.include_coinglass_overlay),
+    )
+    credentials = None
+    real_adapter = None
+    if args.api_key_env and args.api_secret_env:
+        credentials = AdapterCredentials(
+            venue=config.exchange_venue,
+            api_key_env=args.api_key_env,
+            api_secret_env=args.api_secret_env,
+            recv_window_ms=config.recv_window_ms,
+            timeout_sec=config.timeout_sec,
+            proxy_url=config.proxy_url,
+            api_base_url=config.exchange_api_base_url,
+        )
+        real_adapter = _load_binance_perp_adapter()(credentials)
+    client = EngineClient(
+        config,
+        run_live_judgement_fn=run_live_judgement,
+        build_execution_handoff_fn=build_execution_handoff,
+        decision_envelope_factory=DecisionEnvelope.model_validate,
+    )
+    report = ShadowOrchestrator(config, engine_client=client, exchange_adapter=real_adapter).run_cycle(
+        generated_at=datetime.now().replace(microsecond=0)
+    )
+
+    audit_event = _load_latest_audit_event(config.audit_log_path)
+    audit_payload = audit_event.get("payload") or {}
+    execution_plan = audit_payload.get("execution_plan") or {}
+    handoff = audit_payload.get("handoff") or {}
+
+    execution_plan_model = ExecutionPlan.model_validate(execution_plan)
+    commands = ExchangeAdapter().build_commands(execution_plan=execution_plan_model, handoff=handoff)
+    preflight_error = ""
+    preflight_results = []
+    if commands and real_adapter is not None:
+        try:
+            preflight_results = real_adapter.preflight_commands(commands=commands)
+        except Exception as exc:
+            preflight_error = f"{exc.__class__.__name__}: {exc}"
+    elif commands:
+        preflight_error = "preflight_skipped_missing_api_env"
+
+    payload = {
+        "runtime_mode": report.runtime_mode,
+        "requested_action": report.requested_action,
+        "effective_action": report.effective_action,
+        "plan_reason": report.plan_reason,
+        "blocked": report.blocked,
+        "degraded": report.degraded,
+        "reason_codes": report.reason_codes,
+        "execution_overview": report.execution_overview,
+        "execution_plan": {
+            "requested_action": execution_plan.get("requested_action"),
+            "effective_action": execution_plan.get("effective_action"),
+            "plan_reason": execution_plan.get("plan_reason"),
+            "place_entry_order": execution_plan.get("place_entry_order"),
+            "maintain_protective_stop": execution_plan.get("maintain_protective_stop"),
+            "executable_size_pct": execution_plan.get("executable_size_pct"),
+            "stop_distance_pct": execution_plan.get("stop_distance_pct"),
+            "account_risk_pct": execution_plan.get("account_risk_pct"),
+            "notes": execution_plan.get("notes"),
+        },
+        "judgement": summarize_judgement(audit_payload.get("judgement") or {}),
+        "handoff": summarize_handoff(handoff),
+        "command_targets": [command.target for command in commands],
+        "preflight_statuses": [result.status for result in preflight_results],
+        "preflight_error": preflight_error,
+        "preflight": [_summarize_preflight_result(result) for result in preflight_results],
+        "audit_log_path": str(config.audit_log_path),
+        "state_path": str(config.state_store_path),
+    }
+    return payload
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

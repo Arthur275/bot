@@ -32,9 +32,21 @@ class BotConfig(BaseModel):
     recv_window_ms: int = Field(default=60000, gt=0)
     timeframe: str = "15m"
     risk_check_timeframe: str = "5m"
+    demo_small_account_mode: bool = True
+    # Demo-only 10U margin budget. Disable demo_small_account_mode before production sizing.
+    entry_margin_budget_usdt: float | None = Field(default=10.0, gt=0.0)
+    entry_margin_budget_max_equity_usdt: float | None = Field(default=50.0, gt=0.0)
+    max_account_risk_pct_per_trade: float = Field(default=0.01, gt=0.0, le=0.05)
+    max_probe_account_risk_pct: float = Field(default=0.002, gt=0.0, le=0.02)
+    max_probe_size_pct: float = Field(default=0.02, gt=0.0, le=1.0)
+    exchange_min_order_qty: float = Field(default=0.001, gt=0.0)
+    exchange_qty_step_size: float = Field(default=0.001, gt=0.0)
+    require_execution_allowed: bool = True
+    manual_entry_confirmation_required: bool = True
+    manual_entry_confirmation_token: str = ""
     runtime_mode: RuntimeMode = RuntimeMode.SHADOW
     engine_mode: EngineMode = EngineMode.STRICT_LIVE
-    engine_src_path: Path = Path("D:/quant_system_rebuild/src")
+    engine_src_path: Path | None = None
     proxy_url: str | None = None
     include_okx_overlay: bool = True
     include_coinglass_overlay: bool = False

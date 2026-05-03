@@ -98,6 +98,58 @@ def test_state_store_marks_reconciling_state_when_runtime_needs_recovery(tmp_pat
     assert updated.protective_stop_required is True
 
 
+def test_state_store_does_not_recover_on_expected_tightening_capability_block(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.3
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:05:00",
+            "action": "wait",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.3,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        plan_reason="quant_action_passthrough",
+        needs_reconciliation=False,
+        maintain_protective_stop=False,
+        execution_results=[
+            CommandExecutionResult(
+                target="advance_breakeven_stop",
+                status="error",
+                accepted=False,
+                simulated=True,
+                reason="unsafe_request_mapping",
+                details={
+                    "error": "Real breakeven stop replace requires Binance Algo stop cancel/replace support",
+                },
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+            protective_stop_present=True,
+        ),
+    )
+    assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
+    assert updated.pending_action == ""
+    assert updated.recovery_required is False
+    assert updated.reconciliation_required is False
+    assert updated.protective_stop_required is False
+
+
 def test_state_store_marks_failed_execution_for_recovery(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.json")
     updated = store.record_shadow_cycle(
@@ -594,6 +646,137 @@ def test_state_store_records_recent_fill_summary(tmp_path: Path) -> None:
     }
 
 
+def test_state_store_records_active_contrarian_probe_metadata(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-05-02T03:00:00",
+            "action": "small_probe",
+            "position_state": "ENTERED",
+            "current_position_direction": "short",
+            "position_size_pct": 0.0025,
+            "probe_source": "contrarian_short_probe",
+            "probe_expiry_bars": 4,
+            "probe_expiry_timeframe": "15m",
+            "probe_invalid_if_no_followthrough": True,
+            "probe_risk_tier": "technical",
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="small_probe",
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="simulated",
+                accepted=True,
+                simulated=True,
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.metadata["active_probe_source"] == "contrarian_short_probe"
+    assert updated.metadata["active_probe_started_at"] == "2026-05-02T03:00:00"
+    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T04:00:00"
+    assert updated.metadata["active_probe_expiry_bars"] == 4
+    assert updated.metadata["active_probe_expiry_timeframe"] == "15m"
+    assert updated.metadata["active_probe_invalid_if_no_followthrough"] is True
+    assert updated.metadata["active_probe_risk_tier"] == "technical"
+
+
+def test_state_store_clears_active_probe_metadata_when_flat(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "short"
+    state.observed_position_size_pct = 0.0025
+    state.metadata = {
+        "active_probe_source": "contrarian_short_probe",
+        "active_probe_expires_at": "2026-05-02T04:00:00",
+    }
+
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-05-02T04:05:00", "action": "wait"},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="reconcile_position_and_orders",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                details={"response_summary": {"position_state": "FLAT", "direction": "neutral"}},
+            )
+        ],
+    )
+
+    assert updated.observed_position_state == "FLAT"
+    assert "active_probe_source" not in updated.metadata
+    assert "active_probe_expires_at" not in updated.metadata
+
+
+def test_state_store_rolls_active_contrarian_probe_expiry_without_new_entry_order(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "short"
+    state.observed_position_size_pct = 0.0025
+    state.metadata = {
+        "active_probe_source": "contrarian_short_probe",
+        "active_probe_started_at": "2026-05-02T03:00:00",
+        "active_probe_expires_at": "2026-05-02T04:00:00",
+    }
+
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-05-02T04:01:00",
+            "action": "small_probe",
+            "position_state": "ENTERED",
+            "current_position_direction": "short",
+            "position_size_pct": 0.0025,
+            "probe_source": "contrarian_short_probe",
+            "probe_expiry_bars": 4,
+            "probe_expiry_timeframe": "15m",
+            "probe_invalid_if_no_followthrough": True,
+            "probe_risk_tier": "technical",
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="small_probe",
+        plan_reason="contrarian_probe_rolled_forward",
+        execution_results=[],
+    )
+
+    assert updated.metadata["active_probe_started_at"] == "2026-05-02T04:01:00"
+    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T05:01:00"
+
+
 def test_state_store_prefers_recent_fill_response_summary(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.json")
     updated = store.record_shadow_cycle(
@@ -753,6 +936,39 @@ def test_state_store_uses_handoff_fallback_for_state_and_direction_when_no_other
 
 
 
+def test_state_store_does_not_use_blocked_entry_handoff_as_observed_position(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-04-26T12:37:20",
+            "action": "small_probe",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.1,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=False,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=True,
+            blocked=False,
+            reason_codes=["degrade_flag:research_degraded"],
+        ),
+        effective_action="wait",
+        plan_reason="entry_disallowed_by_guard",
+        execution_results=[],
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_direction == "neutral"
+    assert updated.observed_position_size_pct == 0.0
+    assert updated.execution_state is ExecutionLayerState.DEGRADED
+
+
+
 def test_state_store_does_not_let_handoff_fallback_override_existing_open_position(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.json")
     state = store.load()
@@ -864,5 +1080,3 @@ def test_state_store_prefers_accepted_reconciliation_summary_over_runtime_snapsh
     assert updated.observed_position_direction == "long"
     assert updated.observed_position_size_pct == 0.15
     assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
-
-

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_enums import PositionAction
+from .execution_risk_gate import ExecutionRiskGate
 from .network_guard import GuardDecision
 
 
@@ -22,10 +25,16 @@ class ExecutionPlan(BaseModel):
     sync_recent_fills: bool = False
     needs_reconciliation: bool = False
     recovery_action: str = ""
+    executable_size_pct: float | None = None
+    stop_distance_pct: float | None = None
+    account_risk_pct: float | None = None
     notes: list[str] = Field(default_factory=list)
 
 
 class PositionManager:
+    def __init__(self, execution_risk_gate: ExecutionRiskGate | None = None) -> None:
+        self._execution_risk_gate = execution_risk_gate or ExecutionRiskGate()
+
     def build_execution_plan(
         self,
         *,
@@ -43,7 +52,12 @@ class PositionManager:
         recent_fill_sync_required = bool(runtime_state.get("recent_fill_sync_required"))
         has_open_risk = self._has_open_risk(runtime_state, handoff)
         needs_recovery_reconciliation = recovery_required or reconciliation_required
-        needs_protective_stop = has_open_risk or protective_stop_required
+        protective_stop_present = bool(runtime_state.get("protective_stop_present"))
+        needs_protective_stop = bool(
+            protective_stop_required
+            or (has_open_risk and not protective_stop_present)
+        )
+        entry_actions = {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}
 
         if guard.blocked:
             return ExecutionPlan(
@@ -56,7 +70,7 @@ class PositionManager:
                 notes=list(guard.reason_codes),
             )
 
-        if requested_action in {"entry_long", "entry_short", "small_probe"} and not guard.allow_entry:
+        if requested_action in entry_actions and not guard.allow_entry:
             return ExecutionPlan(
                 requested_action=requested_action,
                 effective_action="wait",
@@ -67,7 +81,7 @@ class PositionManager:
                 notes=list(guard.reason_codes),
             )
 
-        if requested_action in {"entry_long", "entry_short", "small_probe"} and needs_recovery_reconciliation:
+        if requested_action in entry_actions and needs_recovery_reconciliation:
             return ExecutionPlan(
                 requested_action=requested_action,
                 effective_action="wait",
@@ -77,7 +91,45 @@ class PositionManager:
                 recovery_action="reconcile_before_reentry",
             )
 
-        if requested_action == "reduce" and not guard.allow_reduce:
+        risk_decision = self._execution_risk_gate.evaluate(handoff=handoff, runtime_state=runtime_state)
+
+        if self._contrarian_probe_expired(runtime_state=runtime_state, has_open_risk=has_open_risk):
+            if self._continues_active_contrarian_probe(handoff=handoff):
+                return ExecutionPlan(
+                    requested_action=requested_action,
+                    effective_action=PositionAction.SMALL_PROBE.value,
+                    plan_reason="contrarian_probe_rolled_forward",
+                    maintain_protective_stop=needs_protective_stop,
+                    needs_reconciliation=needs_recovery_reconciliation,
+                    recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
+                    notes=["contrarian_probe_expiry_rolled_forward"],
+                )
+            return ExecutionPlan(
+                requested_action=requested_action,
+                effective_action=PositionAction.EXIT.value,
+                plan_reason="contrarian_probe_expired",
+                place_exit_order=True,
+                maintain_protective_stop=needs_protective_stop,
+                needs_reconciliation=needs_recovery_reconciliation,
+                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
+                notes=["contrarian_probe_expired"],
+            )
+
+        if requested_action in entry_actions and not risk_decision.allowed:
+            return ExecutionPlan(
+                requested_action=requested_action,
+                effective_action="wait",
+                plan_reason="entry_blocked_by_execution_risk_gate",
+                maintain_protective_stop=needs_protective_stop,
+                needs_reconciliation=needs_recovery_reconciliation,
+                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
+                executable_size_pct=0.0,
+                stop_distance_pct=risk_decision.stop_distance_pct,
+                account_risk_pct=risk_decision.account_risk_pct,
+                notes=list(risk_decision.reason_codes),
+            )
+
+        if requested_action == PositionAction.REDUCE.value and not guard.allow_reduce:
             return ExecutionPlan(
                 requested_action=requested_action,
                 effective_action="wait",
@@ -88,7 +140,7 @@ class PositionManager:
                 notes=list(guard.reason_codes),
             )
 
-        if requested_action == "exit" and not guard.allow_exit:
+        if requested_action == PositionAction.EXIT.value and not guard.allow_exit:
             return ExecutionPlan(
                 requested_action=requested_action,
                 effective_action="wait",
@@ -100,19 +152,30 @@ class PositionManager:
             )
 
         effective_action = requested_action or "wait"
+        action_refreshes_protective_stop = effective_action in {
+            PositionAction.ENTRY_LONG.value,
+            PositionAction.ENTRY_SHORT.value,
+            PositionAction.SMALL_PROBE.value,
+            PositionAction.REDUCE.value,
+            PositionAction.EXIT.value,
+        }
         return ExecutionPlan(
             requested_action=requested_action,
             effective_action=effective_action,
             plan_reason=self._resolve_passthrough_reason(effective_action),
-            place_entry_order=effective_action in {"entry_long", "entry_short", "small_probe"},
-            place_reduce_order=effective_action == "reduce",
-            place_exit_order=effective_action == "exit",
-            maintain_protective_stop=needs_protective_stop or effective_action in {"entry_long", "entry_short", "small_probe", "reduce", "exit"},
+            place_entry_order=effective_action in {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value},
+            place_reduce_order=effective_action == PositionAction.REDUCE.value,
+            place_exit_order=effective_action == PositionAction.EXIT.value,
+            maintain_protective_stop=needs_protective_stop or action_refreshes_protective_stop,
             advance_breakeven=breakeven_ready and has_open_risk,
             advance_trailing_stop=trailing_ready and has_open_risk,
-            sync_recent_fills=recent_fill_sync_required and (has_open_risk or effective_action in {"reduce", "exit"}),
+            sync_recent_fills=recent_fill_sync_required and (has_open_risk or effective_action in {PositionAction.REDUCE.value, PositionAction.EXIT.value}),
             needs_reconciliation=needs_recovery_reconciliation,
             recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
+            executable_size_pct=risk_decision.executable_size_pct if effective_action in entry_actions else None,
+            stop_distance_pct=risk_decision.stop_distance_pct if effective_action in entry_actions else None,
+            account_risk_pct=risk_decision.account_risk_pct if effective_action in entry_actions else None,
+            notes=list(risk_decision.reason_codes) if effective_action in entry_actions else [],
         )
 
     @staticmethod
@@ -125,4 +188,44 @@ class PositionManager:
         handoff_size = float((handoff or {}).get("position_size_pct") or 0.0)
         observed_state = str(runtime_state.get("observed_position_state") or "")
         handoff_state = str((handoff or {}).get("position_state") or "")
-        return observed_size > 0.0 or handoff_size > 0.0 or observed_state == "ENTERED" or handoff_state == "ENTERED"
+        handoff_action = str((handoff or {}).get("action") or "")
+        entry_actions = {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}
+        if observed_size > 0.0 or observed_state == "ENTERED" or handoff_state == "ENTERED":
+            return True
+        return handoff_size > 0.0 and handoff_action not in entry_actions
+
+    @staticmethod
+    def _contrarian_probe_expired(*, runtime_state: dict[str, Any], has_open_risk: bool) -> bool:
+        if not has_open_risk:
+            return False
+        metadata = runtime_state.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        if str(metadata.get("active_probe_source") or "") != "contrarian_short_probe":
+            return False
+        expires_at = PositionManager._parse_datetime(metadata.get("active_probe_expires_at"))
+        runtime_now = PositionManager._parse_datetime(runtime_state.get("runtime_now"))
+        if expires_at is None or runtime_now is None:
+            return False
+        return runtime_now >= expires_at
+
+    @staticmethod
+    def _continues_active_contrarian_probe(*, handoff: dict[str, Any] | None) -> bool:
+        handoff = handoff or {}
+        return (
+            str(handoff.get("action") or "") == PositionAction.SMALL_PROBE.value
+            and str(handoff.get("direction") or "") == "short"
+            and str(handoff.get("probe_source") or "") == "contrarian_short_probe"
+        )
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None

@@ -2,6 +2,9 @@ from datetime import datetime
 from pathlib import Path
 import json
 
+import pytest
+
+from bot.audit_logger import AuditLogger
 from bot.config import BotConfig, RuntimeMode
 from bot.engine_client import EngineCyclePayload
 from bot.exchange_adapter import (
@@ -16,18 +19,51 @@ from bot.orchestrator import ShadowOrchestrator
 from bot.state_store import StateStore
 
 
+def test_audit_logger_redacts_signed_request_secrets(tmp_path: Path) -> None:
+    logger = AuditLogger(tmp_path / "audit.jsonl")
+
+    logger.append(
+        event_type="risk_assist_cycle",
+        generated_at=datetime(2026, 4, 28, 19, 0, 0),
+        payload={
+            "execution_results": [
+                {
+                    "details": {
+                        "signed_request": {
+                            "method": "GET",
+                            "url": "https://fapi.binance.com/fapi/v2/positionRisk",
+                            "headers": {"X-MBX-APIKEY": "secret-key"},
+                            "params": {
+                                "symbol": "ETHUSDT",
+                                "timestamp": 1777373493070,
+                                "recvWindow": 60000,
+                                "signature": "top-secret-signature",
+                            },
+                        }
+                    }
+                }
+            ]
+        },
+    )
+
+    audit_event = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    signed_request = audit_event["payload"]["execution_results"][0]["details"]["signed_request"]
+
+    assert signed_request["headers"] == {"X-MBX-APIKEY": "<redacted>"}
+    assert signed_request["params"]["symbol"] == "ETHUSDT"
+    assert signed_request["params"]["timestamp"] == "<redacted>"
+    assert signed_request["params"]["recvWindow"] == "<redacted>"
+    assert signed_request["params"]["signature"] == "<redacted>"
+
+
+
 class FakeEngineClient:
     def __init__(self, payload: EngineCyclePayload) -> None:
         self._payload = payload
         self.fetch_cycle_calls = 0
-        self.fetch_risk_cycle_calls = 0
 
     def fetch_cycle(self, **_: object) -> EngineCyclePayload:
         self.fetch_cycle_calls += 1
-        return self._payload
-
-    def fetch_risk_cycle(self, **_: object) -> EngineCyclePayload:
-        self.fetch_risk_cycle_calls += 1
         return self._payload
 
 
@@ -55,6 +91,7 @@ class FakeExchangeAdapter:
             supports_breakeven_update=True,
         )
         self.last_runtime_mode = None
+        self.last_commands = None
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         if self._snapshot_sequence:
@@ -86,11 +123,45 @@ class FakeExchangeAdapter:
 
     def execute_commands(self, *, commands, runtime_mode):
         self.last_runtime_mode = runtime_mode
+        self.last_commands = list(commands)
         if self._execution_results is not None:
             return self._execution_results
         from bot.exchange_adapter import ExchangeAdapter
 
         return ExchangeAdapter().execute_commands(commands=commands, runtime_mode=runtime_mode)
+
+
+def test_shadow_orchestrator_requires_explicit_engine_client(tmp_path: Path) -> None:
+    config = BotConfig(
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    with pytest.raises(RuntimeError, match="必须显式注入"):
+        ShadowOrchestrator(
+            config,
+            network_guard=NetworkGuard(),
+            state_store=StateStore(config.state_store_path),
+            exchange_adapter=FakeExchangeAdapter(),
+        )
+
+
+
+def test_shadow_orchestrator_requires_explicit_adapter_for_non_shadow_runtime(tmp_path: Path) -> None:
+    config = BotConfig(
+        runtime_mode=RuntimeMode.SIMULATED_REAL,
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    with pytest.raises(RuntimeError, match="显式注入"):
+        ShadowOrchestrator(
+            config,
+            engine_client=FakeEngineClient(EngineCyclePayload(judgement={"status": "ok"}, handoff=None)),
+            network_guard=NetworkGuard(),
+            state_store=StateStore(config.state_store_path),
+        )
+
 
 
 def test_shadow_orchestrator_surfaces_breakeven_and_trailing_commands_in_simulated_real(tmp_path: Path) -> None:
@@ -242,15 +313,13 @@ def test_risk_assist_cycle_surfaces_breakeven_and_trailing_commands_in_simulated
     report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 13, 5, 0))
 
     assert report.runtime_mode == "simulated-real"
-    assert report.command_reasons == ["protective_stop_required", "breakeven_ready", "trailing_ready", "reconciliation_required"]
+    assert report.command_reasons == ["breakeven_ready", "trailing_ready", "reconciliation_required"]
     assert report.command_summary == [
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
         {"target": "advance_breakeven_stop", "reason": "breakeven_ready", "operation": "tighten"},
         {"target": "advance_trailing_stop", "reason": "trailing_ready", "operation": "tighten"},
         {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "operation": "query"},
     ]
     assert report.command_types == [
-        "maintain_protective_stop",
         "advance_breakeven_stop",
         "advance_trailing_stop",
         "reconcile_position_and_orders",
@@ -258,13 +327,11 @@ def test_risk_assist_cycle_surfaces_breakeven_and_trailing_commands_in_simulated
     audit_event = json.loads(config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
     assert audit_event["event_type"] == "risk_assist_cycle"
     assert audit_event["payload"]["command_reasons"] == [
-        "protective_stop_required",
         "breakeven_ready",
         "trailing_ready",
         "reconciliation_required",
     ]
     assert audit_event["payload"]["command_summary"] == [
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
         {"target": "advance_breakeven_stop", "reason": "breakeven_ready", "operation": "tighten"},
         {"target": "advance_trailing_stop", "reason": "trailing_ready", "operation": "tighten"},
         {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "operation": "query"},
@@ -290,6 +357,7 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
             "position_state": "ARMED",
             "current_position_direction": "neutral",
             "position_size_pct": 0.0,
+            "execution_allowed": True,
             "initial_stop_loss": 0.97,
             "breakeven_trigger": 1.01,
             "trailing_rule": "trail_with_trigger",
@@ -356,8 +424,10 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": False,
         "primary_failed": False,
+        "primary_succeeded": True,
         "auxiliary_failed": False,
         "protective_stop_failed": False,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["action_summary"] == {
         "requested_action": "entry_long",
@@ -410,12 +480,14 @@ def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mod
             "position_state": "ARMED",
             "current_position_direction": "neutral",
             "position_size_pct": 0.0,
+            "execution_allowed": True,
             "direction": "long",
             "initial_stop_loss": 0.97,
         },
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.REAL,
+        manual_entry_confirmation_required=False,
         state_store_path=tmp_path / "state.json",
         audit_log_path=tmp_path / "audit.jsonl",
         artifacts_root=tmp_path / "runtime",
@@ -471,6 +543,170 @@ def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mod
 
 
 
+def test_shadow_orchestrator_blocks_real_entry_without_manual_confirmation(tmp_path: Path) -> None:
+    payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-04-26T14:00:00",
+            "action": "entry_long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.0,
+            "execution_allowed": True,
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+        },
+    )
+    config = BotConfig(
+        runtime_mode=RuntimeMode.REAL,
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    adapter = FakeExchangeAdapter(
+        capabilities=AdapterCapabilities(
+            supports_real_execution=True,
+            supports_recent_fill_sync=True,
+            supports_trailing_stop_update=True,
+            supports_breakeven_update=True,
+        ),
+        snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+            protective_stop_present=False,
+        ),
+    )
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=FakeEngineClient(payload),
+        network_guard=NetworkGuard(),
+        state_store=StateStore(config.state_store_path),
+        exchange_adapter=adapter,
+    )
+
+    report = orchestrator.run_cycle(generated_at=datetime(2026, 4, 26, 14, 0, 0))
+
+    assert adapter.last_commands == []
+    assert report.command_types == []
+    assert report.command_result_statuses == ["blocked", "blocked"]
+    assert report.execution_overview["primary_target"] == "entry_order"
+    assert report.execution_overview["primary_status"] == "blocked"
+    assert report.execution_overview["primary_accepted"] is False
+    audit_event = json.loads(config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    results = audit_event["payload"]["execution_results"]
+    assert [result["target"] for result in results] == ["entry_order", "maintain_protective_stop"]
+    assert {result["status"] for result in results} == {"blocked"}
+    assert results[0]["details"]["confirmation_required"] is True
+    assert results[0]["details"]["expected_confirmation_token"].startswith("ENTRY-")
+
+
+def test_shadow_orchestrator_allows_real_entry_with_matching_manual_confirmation(tmp_path: Path) -> None:
+    payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-04-26T14:00:00",
+            "action": "entry_long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.0,
+            "execution_allowed": True,
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+        },
+    )
+    generated_at = datetime(2026, 4, 26, 14, 0, 0)
+    preview_config = BotConfig(
+        runtime_mode=RuntimeMode.REAL,
+        state_store_path=tmp_path / "preview_state.json",
+        audit_log_path=tmp_path / "preview_audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    preview_adapter = FakeExchangeAdapter(
+        capabilities=AdapterCapabilities(
+            supports_real_execution=True,
+            supports_recent_fill_sync=True,
+            supports_trailing_stop_update=True,
+            supports_breakeven_update=True,
+        ),
+        snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+            protective_stop_present=False,
+        ),
+    )
+    ShadowOrchestrator(
+        preview_config,
+        engine_client=FakeEngineClient(payload),
+        network_guard=NetworkGuard(),
+        state_store=StateStore(preview_config.state_store_path),
+        exchange_adapter=preview_adapter,
+    ).run_cycle(generated_at=generated_at)
+    preview_audit = json.loads(preview_config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    token = preview_audit["payload"]["execution_results"][0]["details"]["expected_confirmation_token"]
+    config = BotConfig(
+        runtime_mode=RuntimeMode.REAL,
+        manual_entry_confirmation_token=token,
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    adapter = FakeExchangeAdapter(
+        capabilities=AdapterCapabilities(
+            supports_real_execution=True,
+            supports_recent_fill_sync=True,
+            supports_trailing_stop_update=True,
+            supports_breakeven_update=True,
+        ),
+        snapshot_sequence=[
+            AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+                protective_stop_present=False,
+            ),
+            AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.3),
+                protective_stop_present=True,
+            ),
+        ],
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="accepted",
+                accepted=True,
+                simulated=False,
+                reason="effective_action:entry_long",
+            )
+        ],
+    )
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=FakeEngineClient(payload),
+        network_guard=NetworkGuard(),
+        state_store=StateStore(config.state_store_path),
+        exchange_adapter=adapter,
+    )
+
+    report = orchestrator.run_cycle(generated_at=generated_at)
+
+    assert [command.target for command in adapter.last_commands] == ["entry_order", "maintain_protective_stop"]
+    assert report.command_result_statuses == ["accepted"]
+
+
 def test_shadow_orchestrator_refreshes_runtime_snapshot_after_real_reduce_success(tmp_path: Path) -> None:
     payload = EngineCyclePayload(
         judgement={
@@ -496,6 +732,7 @@ def test_shadow_orchestrator_refreshes_runtime_snapshot_after_real_reduce_succes
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.REAL,
+        manual_entry_confirmation_required=False,
         state_store_path=tmp_path / "state.json",
         audit_log_path=tmp_path / "audit.jsonl",
         artifacts_root=tmp_path / "runtime",
@@ -587,6 +824,7 @@ def test_risk_assist_cycle_prefers_real_reconciliation_summary_over_stale_runtim
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.REAL,
+        manual_entry_confirmation_required=False,
         state_store_path=tmp_path / "state.json",
         audit_log_path=tmp_path / "audit.jsonl",
         artifacts_root=tmp_path / "runtime",
@@ -871,7 +1109,7 @@ def test_risk_assist_cycle_skips_when_state_is_not_eligible(tmp_path: Path) -> N
     )
     report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 5, 0))
     assert report.eligible is False
-    assert fake_client.fetch_risk_cycle_calls == 0
+    assert fake_client.fetch_cycle_calls == 0
 
 
 def test_risk_assist_cycle_runs_when_entered_state_has_zero_size_pct(tmp_path: Path) -> None:
@@ -929,7 +1167,7 @@ def test_risk_assist_cycle_runs_when_entered_state_has_zero_size_pct(tmp_path: P
     )
     report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 6, 0))
     assert report.eligible is True
-    assert fake_client.fetch_risk_cycle_calls == 1
+    assert fake_client.fetch_cycle_calls == 1
     assert "protective_stop_required" in report.command_reasons
 
 
@@ -1092,10 +1330,84 @@ def test_risk_assist_cycle_clears_stale_recovery_flags_when_runtime_is_in_sync(t
     report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 7, 0))
     updated_state = state_store.load()
     assert report.eligible is True
-    assert report.command_types == ["maintain_protective_stop"]
+    assert report.command_types == []
     assert updated_state.execution_state.value == "position_open"
     assert updated_state.recovery_required is False
     assert updated_state.reconciliation_required is False
+    assert updated_state.protective_stop_required is False
+
+
+def test_risk_assist_cycle_clears_stale_protective_stop_flag_when_runtime_stop_exists(tmp_path: Path) -> None:
+    payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-04-26T12:07:30",
+            "action": "wait",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.25,
+        },
+    )
+    config = BotConfig(
+        runtime_mode=RuntimeMode.SIMULATED_REAL,
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    state_store = StateStore(config.state_store_path)
+    state = state_store.load()
+    state.recovery_required = True
+    state.reconciliation_required = True
+    state.protective_stop_required = True
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.25
+    state_store.save(state)
+    adapter = FakeExchangeAdapter(
+        capabilities=AdapterCapabilities(
+            supports_real_execution=True,
+            supports_recent_fill_sync=True,
+            supports_trailing_stop_update=True,
+            supports_breakeven_update=True,
+        ),
+        snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.25),
+            protective_stop_present=True,
+        ),
+        reconciliation=ReconciliationResult(
+            in_sync=True,
+            protective_stop_present=True,
+            needs_position_sync=False,
+            needs_order_sync=False,
+            reason_codes=[],
+        ),
+    )
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=FakeEngineClient(payload),
+        network_guard=NetworkGuard(),
+        state_store=state_store,
+        exchange_adapter=adapter,
+    )
+
+    report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 7, 30))
+
+    updated_state = state_store.load()
+    assert report.command_types == []
+    assert adapter.last_commands == []
+    assert updated_state.execution_state.value == "position_open"
+    assert updated_state.recovery_required is False
+    assert updated_state.reconciliation_required is False
+    assert updated_state.protective_stop_required is False
 
 
 
@@ -1185,7 +1497,7 @@ def test_risk_assist_cycle_runs_when_recovery_is_required(tmp_path: Path) -> Non
     assert "reduce_order" in report.command_types
     assert "reconcile_position_and_orders" not in report.command_types
     assert all(status == "simulated" for status in report.command_result_statuses)
-    assert fake_client.fetch_risk_cycle_calls == 1
+    assert fake_client.fetch_cycle_calls == 1
 
 
 
@@ -1280,7 +1592,7 @@ def test_risk_assist_cycle_keeps_exit_available_during_recovery(tmp_path: Path) 
     assert "exit_order" in report.command_types
     assert "reconcile_position_and_orders" in report.command_types
     assert all(status == "simulated" for status in report.command_result_statuses)
-    assert fake_client.fetch_risk_cycle_calls == 1
+    assert fake_client.fetch_cycle_calls == 1
 
 
 
@@ -1727,8 +2039,10 @@ def test_risk_assist_cycle_marks_stop_failure_for_reconciliation(tmp_path: Path)
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": True,
         "primary_failed": False,
+        "primary_succeeded": True,
         "auxiliary_failed": True,
         "protective_stop_failed": True,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["execution_overview"] == report.execution_overview
     assert audit_event["payload"]["runtime_overview"] == report.runtime_overview
@@ -1835,8 +2149,10 @@ def test_risk_assist_cycle_audit_log_marks_failure_categories(tmp_path: Path) ->
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": True,
         "primary_failed": True,
+        "primary_succeeded": False,
         "auxiliary_failed": True,
         "protective_stop_failed": True,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["execution_overview"] == {
         "requested_action": "reduce",
@@ -2121,8 +2437,10 @@ def test_risk_assist_cycle_audit_log_includes_recent_fill_summary(tmp_path: Path
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": False,
         "primary_failed": False,
+        "primary_succeeded": True,
         "auxiliary_failed": False,
         "protective_stop_failed": False,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["runtime_overview"] == report.runtime_overview
     assert audit_event["payload"]["recent_fill_summary"] == {
@@ -2154,6 +2472,7 @@ def test_shadow_orchestrator_marks_rejected_execution_for_recovery(tmp_path: Pat
             "position_state": "ARMED",
             "current_position_direction": "neutral",
             "position_size_pct": 0.0,
+            "execution_allowed": True,
             "initial_stop_loss": 0.97,
         },
     )
@@ -2301,7 +2620,7 @@ def test_shadow_orchestrator_persists_reconciliation_and_fill_summaries_in_simul
         "pending_action": "",
         "recovery_required": True,
         "reconciliation_required": True,
-        "protective_stop_required": True,
+        "protective_stop_required": False,
         "reconciliation_in_sync": False,
         "reconciliation_reason_codes": ["position_size_mismatch"],
         "recent_fill_summary": {
@@ -2474,8 +2793,10 @@ def test_shadow_orchestrator_audit_log_includes_recent_fill_summary(tmp_path: Pa
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": False,
         "primary_failed": False,
+        "primary_succeeded": False,
         "auxiliary_failed": False,
         "protective_stop_failed": False,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["runtime_overview"] == {
         "expected_position_state": "ENTERED",
@@ -2492,7 +2813,7 @@ def test_shadow_orchestrator_audit_log_includes_recent_fill_summary(tmp_path: Pa
         "pending_action": "",
         "recovery_required": True,
         "reconciliation_required": True,
-        "protective_stop_required": True,
+        "protective_stop_required": False,
         "reconciliation_in_sync": False,
         "reconciliation_reason_codes": ["position_size_mismatch"],
         "recent_fill_summary": {
@@ -2534,6 +2855,7 @@ def test_shadow_orchestrator_marks_stop_failure_for_reconciliation(tmp_path: Pat
             "position_state": "ARMED",
             "current_position_direction": "neutral",
             "position_size_pct": 0.0,
+            "execution_allowed": True,
             "initial_stop_loss": 0.97,
             "breakeven_trigger": 1.01,
             "trailing_rule": "trail_with_trigger",
@@ -2613,8 +2935,10 @@ def test_shadow_orchestrator_marks_stop_failure_for_reconciliation(tmp_path: Pat
     assert audit_event["payload"]["execution_result_summary"] == {
         "has_failure": True,
         "primary_failed": False,
+        "primary_succeeded": True,
         "auxiliary_failed": True,
         "protective_stop_failed": True,
+        "capability_blocked": False,
     }
     assert audit_event["payload"]["execution_overview"] == report.execution_overview
     assert audit_event["payload"]["runtime_overview"] == report.runtime_overview

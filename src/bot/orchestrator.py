@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .audit_logger import AuditLogger
 from .config import BotConfig, RuntimeMode
 from .engine_client import EngineClient
+from .execution_risk_gate import ExecutionRiskGate
 from .exchange_adapter import AdapterCapabilities, AdapterRuntimeSnapshot, ExchangeAdapter, ExchangeAdapterProtocol, ReconciliationResult
+from .exchange_adapter import CommandExecutionResult, ExecutionCommand
+from .execution_summary import summarize_execution_results
 from .network_guard import NetworkGuard
 from .position_manager import PositionManager
 from .state_store import StateStore
@@ -79,12 +83,32 @@ class ShadowOrchestrator:
         exchange_adapter: ExchangeAdapterProtocol | None = None,
     ) -> None:
         self._config = config
-        self._engine_client = engine_client or EngineClient(config)
+        if engine_client is None:
+            raise RuntimeError("必须显式注入已绑定 live_judgement / handoff / envelope factory 的 EngineClient")
+        self._engine_client = engine_client
         self._network_guard = network_guard or NetworkGuard()
         self._state_store = state_store or StateStore(config.state_store_path)
         self._audit_logger = audit_logger or AuditLogger(config.audit_log_path)
-        self._position_manager = position_manager or PositionManager()
-        self._exchange_adapter = exchange_adapter or ExchangeAdapter()
+        self._position_manager = position_manager or PositionManager(
+            ExecutionRiskGate.from_values(
+                leverage=config.leverage,
+                demo_small_account_mode=config.demo_small_account_mode,
+                entry_margin_budget_usdt=config.entry_margin_budget_usdt,
+                entry_margin_budget_max_equity_usdt=config.entry_margin_budget_max_equity_usdt,
+                max_account_risk_pct_per_trade=config.max_account_risk_pct_per_trade,
+                max_probe_account_risk_pct=config.max_probe_account_risk_pct,
+                max_probe_size_pct=config.max_probe_size_pct,
+                exchange_min_order_qty=config.exchange_min_order_qty,
+                exchange_qty_step_size=config.exchange_qty_step_size,
+                require_execution_allowed=config.require_execution_allowed,
+            )
+        )
+        if exchange_adapter is not None:
+            self._exchange_adapter = exchange_adapter
+        elif config.runtime_mode == RuntimeMode.SHADOW:
+            self._exchange_adapter = ExchangeAdapter()
+        else:
+            raise RuntimeError("RuntimeMode.REAL 和 RuntimeMode.SIMULATED_REAL 必须显式注入支持 runtime snapshot 的 exchange adapter")
 
     def run_cycle(self, *, generated_at: datetime | None = None) -> ShadowCycleReport:
         cycle_generated_at = generated_at or datetime.now().replace(microsecond=0)
@@ -122,10 +146,16 @@ class ShadowOrchestrator:
             execution_plan=execution_plan,
             handoff=cycle.handoff,
         )
+        execution_commands, confirmation_results = self._apply_manual_entry_confirmation_gate(
+            execution_commands=execution_commands,
+            handoff=cycle.handoff,
+            generated_at=cycle_generated_at,
+        )
         execution_results = self._exchange_adapter.execute_commands(
             commands=execution_commands,
             runtime_mode=self._config.runtime_mode,
         )
+        execution_results = confirmation_results + execution_results
         runtime_snapshot_for_state = self._resolve_runtime_snapshot_after_execution(
             runtime_snapshot=runtime_snapshot,
             execution_results=execution_results,
@@ -139,7 +169,7 @@ class ShadowOrchestrator:
             guard=guard,
             reconciliation=reconciliation,
         )
-        execution_result_summary = self._summarize_execution_results(execution_results)
+        execution_result_summary = summarize_execution_results(execution_results)
         execution_overview = self._summarize_execution_overview(
             requested_action=execution_plan.requested_action,
             effective_action=execution_plan.effective_action,
@@ -175,6 +205,7 @@ class ShadowOrchestrator:
                 "engine_mode": self._config.engine_mode.value,
                 "adapter_capabilities": capabilities.model_dump(mode="json"),
                 "judgement_status": cycle.judgement.get("status"),
+                "judgement": cycle.judgement,
                 "requested_action": execution_plan.requested_action,
                 "effective_action": execution_plan.effective_action,
                 "plan_reason": execution_plan.plan_reason,
@@ -244,7 +275,7 @@ class ShadowOrchestrator:
                 audit_log_path=str(self._audit_logger.output_path),
             )
 
-        cycle = self._engine_client.fetch_risk_cycle(
+        cycle = self._engine_client.fetch_cycle(
             current_state=state.observed_position_state,
             current_position_size_pct=state.observed_position_size_pct,
             current_position_direction=state.observed_position_direction,
@@ -277,10 +308,16 @@ class ShadowOrchestrator:
             execution_plan=execution_plan,
             handoff=cycle.handoff,
         )
+        execution_commands, confirmation_results = self._apply_manual_entry_confirmation_gate(
+            execution_commands=execution_commands,
+            handoff=cycle.handoff,
+            generated_at=cycle_generated_at,
+        )
         execution_results = self._exchange_adapter.execute_commands(
             commands=execution_commands,
             runtime_mode=self._config.runtime_mode,
         )
+        execution_results = confirmation_results + execution_results
         runtime_snapshot_for_state = self._resolve_runtime_snapshot_after_execution(
             runtime_snapshot=runtime_snapshot,
             execution_results=execution_results,
@@ -294,7 +331,7 @@ class ShadowOrchestrator:
             guard=guard,
             reconciliation=reconciliation,
         )
-        execution_result_summary = self._summarize_execution_results(execution_results)
+        execution_result_summary = summarize_execution_results(execution_results)
         execution_overview = self._summarize_execution_overview(
             requested_action=execution_plan.requested_action,
             effective_action=execution_plan.effective_action,
@@ -407,8 +444,8 @@ class ShadowOrchestrator:
         return {
             "requested_action": requested_action,
             "effective_action": effective_action,
-            "primary_target": primary_command.target if primary_command else "",
-            "primary_reason": primary_command.reason if primary_command else "",
+            "primary_target": primary_command.target if primary_command else primary_result.target if primary_result else "",
+            "primary_reason": primary_command.reason if primary_command else primary_result.reason if primary_result else "",
             "primary_status": primary_result.status if primary_result else "not_applicable",
             "primary_accepted": primary_result.accepted if primary_result else False,
             "has_primary_failure": execution_result_summary["primary_failed"],
@@ -471,6 +508,75 @@ class ShadowOrchestrator:
             for result in execution_results
         ]
 
+    def _apply_manual_entry_confirmation_gate(
+        self,
+        *,
+        execution_commands: list[ExecutionCommand],
+        handoff: dict[str, object] | None,
+        generated_at: datetime,
+    ) -> tuple[list[ExecutionCommand], list[CommandExecutionResult]]:
+        if self._config.runtime_mode != RuntimeMode.REAL:
+            return execution_commands, []
+        if not self._config.manual_entry_confirmation_required:
+            return execution_commands, []
+        if not any(command.target == "entry_order" for command in execution_commands):
+            return execution_commands, []
+
+        expected_token = self._build_manual_entry_confirmation_token(
+            execution_commands=execution_commands,
+            handoff=handoff,
+            generated_at=generated_at,
+        )
+        if self._config.manual_entry_confirmation_token == expected_token:
+            return execution_commands, []
+
+        blocked_targets = {"entry_order", "maintain_protective_stop"}
+        blocked_results = [
+            CommandExecutionResult(
+                target=command.target,
+                status="blocked",
+                accepted=False,
+                simulated=True,
+                reason="manual_entry_confirmation_required",
+                details={
+                    "confirmation_required": True,
+                    "expected_confirmation_token": expected_token,
+                    "provided_confirmation_token": bool(self._config.manual_entry_confirmation_token),
+                    "runtime_mode": self._config.runtime_mode.value,
+                    "command_type": command.command_type,
+                    "operation": command.operation,
+                    "payload": command.payload.model_dump(mode="json"),
+                    "idempotency_key": command.idempotency_key,
+                },
+            )
+            for command in execution_commands
+            if command.target in blocked_targets
+        ]
+        executable_commands = [
+            command
+            for command in execution_commands
+            if command.target not in blocked_targets
+        ]
+        return executable_commands, blocked_results
+
+    @staticmethod
+    def _build_manual_entry_confirmation_token(
+        *,
+        execution_commands: list[ExecutionCommand],
+        handoff: dict[str, object] | None,
+        generated_at: datetime,
+    ) -> str:
+        entry_command = next(command for command in execution_commands if command.target == "entry_order")
+        payload = entry_command.payload.model_dump(mode="json")
+        basis = {
+            "action": payload.get("action"),
+            "direction": payload.get("direction"),
+            "initial_stop_loss": payload.get("initial_stop_loss"),
+            "target": entry_command.target,
+        }
+        serialized = "|".join(f"{key}={basis[key]}" for key in sorted(basis))
+        return "ENTRY-" + sha256(serialized.encode("utf-8")).hexdigest()[:12].upper()
+
     def _resolve_runtime_snapshot_after_execution(
         self,
         *,
@@ -492,32 +598,6 @@ class ShadowOrchestrator:
         )
 
     @staticmethod
-    def _summarize_execution_results(execution_results) -> dict[str, bool]:
-        has_failure = False
-        primary_failed = False
-        auxiliary_failed = False
-        protective_stop_failed = False
-        primary_targets = {"entry_order", "reduce_order", "exit_order"}
-        failure_statuses = {"failed", "rejected", "error", "timeout", "not_implemented"}
-        for result in execution_results:
-            failed = (not result.accepted) or (str(result.status).lower() in failure_statuses)
-            if not failed:
-                continue
-            has_failure = True
-            if result.target in primary_targets:
-                primary_failed = True
-                continue
-            auxiliary_failed = True
-            if result.target == "maintain_protective_stop":
-                protective_stop_failed = True
-        return {
-            "has_failure": has_failure,
-            "primary_failed": primary_failed,
-            "auxiliary_failed": auxiliary_failed,
-            "protective_stop_failed": protective_stop_failed,
-        }
-
-    @staticmethod
     def _is_risk_cycle_eligible(state) -> bool:
         return bool(
             state.observed_position_size_pct > 0.0
@@ -531,8 +611,8 @@ class ShadowOrchestrator:
     def _is_runtime_snapshot_valid(runtime_snapshot: AdapterRuntimeSnapshot) -> bool:
         return bool(runtime_snapshot.snapshot_valid)
 
-    @staticmethod
     def _build_runtime_state_payload(
+        self,
         *,
         state,
         handoff: dict[str, object] | None,
@@ -540,6 +620,7 @@ class ShadowOrchestrator:
         reconciliation: ReconciliationResult,
     ) -> dict[str, object]:
         payload = state.model_dump(mode="json")
+        payload["runtime_now"] = datetime.now().replace(microsecond=0).isoformat()
         runtime_snapshot_valid = ShadowOrchestrator._is_runtime_snapshot_valid(runtime_snapshot)
         runtime_position = runtime_snapshot.position
         runtime_position_state = str(runtime_position.position_state or "") if runtime_snapshot_valid else ""
@@ -558,6 +639,22 @@ class ShadowOrchestrator:
             payload["observed_position_direction"] = runtime_position_direction
         if runtime_position_size_pct > 0.0:
             payload["observed_position_size_pct"] = runtime_position_size_pct
+        if runtime_snapshot_valid:
+            payload["protective_stop_present"] = bool(runtime_snapshot.protective_stop_present)
+            if runtime_snapshot.account_equity is not None:
+                payload["runtime_account_equity"] = float(runtime_snapshot.account_equity)
+                payload["demo_small_account_mode"] = self._config.demo_small_account_mode
+                configured_budget = ShadowOrchestrator._resolve_entry_margin_budget(handoff)
+                if configured_budget is not None:
+                    payload["entry_margin_budget_usdt"] = min(configured_budget, float(runtime_snapshot.account_equity))
+                    if self._config.entry_margin_budget_max_equity_usdt is not None:
+                        payload["entry_margin_budget_max_equity_usdt"] = self._config.entry_margin_budget_max_equity_usdt
+            if runtime_snapshot.account_equity_source:
+                payload["runtime_account_equity_source"] = runtime_snapshot.account_equity_source
+            if runtime_position.mark_price is not None:
+                payload["runtime_mark_price"] = float(runtime_position.mark_price)
+            if runtime_position.leverage is not None:
+                payload["runtime_leverage"] = int(runtime_position.leverage)
         observed_position_size_pct = float(payload.get("observed_position_size_pct") or 0.0)
         payload["breakeven_ready"] = bool(handoff.get("breakeven_trigger")) and expected_open_risk
         payload["trailing_ready"] = bool(handoff.get("trailing_activation_ratio")) and bool(
@@ -574,9 +671,23 @@ class ShadowOrchestrator:
                 or "position_state_mismatch" in reconciliation.reason_codes
             )
         )
-        payload["protective_stop_required"] = bool(payload.get("protective_stop_required")) or (
-            expected_open_risk and not reconciliation.protective_stop_present
-        )
+        if runtime_snapshot_valid:
+            payload["protective_stop_required"] = expected_open_risk and not reconciliation.protective_stop_present
+        else:
+            payload["protective_stop_required"] = bool(payload.get("protective_stop_required")) or expected_open_risk
         payload["recovery_required"] = not reconciliation.in_sync
         payload["reconciliation_required"] = not reconciliation.in_sync
         return payload
+
+    @staticmethod
+    def _resolve_entry_margin_budget(handoff: dict[str, object]) -> float | None:
+        for key in ("entry_margin_budget_usdt", "margin_budget_usdt"):
+            value = handoff.get(key)
+            try:
+                if value is not None and value != "":
+                    parsed = float(value)
+                    if parsed > 0.0:
+                        return parsed
+            except (TypeError, ValueError):
+                continue
+        return None

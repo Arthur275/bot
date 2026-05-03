@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_enums import PositionAction
 from .exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult
+from .execution_summary import summarize_execution_results
 from .network_guard import GuardDecision
 
 
@@ -83,12 +86,13 @@ class StateStore:
         runtime_snapshot: AdapterRuntimeSnapshot | None = None,
     ) -> BotRuntimeState:
         next_state = state.model_copy(deep=True)
-        execution_summary = self._summarize_execution_results(execution_results)
+        execution_summary = summarize_execution_results(execution_results)
         previous_observed_position_state = state.observed_position_state
         previous_observed_position_size_pct = state.observed_position_size_pct
         self._apply_observed_position_inputs(
             next_state=next_state,
             handoff=handoff,
+            effective_action=effective_action,
             execution_results=execution_results,
             runtime_snapshot=runtime_snapshot,
         )
@@ -139,6 +143,12 @@ class StateStore:
             execution_results=execution_results,
         )
         next_state.recent_fill_summary = self._build_recent_fill_summary(execution_results=execution_results)
+        self._update_active_probe_metadata(
+            next_state=next_state,
+            handoff=handoff,
+            effective_action=effective_action,
+            execution_results=execution_results,
+        )
         return self.save(next_state)
 
     @staticmethod
@@ -150,6 +160,7 @@ class StateStore:
         *,
         next_state: BotRuntimeState,
         handoff: dict[str, Any] | None,
+        effective_action: str,
         execution_results: Sequence[CommandExecutionResult] | None,
         runtime_snapshot: AdapterRuntimeSnapshot | None,
     ) -> None:
@@ -172,6 +183,10 @@ class StateStore:
             next_state.observed_position_size_pct = float(runtime_snapshot.position.size_pct)
             return
         if not handoff:
+            return
+        requested_action = str(handoff.get("action") or "")
+        entry_actions = {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}
+        if requested_action in entry_actions and effective_action not in entry_actions:
             return
         fallback_state = str(handoff.get("position_state") or "")
         fallback_direction = str(handoff.get("current_position_direction") or "")
@@ -203,20 +218,20 @@ class StateStore:
         if guard.degraded:
             return ExecutionLayerState.DEGRADED
         if primary_execution_failed:
-            if effective_action in {"entry_long", "entry_short", "small_probe"}:
+            if effective_action in {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}:
                 return ExecutionLayerState.ENTRY_PENDING
-            if effective_action == "reduce":
+            if effective_action == PositionAction.REDUCE.value:
                 return ExecutionLayerState.REDUCE_PENDING
-            if effective_action == "exit":
+            if effective_action == PositionAction.EXIT.value:
                 return ExecutionLayerState.EXIT_PENDING
         if auxiliary_execution_failed or needs_reconciliation:
             return ExecutionLayerState.RECONCILING
         if primary_execution_succeeded:
-            if effective_action in {"entry_long", "entry_short", "small_probe"}:
+            if effective_action in {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}:
                 if observed_position_state == "ENTERED" or observed_position_size_pct > 0.0:
                     return ExecutionLayerState.POSITION_OPEN
                 return ExecutionLayerState.ENTRY_PENDING
-            if effective_action == "reduce":
+            if effective_action == PositionAction.REDUCE.value:
                 if StateStore._observed_reduce_applied(
                     previous_observed_position_state=previous_observed_position_state,
                     previous_observed_position_size_pct=previous_observed_position_size_pct,
@@ -227,15 +242,15 @@ class StateStore:
                         observed_position_state == "ENTERED" or observed_position_size_pct > 0.0
                     ) else ExecutionLayerState.IDLE
                 return ExecutionLayerState.REDUCE_PENDING
-            if effective_action == "exit":
+            if effective_action == PositionAction.EXIT.value:
                 if observed_position_state == "FLAT" and observed_position_size_pct <= 0.0:
                     return ExecutionLayerState.IDLE
                 return ExecutionLayerState.EXIT_PENDING
-        if effective_action in {"entry_long", "entry_short", "small_probe"}:
+        if effective_action in {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}:
             return ExecutionLayerState.ENTRY_PENDING
-        if effective_action == "reduce":
+        if effective_action == PositionAction.REDUCE.value:
             return ExecutionLayerState.REDUCE_PENDING
-        if effective_action == "exit":
+        if effective_action == PositionAction.EXIT.value:
             return ExecutionLayerState.EXIT_PENDING
         if observed_position_state == "ENTERED" or observed_position_size_pct > 0.0:
             return ExecutionLayerState.POSITION_OPEN
@@ -254,18 +269,18 @@ class StateStore:
         observed_position_state: str,
         observed_position_size_pct: float,
     ) -> str:
-        if effective_action in {"", "wait", "observe_only", "paper_only"}:
+        if effective_action in {"", PositionAction.WAIT.value, PositionAction.OBSERVE_ONLY.value, PositionAction.PAPER_ONLY.value}:
             return ""
         if auxiliary_execution_failed:
             return ""
         if primary_execution_failed:
             return effective_action
         if primary_execution_succeeded:
-            if effective_action in {"entry_long", "entry_short", "small_probe"}:
+            if effective_action in {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}:
                 if auxiliary_execution_failed or needs_reconciliation:
                     return effective_action
                 return "" if (observed_position_state == "ENTERED" or observed_position_size_pct > 0.0) else effective_action
-            if effective_action == "reduce":
+            if effective_action == PositionAction.REDUCE.value:
                 if auxiliary_execution_failed or needs_reconciliation:
                     return effective_action
                 return "" if StateStore._observed_reduce_applied(
@@ -274,7 +289,7 @@ class StateStore:
                     observed_position_state=observed_position_state,
                     observed_position_size_pct=observed_position_size_pct,
                 ) else effective_action
-            if effective_action == "exit":
+            if effective_action == PositionAction.EXIT.value:
                 if auxiliary_execution_failed or needs_reconciliation:
                     return effective_action
                 return "" if (observed_position_state == "FLAT" and observed_position_size_pct <= 0.0) else effective_action
@@ -293,36 +308,6 @@ class StateStore:
         if previous_observed_position_state != "ENTERED" and previous_observed_position_size_pct <= 0.0:
             return False
         return observed_position_size_pct < previous_observed_position_size_pct
-
-    @staticmethod
-    def _summarize_execution_results(
-        execution_results: Sequence[CommandExecutionResult] | None,
-    ) -> dict[str, bool]:
-        summary = {
-            "has_failure": False,
-            "primary_failed": False,
-            "primary_succeeded": False,
-            "auxiliary_failed": False,
-            "protective_stop_failed": False,
-        }
-        if not execution_results:
-            return summary
-        primary_targets = {"entry_order", "reduce_order", "exit_order"}
-        failure_statuses = {"failed", "rejected", "error", "timeout", "not_implemented"}
-        for result in execution_results:
-            failed = (not result.accepted) or (result.status.lower() in failure_statuses)
-            if failed:
-                summary["has_failure"] = True
-                if result.target in primary_targets:
-                    summary["primary_failed"] = True
-                    continue
-                summary["auxiliary_failed"] = True
-                if result.target == "maintain_protective_stop":
-                    summary["protective_stop_failed"] = True
-                continue
-            if result.target in primary_targets:
-                summary["primary_succeeded"] = True
-        return summary
 
     @staticmethod
     def _collect_recent_idempotency_keys(
@@ -366,6 +351,115 @@ class StateStore:
             if isinstance(summary, dict) and summary:
                 return True
         return False
+
+    @staticmethod
+    def _update_active_probe_metadata(
+        *,
+        next_state: BotRuntimeState,
+        handoff: dict[str, Any] | None,
+        effective_action: str,
+        execution_results: Sequence[CommandExecutionResult] | None,
+    ) -> None:
+        metadata = dict(next_state.metadata)
+        if next_state.observed_position_state == "FLAT" and next_state.observed_position_size_pct <= 0.0:
+            StateStore._clear_active_probe_metadata(metadata)
+            next_state.metadata = metadata
+            return
+        if not StateStore._is_active_contrarian_probe_entry(
+            next_state=next_state,
+            handoff=handoff,
+            effective_action=effective_action,
+            execution_results=execution_results,
+        ):
+            next_state.metadata = metadata
+            return
+        handoff = handoff or {}
+        started_at = StateStore._parse_datetime(handoff.get("generated_at")) or datetime.now().replace(microsecond=0)
+        expiry_bars = int(handoff.get("probe_expiry_bars") or 0)
+        expiry_timeframe = str(handoff.get("probe_expiry_timeframe") or "")
+        expires_at = StateStore._probe_expiry_timestamp(
+            started_at=started_at,
+            bars=expiry_bars,
+            timeframe=expiry_timeframe,
+        )
+        metadata.update(
+            {
+                "active_probe_source": "contrarian_short_probe",
+                "active_probe_started_at": started_at.isoformat(),
+                "active_probe_expiry_bars": expiry_bars,
+                "active_probe_expiry_timeframe": expiry_timeframe,
+                "active_probe_expires_at": expires_at.isoformat() if expires_at else "",
+                "active_probe_invalid_if_no_followthrough": bool(handoff.get("probe_invalid_if_no_followthrough")),
+                "active_probe_risk_tier": str(handoff.get("probe_risk_tier") or ""),
+            }
+        )
+        next_state.metadata = metadata
+
+    @staticmethod
+    def _is_active_contrarian_probe_entry(
+        *,
+        next_state: BotRuntimeState,
+        handoff: dict[str, Any] | None,
+        effective_action: str,
+        execution_results: Sequence[CommandExecutionResult] | None,
+    ) -> bool:
+        if effective_action != PositionAction.SMALL_PROBE.value:
+            return False
+        if str((handoff or {}).get("probe_source") or "") != "contrarian_short_probe":
+            return False
+        if StateStore._has_accepted_entry_order(execution_results):
+            return True
+        return str(next_state.metadata.get("active_probe_source") or "") == "contrarian_short_probe"
+
+    @staticmethod
+    def _has_accepted_entry_order(execution_results: Sequence[CommandExecutionResult] | None) -> bool:
+        return any(
+            result.target == "entry_order" and result.accepted
+            for result in execution_results or []
+        )
+
+    @staticmethod
+    def _clear_active_probe_metadata(metadata: dict[str, Any]) -> None:
+        for key in (
+            "active_probe_source",
+            "active_probe_started_at",
+            "active_probe_expiry_bars",
+            "active_probe_expiry_timeframe",
+            "active_probe_expires_at",
+            "active_probe_invalid_if_no_followthrough",
+            "active_probe_risk_tier",
+        ):
+            metadata.pop(key, None)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _probe_expiry_timestamp(*, started_at: datetime, bars: int, timeframe: str) -> datetime | None:
+        if bars <= 0:
+            return None
+        timeframe_minutes = StateStore._timeframe_minutes(timeframe)
+        if timeframe_minutes <= 0:
+            return None
+        return started_at + timedelta(minutes=bars * timeframe_minutes)
+
+    @staticmethod
+    def _timeframe_minutes(timeframe: str) -> int:
+        normalized = timeframe.strip().lower()
+        if normalized.endswith("m"):
+            return int(normalized[:-1] or "0")
+        if normalized.endswith("h"):
+            return int(normalized[:-1] or "0") * 60
+        return 0
 
     @staticmethod
     def _apply_reconciliation_summary(

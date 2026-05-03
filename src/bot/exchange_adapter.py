@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
+from hashlib import sha256
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .binance_transport import BinanceRequestConfigError, BinanceRequestSigner, BinanceTransport, BinanceTransportError
+from .binance_transport import (
+    BinanceRequestConfigError,
+    BinanceRequestSigner,
+    BinanceTransport,
+    BinanceTransportError,
+    TransportResponse,
+)
 from .config import RuntimeMode
 from .position_manager import ExecutionPlan
 
@@ -43,6 +50,13 @@ class AdapterRuntimeSnapshot(BaseModel):
     open_orders: list[OrderSnapshot] = Field(default_factory=list)
     protective_stop_present: bool = False
     snapshot_valid: bool = True
+    account_equity: float | None = None
+    account_equity_source: str = ""
+    error_endpoint: str = ""
+    error_kind: str = ""
+    error_message: str = ""
+    error_http_status: int | None = None
+    error_payload: Any = None
 
 
 class ReconciliationResult(BaseModel):
@@ -89,8 +103,10 @@ class EntryOrderPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str
+    direction: str = ""
     initial_stop_loss: float | None = None
     position_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
+    execution_warnings: list[str] = Field(default_factory=list)
 
 
 class ReduceOrderPayload(BaseModel):
@@ -237,8 +253,10 @@ class BaseExchangeAdapter:
                     reason=self._resolve_primary_command_reason(execution_plan),
                     payload=EntryOrderPayload(
                         action=execution_plan.effective_action,
+                        direction=resolved_direction,
                         initial_stop_loss=(handoff or {}).get("initial_stop_loss"),
-                        position_size_pct=float((handoff or {}).get("position_size_pct") or 0.0),
+                        position_size_pct=self._resolve_entry_size_pct(execution_plan=execution_plan, handoff=handoff),
+                        execution_warnings=self._resolve_execution_warnings(handoff),
                     ),
                 )
             )
@@ -349,6 +367,13 @@ class BaseExchangeAdapter:
         action = execution_plan.effective_action or execution_plan.requested_action or "wait"
         return f"effective_action:{action}"
 
+    @staticmethod
+    def _resolve_entry_size_pct(*, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> float:
+        if execution_plan.executable_size_pct is not None:
+            return float(execution_plan.executable_size_pct or 0.0)
+        handoff = handoff or {}
+        return float(handoff.get("executable_size_pct") or handoff.get("position_size_pct") or 0.0)
+
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
 
@@ -419,6 +444,23 @@ class BaseExchangeAdapter:
         direction = BaseExchangeAdapter._resolve_handoff_direction(handoff) or "neutral"
         return f"{target}:{generated_at}:{action}:{direction}"
 
+    @staticmethod
+    def _resolve_execution_warnings(handoff: dict[str, Any] | None) -> list[str]:
+        value = (handoff or {}).get("execution_warnings")
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            candidates = value.split(",")
+        elif isinstance(value, list):
+            candidates = value
+        else:
+            candidates = [value]
+        return [
+            warning
+            for warning in (str(candidate).strip() for candidate in candidates)
+            if warning
+        ]
+
 
 class ExchangeAdapter(BaseExchangeAdapter):
     def execute_commands(
@@ -475,7 +517,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         return self._credentials
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
-        return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
+        raise NotImplementedError("Real adapter subclasses must override fetch_runtime_snapshot")
 
     def prepare_requests(self, *, commands: list[ExecutionCommand]) -> list[PreparedAdapterRequest]:
         raise NotImplementedError
@@ -502,8 +544,26 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         prepared_requests = self.prepare_requests(commands=commands)
         runtime_snapshot: AdapterRuntimeSnapshot | None = None
         for command, prepared in zip(commands, prepared_requests, strict=False):
+            real_validation_mode = runtime_mode in {RuntimeMode.REAL, RuntimeMode.SIMULATED_REAL}
+            if real_validation_mode and self._has_route_c_missing_warning(command):
+                results.append(
+                    self._build_execution_result(
+                        command=command,
+                        runtime_mode=runtime_mode,
+                        prepared=prepared,
+                        status="error",
+                        accepted=False,
+                        simulated=False,
+                        reason="unsafe_request_mapping",
+                        extra_details={
+                            "error": "Real entry order requires Route C/orderbook confirmation",
+                            "reason_code": "route_c_missing",
+                        },
+                    )
+                )
+                continue
             current_runtime_snapshot = runtime_snapshot
-            if runtime_mode == RuntimeMode.REAL and self._requires_runtime_snapshot(command):
+            if real_validation_mode and self._requires_runtime_snapshot(command):
                 if current_runtime_snapshot is None:
                     try:
                         current_runtime_snapshot = self.fetch_runtime_snapshot()
@@ -546,7 +606,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 prepared = self.validate_prepared_request(
                     command=command,
                     prepared=prepared,
-                    runtime_mode=runtime_mode,
+                    runtime_mode=RuntimeMode.REAL if real_validation_mode else runtime_mode,
                     runtime_snapshot=current_runtime_snapshot,
                 )
                 signed_request = self._signer.sign(prepared)
@@ -560,7 +620,10 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                         accepted=False,
                         simulated=runtime_mode != RuntimeMode.REAL,
                         reason="unsafe_request_mapping",
-                        extra_details={"error": str(exc)},
+                        extra_details={
+                            "error": str(exc),
+                            "runtime_snapshot": self._runtime_snapshot_diagnostics(current_runtime_snapshot),
+                        },
                     )
                 )
                 continue
@@ -720,7 +783,11 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                         accepted=False,
                         simulated=True,
                         reason="unsafe_request_mapping",
-                        extra_details={"error": str(exc), "preflight": True},
+                        extra_details={
+                            "error": str(exc),
+                            "preflight": True,
+                            "runtime_snapshot": self._runtime_snapshot_diagnostics(current_runtime_snapshot),
+                        },
                     )
                 )
                 continue
@@ -739,6 +806,36 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 )
                 continue
             except BinanceTransportError as exc:
+                if self._is_timestamp_outside_recv_window(exc):
+                    try:
+                        self._signer.refresh_timestamp_offset()
+                        prepared = self.validate_prepared_request(
+                            command=command,
+                            prepared=prepared,
+                            runtime_mode=RuntimeMode.REAL,
+                            runtime_snapshot=current_runtime_snapshot,
+                        )
+                        signed_request = self._signer.sign(prepared)
+                    except (BinanceRequestConfigError, BinanceTransportError) as retry_exc:
+                        exc = retry_exc if isinstance(retry_exc, BinanceTransportError) else exc
+                    else:
+                        results.append(
+                            self._build_execution_result(
+                                command=command,
+                                runtime_mode=RuntimeMode.REAL,
+                                prepared=prepared,
+                                status="preflight_ready",
+                                accepted=True,
+                                simulated=True,
+                                reason=command.reason,
+                                extra_details={
+                                    "signed_request": signed_request.model_dump(mode="json"),
+                                    "preflight": True,
+                                    "timestamp_offset_refreshed": True,
+                                },
+                            )
+                        )
+                        continue
                 status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
                 reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
                 results.append(
@@ -779,6 +876,28 @@ class RealExchangeAdapter(BaseExchangeAdapter):
     @staticmethod
     def _requires_runtime_snapshot(command: ExecutionCommand) -> bool:
         return command.target in {"entry_order", "reduce_order", "exit_order", "maintain_protective_stop", "advance_breakeven_stop", "advance_trailing_stop"}
+
+    @staticmethod
+    def _runtime_snapshot_diagnostics(runtime_snapshot: AdapterRuntimeSnapshot | None) -> dict[str, Any]:
+        if runtime_snapshot is None:
+            return {"snapshot_valid": False, "error_message": "runtime_snapshot_missing"}
+        return {
+            "snapshot_valid": runtime_snapshot.snapshot_valid,
+            "fetched_at": runtime_snapshot.fetched_at.isoformat() if runtime_snapshot.fetched_at else None,
+            "error_endpoint": runtime_snapshot.error_endpoint,
+            "error_kind": runtime_snapshot.error_kind,
+            "error_message": runtime_snapshot.error_message,
+            "error_http_status": runtime_snapshot.error_http_status,
+            "error_payload": runtime_snapshot.error_payload,
+        }
+
+    @staticmethod
+    def _has_route_c_missing_warning(command: ExecutionCommand) -> bool:
+        if command.target != "entry_order":
+            return False
+        payload = command.payload
+        warnings = getattr(payload, "execution_warnings", [])
+        return any(str(warning).strip() == "route_c_missing" for warning in warnings)
 
     @staticmethod
     def _is_timestamp_outside_recv_window(exc: BinanceTransportError) -> bool:
@@ -885,51 +1004,168 @@ class BinancePerpAdapter(RealExchangeAdapter):
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         fetched_at = datetime.now().replace(microsecond=0)
         try:
-            position_request = self._signer.sign(
-                PreparedAdapterRequest(
-                    method="GET",
-                    path="/fapi/v2/positionRisk",
-                    params={"symbol": "ETHUSDT"},
-                )
+            position_request = PreparedAdapterRequest(
+                method="GET",
+                path="/fapi/v2/positionRisk",
+                params={"symbol": "ETHUSDT"},
             )
-            open_orders_request = self._signer.sign(
-                PreparedAdapterRequest(
-                    method="GET",
-                    path="/fapi/v1/openOrders",
-                    params={"symbol": "ETHUSDT"},
-                )
+            open_orders_request = PreparedAdapterRequest(
+                method="GET",
+                path="/fapi/v1/openOrders",
+                params={"symbol": "ETHUSDT"},
             )
         except BinanceRequestConfigError:
             raise
         try:
-            position_response = self._transport.send(position_request)
-            open_orders_response = self._transport.send(open_orders_request)
-        except BinanceTransportError:
-            return AdapterRuntimeSnapshot(fetched_at=fetched_at, snapshot_valid=False)
-
+            position_response = self._send_snapshot_request_with_recv_window_retry(position_request)
+        except BinanceTransportError as exc:
+            return self._invalid_runtime_snapshot(
+                fetched_at=fetched_at,
+                endpoint="/fapi/v2/positionRisk",
+                exc=exc,
+            )
+        try:
+            open_orders_response = self._send_snapshot_request_with_recv_window_retry(open_orders_request)
+        except BinanceTransportError as exc:
+            return self._invalid_runtime_snapshot(
+                fetched_at=fetched_at,
+                endpoint="/fapi/v1/openOrders",
+                exc=exc,
+            )
         account_payload: Any = None
         raw_position = position_response.payload[0] if isinstance(position_response.payload, list) and position_response.payload else position_response.payload
-        if self._has_entered_position(raw_position):
-            try:
-                account_request = self._signer.sign(
-                    PreparedAdapterRequest(
-                        method="GET",
-                        path="/fapi/v2/account",
-                    )
-                )
-                account_response = self._transport.send(account_request)
-                account_payload = account_response.payload
-            except BinanceRequestConfigError:
-                raise
-            except BinanceTransportError:
-                account_payload = None
+        try:
+            account_request = PreparedAdapterRequest(
+                method="GET",
+                path="/fapi/v2/account",
+            )
+            account_response = self._send_snapshot_request_with_recv_window_retry(account_request)
+            account_payload = account_response.payload
+        except BinanceRequestConfigError:
+            raise
+        except BinanceTransportError as exc:
+            account_payload = self._account_snapshot_warning(exc)
 
         open_orders = self._build_open_orders_snapshot(open_orders_response.payload)
-        return AdapterRuntimeSnapshot(
+        position_snapshot = self._build_position_snapshot(position_response.payload, account_payload=account_payload)
+        if position_snapshot.position_state == "ENTERED" and not self._has_protective_stop(open_orders):
+            try:
+                open_algo_orders_request = PreparedAdapterRequest(
+                    method="GET",
+                    path="/fapi/v1/openAlgoOrders",
+                    params={"symbol": "ETHUSDT", "algoType": "CONDITIONAL"},
+                )
+                open_algo_orders_response = self._send_snapshot_request_with_recv_window_retry(open_algo_orders_request)
+                open_orders = [*open_orders, *self._build_open_algo_orders_snapshot(open_algo_orders_response.payload)]
+            except BinanceTransportError as exc:
+                return self._invalid_runtime_snapshot(
+                    fetched_at=fetched_at,
+                    endpoint="/fapi/v1/openAlgoOrders",
+                    exc=exc,
+                )
+        account_equity, account_equity_source = self._extract_account_equity_with_source(account_payload)
+        snapshot = AdapterRuntimeSnapshot(
             fetched_at=fetched_at,
-            position=self._build_position_snapshot(position_response.payload, account_payload=account_payload),
+            position=position_snapshot,
             open_orders=open_orders,
             protective_stop_present=self._has_protective_stop(open_orders),
+            account_equity=account_equity,
+            account_equity_source=account_equity_source,
+        )
+        if isinstance(account_payload, dict) and isinstance(account_payload.get("_snapshot_warning"), dict):
+            warning = account_payload["_snapshot_warning"]
+            snapshot.error_endpoint = str(warning.get("endpoint") or "")
+            snapshot.error_kind = str(warning.get("kind") or "")
+            snapshot.error_message = str(warning.get("message") or "")
+            snapshot.error_http_status = warning.get("http_status")
+            snapshot.error_payload = warning.get("payload")
+        return snapshot
+
+    def _send_snapshot_request_with_recv_window_retry(self, request: PreparedAdapterRequest) -> TransportResponse:
+        try:
+            return self._transport.send(self._signer.sign(request))
+        except BinanceTransportError as exc:
+            if not self._is_timestamp_outside_recv_window(exc):
+                raise
+            self._signer.refresh_timestamp_offset()
+            return self._transport.send(self._signer.sign(request))
+
+    def fetch_open_algo_orders_raw(self) -> list[dict[str, Any]]:
+        request = PreparedAdapterRequest(
+            method="GET",
+            path="/fapi/v1/openAlgoOrders",
+            params={"symbol": "ETHUSDT", "algoType": "CONDITIONAL"},
+        )
+        response = self._send_snapshot_request_with_recv_window_retry(request)
+        if not isinstance(response.payload, list):
+            raise BinanceTransportError(
+                kind="json_error",
+                message="Malformed open algo orders response",
+                http_status=response.http_status,
+                payload=response.payload,
+            )
+        return [item for item in response.payload if isinstance(item, dict)]
+
+    def cancel_algo_order_raw(self, *, algo_id: str = "", client_algo_id: str = "") -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if algo_id:
+            params["algoId"] = algo_id
+        if client_algo_id:
+            params["clientAlgoId"] = client_algo_id
+        if not params:
+            raise BinanceRequestMappingError("Cancel algo order requires algo_id or client_algo_id")
+        response = self._send_snapshot_request_with_recv_window_retry(
+            PreparedAdapterRequest(method="DELETE", path="/fapi/v1/algoOrder", params=params)
+        )
+        if not isinstance(response.payload, dict):
+            raise BinanceTransportError(
+                kind="json_error",
+                message="Malformed cancel algo order response",
+                http_status=response.http_status,
+                payload=response.payload,
+            )
+        return response.payload
+
+    def place_algo_order_raw(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        response = self._send_snapshot_request_with_recv_window_retry(
+            PreparedAdapterRequest(method="POST", path="/fapi/v1/algoOrder", params=dict(params))
+        )
+        if not isinstance(response.payload, dict):
+            raise BinanceTransportError(
+                kind="json_error",
+                message="Malformed place algo order response",
+                http_status=response.http_status,
+                payload=response.payload,
+            )
+        return response.payload
+
+    @staticmethod
+    def _account_snapshot_warning(exc: BinanceTransportError) -> dict[str, Any]:
+        return {
+            "_snapshot_warning": {
+                "endpoint": "/fapi/v2/account",
+                "kind": exc.kind,
+                "message": str(exc),
+                "http_status": exc.http_status,
+                "payload": exc.payload,
+            }
+        }
+
+    @staticmethod
+    def _invalid_runtime_snapshot(
+        *,
+        fetched_at: datetime,
+        endpoint: str,
+        exc: BinanceTransportError,
+    ) -> AdapterRuntimeSnapshot:
+        return AdapterRuntimeSnapshot(
+            fetched_at=fetched_at,
+            snapshot_valid=False,
+            error_endpoint=endpoint,
+            error_kind=exc.kind,
+            error_message=str(exc),
+            error_http_status=exc.http_status,
+            error_payload=exc.payload,
         )
 
     def prepare_requests(self, *, commands: list[ExecutionCommand]) -> list[PreparedAdapterRequest]:
@@ -1040,6 +1276,31 @@ class BinancePerpAdapter(RealExchangeAdapter):
         return orders
 
     @staticmethod
+    def _build_open_algo_orders_snapshot(payload: Any) -> list[OrderSnapshot]:
+        if not isinstance(payload, list):
+            return []
+        orders: list[OrderSnapshot] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            algo_status = str(item.get("algoStatus") or item.get("status") or "").upper()
+            if algo_status not in {"NEW", "PARTIALLY_FILLED"}:
+                continue
+            reduce_only = BinancePerpAdapter._to_bool(item.get("reduceOnly")) or BinancePerpAdapter._to_bool(item.get("closePosition"))
+            orders.append(
+                OrderSnapshot(
+                    order_id=f"algo:{item.get('algoId') or item.get('clientAlgoId') or ''}",
+                    order_type=str(item.get("orderType") or item.get("type") or ""),
+                    status=algo_status.lower(),
+                    side=str(item.get("side") or ""),
+                    reduce_only=reduce_only,
+                    price=BinancePerpAdapter._to_optional_float(item.get("price")),
+                    trigger_price=BinancePerpAdapter._to_optional_float(item.get("triggerPrice") or item.get("stopPrice")),
+                )
+            )
+        return orders
+
+    @staticmethod
     def _has_protective_stop(open_orders: list[OrderSnapshot]) -> bool:
         protective_types = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET"}
         return any(order.reduce_only and order.order_type in protective_types for order in open_orders)
@@ -1109,7 +1370,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
         position_size_pct = float(payload.position_size_pct or 0.0)
         if position_size_pct <= 0.0:
             raise BinanceRequestMappingError("Real entry order requires a positive position_size_pct")
-        account_equity = self._fetch_account_equity_for_entry()
+        account_equity = self._resolve_account_equity_for_entry(runtime_snapshot)
         symbol_contract = self._fetch_symbol_contract()
         leverage = self._resolve_entry_leverage(runtime_snapshot)
         mark_price = self._resolve_entry_mark_price(symbol_contract=symbol_contract, runtime_snapshot=runtime_snapshot)
@@ -1219,6 +1480,11 @@ class BinancePerpAdapter(RealExchangeAdapter):
             raise BinanceRequestMappingError("Real entry order requires a positive account equity")
         return Decimal(str(account_equity))
 
+    def _resolve_account_equity_for_entry(self, runtime_snapshot: AdapterRuntimeSnapshot) -> Decimal:
+        if runtime_snapshot.account_equity is not None and runtime_snapshot.account_equity > 0.0:
+            return Decimal(str(runtime_snapshot.account_equity))
+        return self._fetch_account_equity_for_entry()
+
     def _fetch_symbol_contract(self) -> dict[str, Decimal]:
         exchange_info_response = self._transport.send(
             self._signer.sign(
@@ -1327,10 +1593,6 @@ class BinancePerpAdapter(RealExchangeAdapter):
         payload = command.payload
         if not isinstance(payload, ProtectiveStopPayload):
             raise BinanceRequestMappingError("Protective stop payload is required for real protective stop execution")
-        if payload.trailing_rule or payload.breakeven_trigger is not None or payload.tp_ladder:
-            raise BinanceRequestMappingError(
-                "Protective stop semantics are still strategy-relative and cannot be sent to Binance real mode safely yet"
-            )
         position = self._resolve_live_position_for_stop(
             runtime_snapshot=runtime_snapshot,
             payload_direction=payload.direction,
@@ -1340,18 +1602,22 @@ class BinancePerpAdapter(RealExchangeAdapter):
         if stop_ratio is None:
             raise BinanceRequestMappingError("Real protective stop requires initial_stop_loss")
         stop_price = self._derive_stop_price(direction=position.direction, reference_price=position.entry_price, stop_ratio=stop_ratio)
+        quantity = self._format_exit_quantity(position.position_amt)
+        trigger_key = "triggerPrice" if prepared.path == "/fapi/v1/algoOrder" else "stopPrice"
         return prepared.model_copy(
             update={
                 "params": {
                     **prepared.params,
                     "side": self._resolve_close_side(position.direction),
-                    "stopPrice": stop_price,
-                    "closePosition": "true",
+                    trigger_key: stop_price,
+                    "quantity": quantity,
                 },
                 "body": {
                     **prepared.body,
                     "resolved_from_entry_price": position.entry_price,
                     "resolved_stop_price": stop_price,
+                    "resolved_position_amt": quantity,
+                    "resolution_mode": "initial_stop_from_live_entry",
                 },
             }
         )
@@ -1373,19 +1639,24 @@ class BinancePerpAdapter(RealExchangeAdapter):
             payload_direction=payload.direction,
             error_context="Breakeven stop",
         )
+        raise BinanceRequestMappingError(
+            "Real breakeven stop replace requires Binance Algo stop cancel/replace support"
+        )
         stop_price = self._format_live_entry_stop_price(position.entry_price)
+        quantity = self._format_exit_quantity(position.position_amt)
         return prepared.model_copy(
             update={
                 "params": {
                     **prepared.params,
                     "side": self._resolve_close_side(position.direction),
                     "stopPrice": stop_price,
-                    "closePosition": "true",
+                    "quantity": quantity,
                 },
                 "body": {
                     **prepared.body,
                     "resolved_from_entry_price": position.entry_price,
                     "resolved_stop_price": stop_price,
+                    "resolved_position_amt": quantity,
                     "resolution_mode": "breakeven_from_live_entry",
                 },
             }
@@ -1493,6 +1764,9 @@ class BinancePerpAdapter(RealExchangeAdapter):
             payload_direction=payload.direction,
             error_context="Trailing stop",
         )
+        raise BinanceRequestMappingError(
+            "Real trailing stop replace requires Binance Algo stop cancel/replace support"
+        )
         activation_price = self._derive_trailing_activation_price(
             direction=position.direction,
             reference_price=position.entry_price,
@@ -1573,96 +1847,58 @@ class BinancePerpAdapter(RealExchangeAdapter):
 
     def _map_command_to_request(self, command: ExecutionCommand) -> PreparedAdapterRequest:
         if command.target == "entry_order":
-            side = "BUY" if getattr(command.payload, "action", "") == "entry_long" else "SELL"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "type": "MARKET",
-                    "newClientOrderId": command.idempotency_key,
-                    "newOrderRespType": "RESULT",
-                },
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_entry_side(
+                    action=getattr(command.payload, "action", ""),
+                    direction=getattr(command.payload, "direction", ""),
+                ),
+                order_type="MARKET",
+                new_order_resp_type=True,
             )
         if command.target == "reduce_order":
-            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "reduceOnly": "true",
-                    "type": "MARKET",
-                    "newClientOrderId": command.idempotency_key,
-                    "newOrderRespType": "RESULT",
-                },
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="MARKET",
+                reduce_only=True,
+                new_order_resp_type=True,
             )
         if command.target == "exit_order":
-            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "reduceOnly": "true",
-                    "type": "MARKET",
-                    "newClientOrderId": command.idempotency_key,
-                    "newOrderRespType": "RESULT",
-                },
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="MARKET",
+                reduce_only=True,
+                new_order_resp_type=True,
             )
         if command.target == "maintain_protective_stop":
-            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "type": "STOP_MARKET",
-                    "workingType": "MARK_PRICE",
-                    "reduceOnly": "true",
-                    "newClientOrderId": command.idempotency_key,
-                },
-                body=command.payload.model_dump(mode="json"),
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="STOP_MARKET",
+                reduce_only=True,
+                working_type="MARK_PRICE",
+                include_payload_body=True,
+                algo_order=True,
             )
         if command.target == "advance_breakeven_stop":
-            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "type": "STOP_MARKET",
-                    "workingType": "MARK_PRICE",
-                    "reduceOnly": "true",
-                    "newClientOrderId": command.idempotency_key,
-                },
-                body=command.payload.model_dump(mode="json"),
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="STOP_MARKET",
+                reduce_only=True,
+                working_type="MARK_PRICE",
+                include_payload_body=True,
             )
         if command.target == "advance_trailing_stop":
-            side = "SELL" if getattr(command.payload, "direction", "") == "long" else "BUY"
-            return PreparedAdapterRequest(
-                method="POST",
-                path="/fapi/v1/order",
-                params={
-                    "symbol": "ETHUSDT",
-                    "side": side,
-                    "type": "TRAILING_STOP_MARKET",
-                    "workingType": "MARK_PRICE",
-                    "reduceOnly": "true",
-                    "newClientOrderId": command.idempotency_key,
-                },
-                body=command.payload.model_dump(mode="json"),
-                idempotency_key=command.idempotency_key,
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="TRAILING_STOP_MARKET",
+                reduce_only=True,
+                working_type="MARK_PRICE",
+                include_payload_body=True,
             )
         if command.target == "sync_recent_fills":
             return PreparedAdapterRequest(
@@ -1684,3 +1920,66 @@ class BinancePerpAdapter(RealExchangeAdapter):
             requires_auth=False,
             idempotency_key=command.idempotency_key,
         )
+
+    @staticmethod
+    def _resolve_entry_side(*, action: str, direction: str = "") -> str:
+        normalized_action = action.strip().lower()
+        normalized_direction = direction.strip().lower()
+        if normalized_action == "entry_long" or normalized_direction == "long":
+            return "BUY"
+        if normalized_action == "entry_short" or normalized_direction == "short":
+            return "SELL"
+        raise BinanceRequestMappingError("Entry order direction must be long or short")
+
+    @staticmethod
+    def _resolve_close_side_from_payload(payload: Any) -> str:
+        return "SELL" if getattr(payload, "direction", "") == "long" else "BUY"
+
+    @staticmethod
+    def _build_order_request(
+        *,
+        command: ExecutionCommand,
+        side: str,
+        order_type: str,
+        reduce_only: bool = False,
+        working_type: str = "",
+        new_order_resp_type: bool = False,
+        include_payload_body: bool = False,
+        algo_order: bool = False,
+    ) -> PreparedAdapterRequest:
+        client_id_key = "clientAlgoId" if algo_order else "newClientOrderId"
+        params = {
+            "symbol": "ETHUSDT",
+            "side": side,
+            "type": order_type,
+            client_id_key: BinancePerpAdapter._build_client_order_id(command),
+        }
+        if algo_order:
+            params["algoType"] = "CONDITIONAL"
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        if working_type:
+            params["workingType"] = working_type
+        if new_order_resp_type:
+            params["newOrderRespType"] = "RESULT"
+        return PreparedAdapterRequest(
+            method="POST",
+            path="/fapi/v1/algoOrder" if algo_order else "/fapi/v1/order",
+            params=params,
+            body=command.payload.model_dump(mode="json") if include_payload_body else {},
+            idempotency_key=command.idempotency_key,
+        )
+
+    @staticmethod
+    def _build_client_order_id(command: ExecutionCommand) -> str:
+        aliases = {
+            "entry_order": "eo",
+            "reduce_order": "ro",
+            "exit_order": "xo",
+            "maintain_protective_stop": "ps",
+            "advance_breakeven_stop": "be",
+            "advance_trailing_stop": "ts",
+        }
+        alias = aliases.get(command.target, "cmd")
+        digest = sha256(command.idempotency_key.encode("utf-8")).hexdigest()[:16]
+        return f"ethbot-{alias}-{digest}"
