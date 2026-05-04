@@ -1,0 +1,621 @@
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet("start", "stop", "status")]
+    [string]$Action = "status",
+    [string]$HostName = "127.0.0.1",
+    [int]$DashboardPort = 8765,
+    [int]$IntervalSec = 300,
+    [int]$WorkerIntervalSec = 30,
+    [int]$DependencyWaitSec = 30,
+    [string]$ProxyUrl = "http://127.0.0.1:7897",
+    [switch]$EnableRealOrders,
+    [switch]$IncludeCoinglassOverlay
+)
+
+$ErrorActionPreference = "Stop"
+
+$BotRoot = Split-Path -Parent $PSScriptRoot
+$WorkspaceRoot = Split-Path -Parent $BotRoot
+$QuantRoot = Join-Path $WorkspaceRoot "quant_system_rebuild"
+$Python = Join-Path $QuantRoot ".venv_win\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $Python)) {
+    $Python = Join-Path $BotRoot ".venv_win\Scripts\python.exe"
+}
+if (-not (Test-Path -LiteralPath $Python)) {
+    $Python = "python"
+}
+
+$StackRoot = Join-Path $BotRoot "runtime\stack_manager"
+$PidRoot = Join-Path $StackRoot "pids"
+$LogRoot = Join-Path $StackRoot "logs"
+$BotRuntimeRoot = Join-Path $BotRoot "runtime\bot_runtime_scheduler"
+$BotAnalysisDb = Join-Path $BotRuntimeRoot "analysis\bot_runtime.duckdb"
+$BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"
+$KillSwitchPath = Join-Path $BotRoot "runtime\controls\disable_real_execution.flag"
+$PathSep = [System.IO.Path]::PathSeparator
+
+New-Item -ItemType Directory -Force -Path $PidRoot, $LogRoot, $BotRuntimeRoot | Out-Null
+
+function Quote-Arg {
+    param([string]$Value)
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Get-JsonFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        return Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-AgeSeconds {
+    param($Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+    try {
+        $raw = [string]$Value
+        $dt = [datetimeoffset]::Parse($raw)
+        return [int]([datetimeoffset]::UtcNow - $dt.ToUniversalTime()).TotalSeconds
+    }
+    catch {
+        try {
+            $naive = [datetime]::Parse([string]$Value)
+            return [int]((Get-Date).ToUniversalTime() - $naive.ToUniversalTime()).TotalSeconds
+        }
+        catch {
+            return $null
+        }
+    }
+}
+
+function Get-FileAgeSeconds {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        return [int]((Get-Date) - (Get-Item -LiteralPath $Path).LastWriteTime).TotalSeconds
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-FreshJsonArtifact {
+    param(
+        [string]$Path,
+        [string[]]$TimestampFields = @("generated_at", "finished_at"),
+        [int]$FreshAfterSec = 1800
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    $payload = Get-JsonFile $Path
+    foreach ($field in $TimestampFields) {
+        if ($null -ne $payload -and $null -ne $payload.$field) {
+            $age = Get-AgeSeconds ($payload.$field)
+            if ($null -ne $age) {
+                return $age -le $FreshAfterSec
+            }
+        }
+    }
+    $fileAge = Get-FileAgeSeconds $Path
+    return $null -ne $fileAge -and $fileAge -le $FreshAfterSec
+}
+
+function Get-LatestQuantCycle {
+    $cyclesRoot = Join-Path $QuantRoot "runtime\cycles"
+    if (-not (Test-Path -LiteralPath $cyclesRoot)) {
+        return $null
+    }
+    $cycleDirs = Get-ChildItem -LiteralPath $cyclesRoot -Directory -ErrorAction SilentlyContinue
+    $latestSchedulerCycle = $cycleDirs |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "scheduler_status.json") } |
+        ForEach-Object {
+            $statusPath = Join-Path $_.FullName "scheduler_status.json"
+            $status = Get-JsonFile $statusPath
+            $timestamp = if ($null -ne $status -and $null -ne $status.generated_at) { [string]$status.generated_at } else { $null }
+            $sortKey = [datetimeoffset]::MinValue
+            if (-not [string]::IsNullOrWhiteSpace($timestamp)) {
+                try {
+                    $sortKey = [datetimeoffset]::Parse($timestamp).ToUniversalTime()
+                }
+                catch {
+                    $sortKey = [datetimeoffset]::MinValue
+                }
+            }
+            if ($sortKey -eq [datetimeoffset]::MinValue) {
+                $sortKey = [datetimeoffset](Get-Item -LiteralPath $statusPath).LastWriteTimeUtc
+            }
+            [pscustomobject]@{
+                Directory = $_
+                SortKey = $sortKey
+            }
+        } |
+        Sort-Object SortKey -Descending |
+        Select-Object -First 1
+    if ($null -ne $latestSchedulerCycle) {
+        return $latestSchedulerCycle.Directory
+    }
+    return $cycleDirs |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "decision.json") } |
+        ForEach-Object {
+            $decisionPath = Join-Path $_.FullName "decision.json"
+            $decision = Get-JsonFile $decisionPath
+            $timestamp = if ($null -ne $decision -and $null -ne $decision.generated_at) { [string]$decision.generated_at } else { $null }
+            $sortKey = [datetimeoffset]::MinValue
+            if (-not [string]::IsNullOrWhiteSpace($timestamp)) {
+                try {
+                    $sortKey = [datetimeoffset]::Parse($timestamp).ToUniversalTime()
+                }
+                catch {
+                    $sortKey = [datetimeoffset]::MinValue
+                }
+            }
+            if ($sortKey -eq [datetimeoffset]::MinValue) {
+                $sortKey = [datetimeoffset](Get-Item -LiteralPath $decisionPath).LastWriteTimeUtc
+            }
+            [pscustomobject]@{
+                Directory = $_
+                SortKey = $sortKey
+            }
+        } |
+        Sort-Object SortKey -Descending |
+        Select-Object -ExpandProperty Directory |
+        Select-Object -First 1
+}
+
+function Clear-StaleBotSchedulerLock {
+    if (-not (Test-Path -LiteralPath $BotSchedulerLockPath)) {
+        return
+    }
+    $payload = Get-JsonFile $BotSchedulerLockPath
+    $lockPid = 0
+    if ($null -ne $payload -and [int]::TryParse([string]$payload.pid, [ref]$lockPid)) {
+        $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+        if ($null -ne $proc) {
+            return
+        }
+    }
+    Remove-Item -LiteralPath $BotSchedulerLockPath -Force -ErrorAction SilentlyContinue
+    Write-Output ("bot_scheduler: removed stale lock {0}" -f $BotSchedulerLockPath)
+}
+
+function Get-PidPath {
+    param([string]$Name)
+    return Join-Path $PidRoot "$Name.pid"
+}
+
+function Get-ManagedProcess {
+    param(
+        [string]$Name,
+        [string]$Pattern
+    )
+    $pidPath = Get-PidPath $Name
+    if (-not (Test-Path -LiteralPath $pidPath)) {
+        return [pscustomobject]@{
+            Name = $Name
+            Pid = $null
+            Alive = $false
+            StalePid = $false
+            CommandLineMatches = $false
+            CommandLineAvailable = $true
+            Process = $null
+        }
+    }
+
+    $rawPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    $processId = 0
+    if (-not [int]::TryParse([string]$rawPid, [ref]$processId)) {
+        return [pscustomobject]@{
+            Name = $Name
+            Pid = $rawPid
+            Alive = $false
+            StalePid = $true
+            CommandLineMatches = $false
+            CommandLineAvailable = $true
+            Process = $null
+        }
+    }
+
+    $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) {
+        return [pscustomobject]@{
+            Name = $Name
+            Pid = $processId
+            Alive = $false
+            StalePid = $true
+            CommandLineMatches = $false
+            CommandLineAvailable = $true
+            Process = $null
+        }
+    }
+
+    $cmdAvailable = $true
+    $cmdMatches = $true
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
+        $cmdLine = [string]$cim.CommandLine
+        $cmdMatches = $cmdLine -like "*$Pattern*"
+    }
+    catch {
+        $cmdAvailable = $false
+        $cmdMatches = $null
+    }
+
+    return [pscustomobject]@{
+        Name = $Name
+        Pid = $processId
+        Alive = $true
+        StalePid = $false
+        CommandLineMatches = $cmdMatches
+        CommandLineAvailable = $cmdAvailable
+        Process = $proc
+    }
+}
+
+function Remove-StalePid {
+    param([string]$Name)
+    $state = Get-ManagedProcess -Name $Name -Pattern ""
+    if ($state.StalePid) {
+        Remove-Item -LiteralPath (Get-PidPath $Name) -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-ManagedProcess {
+    param(
+        [string]$Name,
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$Pattern
+    )
+
+    Remove-StalePid -Name $Name
+    $existing = Get-ManagedProcess -Name $Name -Pattern $Pattern
+    if ($existing.Alive) {
+        Write-Output ("{0}: already running pid={1}" -f $Name, $existing.Pid)
+        return
+    }
+
+    $stdoutPath = Join-Path $LogRoot "$Name`_stdout.log"
+    $stderrPath = Join-Path $LogRoot "$Name`_stderr.log"
+    $env:ETH_BOT_ROOT = $BotRoot
+    $env:QUANT_ROOT = $QuantRoot
+    $env:PYTHONPATH = "$BotRoot$PathSep$(Join-Path $BotRoot 'src')"
+    $env:PYTHONDONTWRITEBYTECODE = "1"
+
+    $proc = Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $ArgumentList `
+        -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden `
+        -PassThru
+
+    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$proc.Id) -Encoding ASCII
+    Start-Sleep -Milliseconds 500
+    $started = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+    if ($null -eq $started) {
+        Remove-Item -LiteralPath (Get-PidPath $Name) -Force -ErrorAction SilentlyContinue
+        Write-Output ("{0}: failed_to_stay_running pid={1}; see logs in {2}" -f $Name, $proc.Id, $LogRoot)
+        return
+    }
+    Write-Output ("{0}: started pid={1}" -f $Name, $proc.Id)
+}
+
+function Stop-ManagedProcess {
+    param(
+        [string]$Name,
+        [string]$Pattern
+    )
+
+    $pidPath = Get-PidPath $Name
+    $state = Get-ManagedProcess -Name $Name -Pattern $Pattern
+    if (-not $state.Alive) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        Write-Output ("{0}: stopped" -f $Name)
+        return
+    }
+    if ($state.CommandLineAvailable -and -not $state.CommandLineMatches) {
+        Write-Output ("{0}: pid={1} command line mismatch; not stopping" -f $Name, $state.Pid)
+        return
+    }
+
+    Stop-Process -Id $state.Pid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    Write-Output ("{0}: stopped pid={1}" -f $Name, $state.Pid)
+}
+
+function Get-LogErrorSummary {
+    param([string]$Name)
+    $stderrPath = Join-Path $LogRoot "$Name`_stderr.log"
+    if (-not (Test-Path -LiteralPath $stderrPath)) {
+        return "log_missing"
+    }
+    $tail = Get-Content -LiteralPath $stderrPath -Tail 20 -ErrorAction SilentlyContinue
+    if ($null -eq $tail -or @($tail).Count -eq 0) {
+        return "no_recent_errors"
+    }
+    $errorCount = @($tail | Where-Object { $_ -match "error|exception|traceback|blocked|failed" }).Count
+    return ("tail_error_lines={0}/20" -f $errorCount)
+}
+
+function Get-HttpStatus {
+    param([string]$Uri)
+    try {
+        return (Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 3).StatusCode
+    }
+    catch {
+        return 0
+    }
+}
+
+function Format-Age {
+    param($Seconds)
+    if ($null -eq $Seconds) {
+        return "unknown"
+    }
+    return ("{0}s" -f [int]$Seconds)
+}
+
+function Format-ProcessHealth {
+    param($State)
+    if ($State.StalePid) {
+        return "stale_pid"
+    }
+    if (-not $State.Alive) {
+        return "stopped"
+    }
+    if ($State.CommandLineAvailable -and -not $State.CommandLineMatches) {
+        return "command_mismatch"
+    }
+    return "running"
+}
+
+function Test-QuantReady {
+    $freshAfterSec = [Math]::Max(1800, $IntervalSec * 2)
+    $heartbeat = Join-Path $QuantRoot "runtime\scheduler\heartbeat.json"
+    $handoff = Join-Path $QuantRoot "runtime\cycles\latest_strict_live\handoff.json"
+    $executionHandoff = Join-Path $QuantRoot "runtime\cycles\latest_strict_live\execution_handoff.json"
+    return (Test-FreshJsonArtifact -Path $heartbeat -FreshAfterSec $freshAfterSec) `
+        -or (Test-FreshJsonArtifact -Path $handoff -FreshAfterSec $freshAfterSec) `
+        -or (Test-FreshJsonArtifact -Path $executionHandoff -FreshAfterSec $freshAfterSec)
+}
+
+function Test-BotReady {
+    $freshAfterSec = [Math]::Max(900, $IntervalSec * 2)
+    $latestCycle = Join-Path $BotRuntimeRoot "latest_cycle.json"
+    $candidate = Join-Path $BotRuntimeRoot "latest_candidate_execution_package.json"
+    return (Test-FreshJsonArtifact -Path $latestCycle -TimestampFields @("generated_at", "finished_at") -FreshAfterSec $freshAfterSec) `
+        -or (Test-FreshJsonArtifact -Path $candidate -TimestampFields @("generated_at") -FreshAfterSec $freshAfterSec)
+}
+
+function Wait-ForCondition {
+    param(
+        [string]$Name,
+        [scriptblock]$Condition,
+        [int]$TimeoutSec
+    )
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $TimeoutSec))
+    while ((Get-Date) -le $deadline) {
+        if (& $Condition) {
+            Write-Output ("{0}: dependency ready" -f $Name)
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Output ("{0}: dependency wait timed out after {1}s" -f $Name, $TimeoutSec)
+    return $false
+}
+
+function Show-Status {
+    $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
+    $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
+    $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
+    $worker = Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+
+    $homeStatus = Get-HttpStatus -Uri ("http://{0}:{1}/" -f $HostName, $DashboardPort)
+    $apiStatus = Get-HttpStatus -Uri ("http://{0}:{1}/api/overview" -f $HostName, $DashboardPort)
+    $dashboardState = Format-ProcessHealth $dashboard
+    Write-Output ("dashboard: {0} pid={1} http={2} api={3} log={4}" -f $dashboardState, $dashboard.Pid, $homeStatus, $apiStatus, (Get-LogErrorSummary "dashboard"))
+
+    $factorIngest = Get-JsonFile (Join-Path $QuantRoot "runtime\analysis\factor_ingest_latest.json")
+    $factorSummary = Get-JsonFile (Join-Path $QuantRoot "runtime\analysis\factor_summary.json")
+    $factorAge = Get-AgeSeconds ($factorIngest.generated_at)
+    if ($null -eq $factorAge) {
+        $factorAge = Get-AgeSeconds ($factorSummary.generated_at)
+    }
+    if ($null -eq $factorAge) {
+        $factorAge = Get-FileAgeSeconds (Join-Path $QuantRoot "runtime\analysis\factor_ingest_latest.json")
+    }
+    if ($null -eq $factorAge) {
+        $factorAge = Get-FileAgeSeconds (Join-Path $QuantRoot "runtime\analysis\factor_summary.json")
+    }
+    $factorState = Format-ProcessHealth $factor
+    Write-Output ("factor_ingest: {0} pid={1} age={2} log={3}" -f $factorState, $factor.Pid, (Format-Age $factorAge), (Get-LogErrorSummary "factor_ingest"))
+
+    $quantHeartbeat = Get-JsonFile (Join-Path $QuantRoot "runtime\scheduler\heartbeat.json")
+    $quantHandoff = Get-JsonFile (Join-Path $QuantRoot "runtime\cycles\latest_strict_live\handoff.json")
+    if ($null -eq $quantHandoff) {
+        $quantHandoff = Get-JsonFile (Join-Path $QuantRoot "runtime\cycles\latest_strict_live\execution_handoff.json")
+    }
+    $latestQuantCycle = Get-LatestQuantCycle
+    $latestQuantStatus = $null
+    if ($null -ne $latestQuantCycle) {
+        $latestQuantStatus = Get-JsonFile (Join-Path $latestQuantCycle.FullName "scheduler_status.json")
+    }
+    $quantAge = Get-AgeSeconds ($quantHeartbeat.generated_at)
+    if ($null -ne $latestQuantStatus) {
+        $statusAge = Get-AgeSeconds ($latestQuantStatus.generated_at)
+        if ($null -ne $statusAge) {
+            $quantAge = $statusAge
+        }
+    }
+    if ($null -ne $latestQuantCycle -and $null -eq $quantAge) {
+        $quantAge = Get-FileAgeSeconds (Join-Path $latestQuantCycle.FullName "decision.json")
+    }
+    if ($null -eq $quantAge) {
+        $quantAge = Get-AgeSeconds ($quantHandoff.generated_at)
+    }
+    $latestRunId = ""
+    if ($null -ne $latestQuantStatus -and -not [string]::IsNullOrWhiteSpace([string]$latestQuantStatus.run_id)) {
+        $latestRunId = [string]$latestQuantStatus.run_id
+    }
+    elseif ($null -ne $latestQuantCycle) {
+        $latestRunId = $latestQuantCycle.Name
+    }
+    elseif ($null -ne $quantHeartbeat.metadata -and $null -ne $quantHeartbeat.metadata.cycle_dir) {
+        $latestRunId = Split-Path -Leaf ([string]$quantHeartbeat.metadata.cycle_dir)
+    }
+    $quantState = Format-ProcessHealth $quant
+    Write-Output ("quant_judgement: {0} pid={1} age={2} latest_run_id={3} log={4}" -f $quantState, $quant.Pid, (Format-Age $quantAge), $latestRunId, (Get-LogErrorSummary "quant_judgement"))
+
+    $botHeartbeat = Get-JsonFile (Join-Path $BotRuntimeRoot "heartbeat.json")
+    $botCycle = Get-JsonFile (Join-Path $BotRuntimeRoot "latest_cycle.json")
+    $botAge = Get-AgeSeconds ($botHeartbeat.generated_at)
+    if ($null -eq $botAge) {
+        $botAge = Get-AgeSeconds ($botCycle.finished_at)
+    }
+    $botState = Format-ProcessHealth $bot
+    Write-Output ("bot_scheduler: {0} pid={1} age={2} latest_sample={3} log={4}" -f $botState, $bot.Pid, (Format-Age $botAge), $botCycle.sample_id, (Get-LogErrorSummary "bot_scheduler"))
+
+    $candidate = Get-JsonFile (Join-Path $BotRuntimeRoot "latest_candidate_execution_package.json")
+    $candidateAge = Get-AgeSeconds ($candidate.generated_at)
+    $candidateExpiryAge = Get-AgeSeconds ($candidate.expires_at)
+    $candidateState = if ($null -eq $candidate) { "missing" } elseif ($candidateExpiryAge -ne $null -and $candidateExpiryAge -gt 0) { "expired" } else { "present" }
+    Write-Output ("candidate_package: {0} age={1} package_id={2}" -f $candidateState, (Format-Age $candidateAge), $candidate.package_id)
+
+    $auditPath = Join-Path $BotRoot "runtime\real_order_worker\audit.jsonl"
+    $auditAge = $null
+    $auditStatus = "missing"
+    if (Test-Path -LiteralPath $auditPath) {
+        $lastLine = [string](Get-Content -LiteralPath $auditPath -Encoding UTF8 -Tail 1 -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if (-not [string]::IsNullOrWhiteSpace($lastLine)) {
+            try {
+                $event = ConvertFrom-Json -InputObject $lastLine
+                $auditAge = Get-AgeSeconds ($event.generated_at)
+                if ($null -ne $event.payload -and $null -ne $event.payload.status) {
+                    $auditStatus = [string]$event.payload.status
+                }
+                else {
+                    $auditStatus = [string]$event.event_type
+                }
+            }
+            catch {
+                $auditStatus = "invalid_json"
+            }
+        }
+    }
+    $killSwitch = Test-Path -LiteralPath $KillSwitchPath
+    $workerMode = if ($EnableRealOrders -and -not $killSwitch) { "submit_enabled" } elseif ($killSwitch) { "disabled_by_kill_switch" } else { "dry_run" }
+    $workerState = Format-ProcessHealth $worker
+    $killSwitchState = if ($killSwitch) { "enabled" } else { "off" }
+    Write-Output ("real_worker: {0} pid={1} mode={2} audit_age={3} audit_status={4} log={5}" -f $workerState, $worker.Pid, $workerMode, (Format-Age $auditAge), $auditStatus, (Get-LogErrorSummary "real_worker"))
+    Write-Output ("kill_switch: {0} path={1}" -f $killSwitchState, $KillSwitchPath)
+}
+
+$DashboardArgs = @("-m", "dashboard.app", "--host", $HostName, "--port", ([string]$DashboardPort))
+$FactorArgs = @(
+    "scripts\quant_runtime_scheduler.py",
+    "ingest-summary",
+    "--loop",
+    "--interval-sec",
+    ([string]$IntervalSec),
+    "--symbol",
+    "ETH",
+    "--timeframe",
+    "15m"
+)
+$QuantArgs = @(
+    "scripts\quant_runtime_scheduler.py",
+    "run-cycle",
+    "--loop",
+    "--interval-sec",
+    ([string]$IntervalSec),
+    "--symbol",
+    "ETH",
+    "--timeframe",
+    "15m",
+    "--proxy-url",
+    $ProxyUrl,
+    "--include-okx-overlay"
+)
+if ($IncludeCoinglassOverlay) {
+    $QuantArgs += "--include-coinglass-overlay"
+}
+$BotArgs = @(
+    "scripts\bot_runtime_scheduler.py",
+    "loop",
+    "--interval-sec",
+    ([string]$IntervalSec),
+    "--runtime-root",
+    $BotRuntimeRoot,
+    "--analysis-db-path",
+    $BotAnalysisDb
+)
+if ($EnableRealOrders) {
+    $BotArgs += "--enable-real-orders"
+}
+
+$WorkerSubmitFlag = if ($EnableRealOrders -and -not (Test-Path -LiteralPath $KillSwitchPath)) { "-SubmitRealOrders" } else { "" }
+$WorkerLoopCommand = @"
+`$env:ETH_BOT_ROOT = '$(($BotRoot) -replace "'", "''")'
+`$env:QUANT_ROOT = '$(($QuantRoot) -replace "'", "''")'
+`$env:PYTHONPATH = '$(($BotRoot) -replace "'", "''")$PathSep$((Join-Path $BotRoot 'src') -replace "'", "''")'
+while (`$true) {
+    & '$(Join-Path $BotRoot 'scripts\manage_real_order_worker.ps1')' $WorkerSubmitFlag
+    Start-Sleep -Seconds $WorkerIntervalSec
+}
+"@
+$WorkerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $WorkerLoopCommand)
+
+if ($Action -eq "status") {
+    Show-Status
+    exit 0
+}
+
+if ($Action -eq "stop") {
+    Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+    Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
+    exit 0
+}
+
+Start-ManagedProcess -Name "dashboard" -FilePath $Python -ArgumentList $DashboardArgs -WorkingDirectory $BotRoot -Pattern "dashboard.app"
+Start-ManagedProcess -Name "factor_ingest" -FilePath $Python -ArgumentList $FactorArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
+Start-ManagedProcess -Name "quant_judgement" -FilePath $Python -ArgumentList $QuantArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
+Wait-ForCondition -Name "quant_judgement" -Condition { Test-QuantReady } -TimeoutSec $DependencyWaitSec | Out-Null
+Clear-StaleBotSchedulerLock
+Start-ManagedProcess -Name "bot_scheduler" -FilePath $Python -ArgumentList $BotArgs -WorkingDirectory $BotRoot -Pattern "bot_runtime_scheduler.py"
+$botReady = Wait-ForCondition -Name "bot_scheduler" -Condition { Test-BotReady } -TimeoutSec $DependencyWaitSec
+
+if ($EnableRealOrders -and (Test-Path -LiteralPath $KillSwitchPath)) {
+    Write-Output ("real_worker: not started because kill switch is enabled at {0}" -f $KillSwitchPath)
+}
+elseif (-not $botReady -and -not (Test-BotReady)) {
+    Write-Output "real_worker: not started because candidate package and latest bot cycle are missing"
+}
+else {
+    Start-ManagedProcess -Name "real_worker" -FilePath "powershell.exe" -ArgumentList $WorkerArgs -WorkingDirectory $BotRoot -Pattern "real_order_worker.py"
+}
+
+Write-Output ("dashboard_url=http://{0}:{1}" -f $HostName, $DashboardPort)
+if ($EnableRealOrders) {
+    Write-Output "real_order_submission=enabled"
+}
+else {
+    Write-Output "real_order_submission=disabled"
+}

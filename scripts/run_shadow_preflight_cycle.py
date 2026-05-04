@@ -196,6 +196,7 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         "judgement": summarize_judgement(audit_payload.get("judgement") or {}),
         "handoff": summarize_handoff(handoff),
         "command_targets": [command.target for command in commands],
+        "execution_commands": [command.model_dump(mode="json") for command in commands],
         "preflight_statuses": [result.status for result in preflight_results],
         "preflight_error": preflight_error,
         "preflight": [_summarize_preflight_result(result) for result in preflight_results],

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ETH 运行控制台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>ETH 运行控制台</h1>
+        <p>只读查看因子、量化决策和交易机器人运行状态</p>
+      </div>
+      <div class="toolbar">
+        <span id="updatedAt">--</span>
+        <button id="refreshBtn" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="errorBanner" class="error-banner" hidden></div>
+      <section class="status-grid" id="runtimeGrid"></section>
+
+      <section class="layout three-panel">
+        <article class="panel factor-panel">
+          <div class="panel-head">
+            <div>
+              <h2>因子</h2>
+              <p>样本、查表和因子健康度</p>
+            </div>
+            <span id="factorLookupBadge" class="badge gray">未知</span>
+          </div>
+          <div class="metric-row">
+            <div><span>样本数</span><strong id="factorSamples">0</strong></div>
+            <div><span>观察数</span><strong id="factorObservations">0</strong></div>
+            <div><span>查表行数</span><strong id="lookupRows">0</strong></div>
+            <div><span>因子值</span><strong id="factorValues">0</strong></div>
+          </div>
+          <dl id="factorDetails" class="details"></dl>
+          <div class="split">
+            <div>
+              <h3>主要风险代码</h3>
+              <ul id="riskCodes" class="compact-list"></ul>
+            </div>
+            <div>
+              <h3>降级标记</h3>
+              <ul id="degradeFlags" class="compact-list"></ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel quant-panel">
+          <div class="panel-head">
+            <div>
+              <h2>量化</h2>
+              <p>最新决策和因子证据</p>
+            </div>
+            <span id="quantRiskBadge" class="badge gray">未知</span>
+          </div>
+          <div class="decision-strip">
+            <div><span>动作</span><strong id="quantAction">--</strong></div>
+            <div><span>方向</span><strong id="quantDirection">--</strong></div>
+            <div><span>仓位档位</span><strong id="quantSizing">--</strong></div>
+            <div><span>置信度</span><strong id="quantConfidence">--</strong></div>
+          </div>
+          <p id="reasoning" class="reasoning"></p>
+          <dl id="quantDetails" class="details compact-details"></dl>
+          <div class="factor-columns">
+            <div>
+              <h3>支持因素</h3>
+              <div id="supportingFactors" class="chips"></div>
+            </div>
+            <div>
+              <h3>反对因素</h3>
+              <div id="opposingFactors" class="chips"></div>
+            </div>
+            <div>
+              <h3>否决因素</h3>
+              <div id="vetoFactors" class="chips"></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel bot-panel">
+          <div class="panel-head">
+            <div>
+              <h2>机器人</h2>
+              <p>持仓、候选执行包和执行事件</p>
+            </div>
+            <span id="botStateBadge" class="badge gray">未知</span>
+          </div>
+          <div class="metric-row">
+            <div><span>持仓</span><strong id="botPosition">--</strong></div>
+            <div><span>方向</span><strong id="botDirection">--</strong></div>
+            <div><span>仓位</span><strong id="botSize">--</strong></div>
+          </div>
+          <div class="candidate">
+            <h3>候选执行包</h3>
+            <dl id="candidateDetails"></dl>
+          </div>
+          <div>
+            <h3>最新周期</h3>
+            <dl id="cycleDetails"></dl>
+          </div>
+          <div class="audit-section">
+            <h3>执行事件</h3>
+            <div id="auditEvents" class="audit-list"></div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

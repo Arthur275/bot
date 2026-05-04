@@ -482,6 +482,8 @@ def test_real_exchange_adapter_executes_simulated_real_without_dispatch() -> Non
     assert results[0].status == "simulated"
     assert results[0].accepted is True
     assert results[0].simulated is True
+    assert results[0].idempotency_key == "entry_order:2026-04-26T13:00:00:entry_long:long"
+    assert results[0].client_order_id.startswith("ethbot-eo-")
     assert results[0].details["venue"] == "binance_usdt_perp"
     assert results[0].details["prepared_request"]["path"] == "/fapi/v1/order"
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
@@ -560,6 +562,8 @@ def test_real_exchange_adapter_preflight_entry_order_resolves_request_without_di
     assert results[0].status == "preflight_ready"
     assert results[0].accepted is True
     assert results[0].simulated is True
+    assert results[0].idempotency_key == "entry_order:2026-04-26T13:30:00:entry_long:long"
+    assert results[0].client_order_id.startswith("ethbot-eo-")
     assert results[0].details["preflight"] is True
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
     assert [request.path for request in transport.requests] == [
@@ -633,6 +637,8 @@ def test_real_exchange_adapter_preflight_entry_order_uses_executable_size_contra
     assert results[0].simulated is True
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.016"
     client_order_id = results[0].details["prepared_request"]["params"]["newClientOrderId"]
+    assert results[0].idempotency_key == "entry_order:2026-04-26T13:30:30:entry_long:long"
+    assert results[0].client_order_id == client_order_id
     assert client_order_id.startswith("ethbot-eo-")
     assert len(client_order_id) <= 36
     assert results[0].details["prepared_request"]["idempotency_key"] == "entry_order:2026-04-26T13:30:30:entry_long:long"
@@ -853,6 +859,10 @@ def test_real_exchange_adapter_executes_real_entry_order() -> None:
     assert results[0].status == "accepted"
     assert results[0].accepted is True
     assert results[0].simulated is False
+    assert results[0].idempotency_key == "entry_order:2026-04-26T13:00:00:entry_long:long"
+    assert results[0].client_order_id.startswith("ethbot-eo-")
+    assert results[0].exchange_order_id == "12345"
+    assert results[0].error_kind == ""
     assert results[0].details["http_status"] == 200
     assert results[0].details["response_payload"] == {"orderId": 12345, "status": "NEW"}
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
@@ -891,6 +901,7 @@ def test_real_exchange_adapter_blocks_real_entry_order_when_route_c_missing_warn
     assert results[0].accepted is False
     assert results[0].simulated is False
     assert results[0].reason == "unsafe_request_mapping"
+    assert results[0].error_kind == "unsafe_request_mapping"
     assert results[0].details["reason_code"] == "route_c_missing"
     assert "Route C/orderbook" in results[0].details["error"]
     assert transport.requests == []

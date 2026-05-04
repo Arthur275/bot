@@ -184,6 +184,10 @@ class CommandExecutionResult(BaseModel):
     simulated: bool = True
     reason: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str = ""
+    client_order_id: str = ""
+    exchange_order_id: str = ""
+    error_kind: str = ""
 
 
 class AdapterCredentials(BaseModel):
@@ -480,6 +484,7 @@ class ExchangeAdapter(BaseExchangeAdapter):
                     accepted=True,
                     simulated=simulated,
                     reason=command.reason,
+                    idempotency_key=command.idempotency_key,
                     details={
                         "command_type": command.command_type,
                         "operation": command.operation,
@@ -928,6 +933,9 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         }
         if extra_details:
             details.update(extra_details)
+        client_order_id = self._extract_client_order_id(prepared=prepared)
+        exchange_order_id = self._extract_exchange_order_id(details.get("response_payload"))
+        error_kind = self._resolve_error_kind(reason=reason, extra_details=extra_details)
         return CommandExecutionResult(
             target=command.target,
             status=status,
@@ -935,7 +943,40 @@ class RealExchangeAdapter(BaseExchangeAdapter):
             simulated=simulated,
             reason=reason,
             details=details,
+            idempotency_key=command.idempotency_key,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            error_kind=error_kind,
         )
+
+    @staticmethod
+    def _extract_client_order_id(*, prepared: PreparedAdapterRequest) -> str:
+        params = prepared.params or {}
+        return str(params.get("newClientOrderId") or params.get("clientAlgoId") or "")
+
+    @staticmethod
+    def _extract_exchange_order_id(payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("orderId") or payload.get("algoId") or "")
+
+    @staticmethod
+    def _resolve_error_kind(*, reason: str, extra_details: dict[str, Any] | None) -> str:
+        if not extra_details:
+            return ""
+        if "error" not in extra_details:
+            return ""
+        if reason == "unsafe_request_mapping":
+            return "unsafe_request_mapping"
+        if reason == "request_signing_failed":
+            return "request_config_error"
+        if reason == "transport_timeout":
+            return "timeout"
+        if reason == "exchange_rejected":
+            return "http_error"
+        if reason == "transport_error":
+            return "transport_error"
+        return str(reason or "error")
 
     @staticmethod
     def _summarize_response_payload(*, command: ExecutionCommand, payload: Any, account_payload: Any = None) -> dict[str, Any]:

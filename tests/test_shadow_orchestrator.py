@@ -408,8 +408,8 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
         {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
     ]
     assert report.command_result_summary == [
-        {"target": "entry_order", "reason": "effective_action:entry_long", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True},
+        {"target": "entry_order", "reason": "effective_action:entry_long", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "entry_order:2026-04-26T12:00:00:entry_long:neutral", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-04-26T12:00:00:entry_long:neutral", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
     ]
     assert report.adapter_action_types == ["entry_order", "maintain_protective_stop"]
     assert report.command_types == ["entry_order", "maintain_protective_stop"]
@@ -456,9 +456,13 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
         {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
     ]
     assert audit_event["payload"]["command_result_summary"] == [
-        {"target": "entry_order", "reason": "effective_action:entry_long", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True},
+        {"target": "entry_order", "reason": "effective_action:entry_long", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "entry_order:2026-04-26T12:00:00:entry_long:neutral", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-04-26T12:00:00:entry_long:neutral", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
     ]
+    assert audit_event["payload"]["automation_state"] == "disabled"
+    assert audit_event["payload"]["runtime_snapshot_before"]["position"]["position_state"] == "FLAT"
+    assert audit_event["payload"]["runtime_snapshot_after"] == audit_event["payload"]["runtime_snapshot"]
+    assert audit_event["payload"]["reason_codes"] == []
     assert audit_event["payload"]["recent_fill_summary"] == {}
 
 
@@ -540,6 +544,8 @@ def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mod
     assert audit_event["payload"]["runtime_snapshot"]["position"]["position_state"] == "ENTERED"
     assert audit_event["payload"]["runtime_snapshot"]["position"]["direction"] == "long"
     assert audit_event["payload"]["runtime_snapshot"]["position"]["size_pct"] == 0.3
+    assert audit_event["payload"]["runtime_snapshot_before"]["position"]["position_state"] == "FLAT"
+    assert audit_event["payload"]["runtime_snapshot_after"]["position"]["position_state"] == "ENTERED"
 
 
 
@@ -606,6 +612,10 @@ def test_shadow_orchestrator_blocks_real_entry_without_manual_confirmation(tmp_p
     assert {result["status"] for result in results} == {"blocked"}
     assert results[0]["details"]["confirmation_required"] is True
     assert results[0]["details"]["expected_confirmation_token"].startswith("ENTRY-")
+    assert results[0]["idempotency_key"] == "entry_order:2026-04-26T14:00:00:entry_long:long"
+    assert results[0]["error_kind"] == "manual_entry_confirmation_required"
+    assert audit_event["payload"]["command_result_summary"][0]["idempotency_key"] == "entry_order:2026-04-26T14:00:00:entry_long:long"
+    assert audit_event["payload"]["command_result_summary"][0]["error_kind"] == "manual_entry_confirmation_required"
 
 
 def test_shadow_orchestrator_allows_real_entry_with_matching_manual_confirmation(tmp_path: Path) -> None:
@@ -1110,6 +1120,9 @@ def test_risk_assist_cycle_skips_when_state_is_not_eligible(tmp_path: Path) -> N
     report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 5, 0))
     assert report.eligible is False
     assert fake_client.fetch_cycle_calls == 0
+    audit_event = json.loads(config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit_event["event_type"] == "risk_assist_cycle_skipped"
+    assert audit_event["payload"]["automation_state"] == "disabled"
 
 
 def test_risk_assist_cycle_runs_when_entered_state_has_zero_size_pct(tmp_path: Path) -> None:
@@ -1488,8 +1501,8 @@ def test_risk_assist_cycle_runs_when_recovery_is_required(tmp_path: Path) -> Non
         {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
     ]
     assert report.command_result_summary == [
-        {"target": "reduce_order", "reason": "effective_action:reduce", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True},
+        {"target": "reduce_order", "reason": "effective_action:reduce", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "reduce_order:2026-04-26T12:05:00:reduce:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-04-26T12:05:00:reduce:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
     ]
     assert report.reconciliation_in_sync is True
     assert "reduce_order" in report.adapter_action_types
@@ -1582,9 +1595,9 @@ def test_risk_assist_cycle_keeps_exit_available_during_recovery(tmp_path: Path) 
         {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "operation": "query"},
     ]
     assert report.command_result_summary == [
-        {"target": "exit_order", "reason": "effective_action:exit", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "status": "simulated", "accepted": True, "simulated": True},
+        {"target": "exit_order", "reason": "effective_action:exit", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "exit_order:2026-04-26T12:06:00:exit:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-04-26T12:06:00:exit:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "reconcile_position_and_orders:2026-04-26T12:06:00:exit:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
     ]
     assert report.reconciliation_in_sync is False
     assert "exit_order" in report.adapter_action_types
@@ -1681,9 +1694,9 @@ def test_risk_assist_cycle_audit_log_persists_recovery_metadata_fields(tmp_path:
         {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "operation": "query"},
     ]
     assert audit_event["payload"]["command_result_summary"] == [
-        {"target": "reduce_order", "reason": "effective_action:reduce", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True},
-        {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "status": "simulated", "accepted": True, "simulated": True},
+        {"target": "reduce_order", "reason": "effective_action:reduce", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "reduce_order:2026-04-26T12:05:00:reduce:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-04-26T12:05:00:reduce:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "reconcile_position_and_orders", "reason": "reconciliation_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "reconcile_position_and_orders:2026-04-26T12:05:00:reduce:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
     ]
     assert audit_event["payload"]["state"]["last_handoff_action"] == "reduce"
     assert audit_event["payload"]["state"]["last_diagnostic_category"] == "transport"

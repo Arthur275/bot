@@ -1,5 +1,7 @@
 from .audit_logger import AuditEvent, AuditLogger
 from .binance_transport import BinanceRequestConfigError, BinanceRequestSigner, BinanceTransport, BinanceTransportError, SignedAdapterRequest, TransportResponse
+from .automation_state import AutomationState
+from .automation_gate import RealOrderGateDecision, evaluate_real_order_gate
 from .config import BotConfig, EngineMode, RuntimeMode
 from .engine_client import EngineClient, EngineCyclePayload
 from .execution_risk_gate import ExecutionRiskDecision, ExecutionRiskGate, ExecutionRiskGateConfig
@@ -14,6 +16,7 @@ from .exchange_adapter import (
     ExchangeAdapter,
     ExchangeAdapterProtocol,
     ExecutionCommand,
+    CommandExecutionResult,
     ExitOrderPayload,
     OrderSnapshot,
     PositionSnapshot,
@@ -38,6 +41,9 @@ __all__ = [
     "AdapterRuntimeSnapshot",
     "AuditEvent",
     "AuditLogger",
+    "AutomationState",
+    "RealOrderGateDecision",
+    "evaluate_real_order_gate",
     "BinancePerpAdapter",
     "BinanceRequestConfigError",
     "BinanceRequestSigner",
@@ -51,6 +57,7 @@ __all__ = [
     "EntryOrderPayload",
     "ExchangeAdapter",
     "ExchangeAdapterProtocol",
+    "CommandExecutionResult",
     "ExecutionCommand",
     "ExecutionLayerState",
     "ExecutionPlan",

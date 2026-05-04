@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action_enums import PositionAction
+from .automation_state import AutomationState, coerce_automation_state_for_execution_layer
 from .exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult
 from .execution_summary import summarize_execution_results
 from .network_guard import GuardDecision
@@ -30,6 +31,7 @@ class BotRuntimeState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     execution_state: ExecutionLayerState = ExecutionLayerState.IDLE
+    automation_state: AutomationState = AutomationState.DISABLED
     observed_position_state: str = "FLAT"
     observed_position_direction: str = "neutral"
     observed_position_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
@@ -37,6 +39,8 @@ class BotRuntimeState(BaseModel):
     recovery_required: bool = False
     reconciliation_required: bool = False
     protective_stop_required: bool = False
+    consecutive_api_failure_count: int = Field(default=0, ge=0)
+    last_api_failure_at: str = ""
     last_judgement_status: str = ""
     last_judgement_generated_at: str = ""
     last_handoff_action: str = ""
@@ -70,6 +74,43 @@ class StateStore:
             encoding="utf-8",
         )
         return state
+
+    def record_api_success(self, *, state: BotRuntimeState | None = None) -> BotRuntimeState:
+        next_state = (state or self.load()).model_copy(deep=True)
+        next_state.consecutive_api_failure_count = 0
+        next_state.last_api_failure_at = ""
+        if next_state.execution_state is ExecutionLayerState.DEGRADED and not next_state.reconciliation_required:
+            if next_state.observed_position_state == "ENTERED" or next_state.observed_position_size_pct > 0.0:
+                next_state.execution_state = ExecutionLayerState.POSITION_OPEN
+            else:
+                next_state.execution_state = ExecutionLayerState.IDLE
+            next_state.automation_state = coerce_automation_state_for_execution_layer(
+                execution_state=next_state.execution_state.value,
+                automation_state=next_state.automation_state,
+            )
+        return self.save(next_state)
+
+    def record_api_failure(
+        self,
+        *,
+        state: BotRuntimeState | None = None,
+        reason_code: str,
+        failed_at: datetime | None = None,
+        degraded_threshold: int = 3,
+    ) -> BotRuntimeState:
+        next_state = (state or self.load()).model_copy(deep=True)
+        next_state.consecutive_api_failure_count += 1
+        next_state.last_api_failure_at = (failed_at or datetime.now().replace(microsecond=0)).isoformat()
+        if reason_code and reason_code not in next_state.last_reason_codes:
+            next_state.last_reason_codes = [*next_state.last_reason_codes, reason_code]
+        if next_state.consecutive_api_failure_count >= max(1, int(degraded_threshold)):
+            next_state.execution_state = ExecutionLayerState.DEGRADED
+            next_state.automation_state = coerce_automation_state_for_execution_layer(
+                execution_state=next_state.execution_state.value,
+                automation_state=next_state.automation_state,
+            )
+            next_state.recovery_required = True
+        return self.save(next_state)
 
     def record_shadow_cycle(
         self,
@@ -109,6 +150,10 @@ class StateStore:
             previous_observed_position_size_pct=previous_observed_position_size_pct,
             observed_position_state=observed_position_state,
             observed_position_size_pct=observed_position_size_pct,
+        )
+        next_state.automation_state = coerce_automation_state_for_execution_layer(
+            execution_state=next_state.execution_state.value,
+            automation_state=next_state.automation_state,
         )
         next_state.pending_action = self._resolve_pending_action(
             effective_action,
@@ -317,7 +362,7 @@ class StateStore:
     ) -> list[str]:
         keys = [str(item) for item in previous if str(item)]
         for result in execution_results or []:
-            key = str((result.details or {}).get("idempotency_key") or "")
+            key = str(result.idempotency_key or (result.details or {}).get("idempotency_key") or "")
             if key:
                 keys.append(key)
         deduped = list(dict.fromkeys(keys))

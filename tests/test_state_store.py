@@ -2,7 +2,8 @@ from pathlib import Path
 
 from bot.exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult, PositionSnapshot
 from bot.network_guard import GuardDecision
-from bot.state_store import ExecutionLayerState, StateStore
+from bot.automation_state import AutomationState
+from bot.state_store import BotRuntimeState, ExecutionLayerState, StateStore
 
 
 def test_state_store_records_shadow_cycle_and_persists_state(tmp_path: Path) -> None:
@@ -59,8 +60,36 @@ def test_state_store_marks_blocked_state(tmp_path: Path) -> None:
         maintain_protective_stop=False,
     )
     assert updated.execution_state is ExecutionLayerState.BLOCKED
+    assert updated.automation_state is AutomationState.ACTION_BLOCKED
     assert updated.recovery_required is True
     assert updated.reconciliation_required is True
+
+
+def test_state_store_records_api_failures_and_enters_degraded_after_threshold(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    first = store.record_api_failure(reason_code="fetch_position_timeout")
+    second = store.record_api_failure(state=first, reason_code="open_algo_orders_timeout")
+    third = store.record_api_failure(state=second, reason_code="submit_response_unknown")
+
+    assert first.consecutive_api_failure_count == 1
+    assert second.consecutive_api_failure_count == 2
+    assert third.consecutive_api_failure_count == 3
+    assert third.execution_state is ExecutionLayerState.DEGRADED
+    assert third.automation_state is AutomationState.ACTION_BLOCKED
+    assert third.recovery_required is True
+    assert third.last_api_failure_at
+    assert "submit_response_unknown" in third.last_reason_codes
+
+
+def test_state_store_api_success_clears_failure_count_and_recovers_idle_degraded_state(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    degraded = store.record_api_failure(reason_code="fetch_position_timeout", degraded_threshold=1)
+
+    recovered = store.record_api_success(state=degraded)
+
+    assert recovered.consecutive_api_failure_count == 0
+    assert recovered.last_api_failure_at == ""
+    assert recovered.execution_state is ExecutionLayerState.IDLE
 
 
 def test_state_store_marks_reconciling_state_when_runtime_needs_recovery(tmp_path: Path) -> None:
@@ -93,9 +122,47 @@ def test_state_store_marks_reconciling_state_when_runtime_needs_recovery(tmp_pat
         ),
     )
     assert updated.execution_state is ExecutionLayerState.RECONCILING
+    assert updated.automation_state is AutomationState.ACTION_BLOCKED
     assert updated.recovery_required is True
     assert updated.reconciliation_required is True
     assert updated.protective_stop_required is True
+
+
+def test_state_store_persists_automation_state_for_allowed_execution_pair(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = BotRuntimeState(automation_state=AutomationState.OBSERVING)
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-04-26T12:06:00", "action": "wait"},
+        guard=GuardDecision(judgement_status="ok"),
+        effective_action="wait",
+    )
+
+    assert updated.execution_state is ExecutionLayerState.IDLE
+    assert updated.automation_state is AutomationState.OBSERVING
+    assert store.load().automation_state is AutomationState.OBSERVING
+
+
+def test_state_store_collects_top_level_idempotency_key_before_legacy_details(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-04-26T12:07:00", "action": "wait"},
+        guard=GuardDecision(judgement_status="ok"),
+        effective_action="wait",
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="simulated",
+                idempotency_key="top-level-key",
+                details={"idempotency_key": "legacy-details-key"},
+            )
+        ],
+    )
+
+    assert updated.recent_idempotency_keys == ["top-level-key"]
 
 
 def test_state_store_does_not_recover_on_expected_tightening_capability_block(tmp_path: Path) -> None:

@@ -214,8 +214,11 @@ class ShadowOrchestrator:
                 "runtime_overview": runtime_overview,
                 "guard": guard.model_dump(mode="json"),
                 "runtime_snapshot": runtime_snapshot_for_state.model_dump(mode="json"),
+                "runtime_snapshot_before": runtime_snapshot.model_dump(mode="json"),
+                "runtime_snapshot_after": runtime_snapshot_for_state.model_dump(mode="json"),
                 "reconciliation": reconciliation.model_dump(mode="json"),
                 "execution_plan": execution_plan.model_dump(mode="json"),
+                "automation_state": updated_state.automation_state.value,
                 "command_reasons": [command.reason for command in execution_commands],
                 "command_summary": command_summary,
                 "command_result_summary": command_result_summary,
@@ -224,6 +227,7 @@ class ShadowOrchestrator:
                 "execution_result_summary": execution_result_summary,
                 "adapter_actions": [action.model_dump(mode="json") for action in adapter_actions],
                 "state": updated_state.model_dump(mode="json"),
+                "reason_codes": list(guard.reason_codes),
                 "recent_fill_summary": updated_state.recent_fill_summary,
                 "handoff": cycle.handoff or {},
             },
@@ -263,6 +267,7 @@ class ShadowOrchestrator:
                 generated_at=cycle_generated_at,
                 payload={
                     "reason": "risk_loop_not_eligible",
+                    "automation_state": state.automation_state.value,
                     "state": state.model_dump(mode="json"),
                 },
             )
@@ -370,9 +375,17 @@ class ShadowOrchestrator:
                 "execution_overview": execution_overview,
                 "runtime_overview": runtime_overview,
                 "runtime_mode": self._config.runtime_mode.value,
+                "engine_mode": self._config.engine_mode.value,
                 "adapter_capabilities": capabilities.model_dump(mode="json"),
                 "runtime_snapshot": runtime_snapshot_for_state.model_dump(mode="json"),
+                "runtime_snapshot_before": runtime_snapshot.model_dump(mode="json"),
+                "runtime_snapshot_after": runtime_snapshot_for_state.model_dump(mode="json"),
                 "reconciliation": reconciliation.model_dump(mode="json"),
+                "judgement_status": cycle.judgement.get("status"),
+                "judgement": cycle.judgement,
+                "guard": guard.model_dump(mode="json"),
+                "execution_plan": execution_plan.model_dump(mode="json"),
+                "automation_state": updated_state.automation_state.value,
                 "command_reasons": [command.reason for command in execution_commands],
                 "command_summary": command_summary,
                 "command_result_summary": command_result_summary,
@@ -381,6 +394,7 @@ class ShadowOrchestrator:
                 "execution_result_summary": execution_result_summary,
                 "adapter_actions": [action.model_dump(mode="json") for action in adapter_actions],
                 "state": updated_state.model_dump(mode="json"),
+                "reason_codes": list(guard.reason_codes),
                 "recent_fill_summary": updated_state.recent_fill_summary,
                 "handoff": cycle.handoff or {},
             },
@@ -504,6 +518,10 @@ class ShadowOrchestrator:
                 "status": result.status,
                 "accepted": result.accepted,
                 "simulated": result.simulated,
+                "idempotency_key": result.idempotency_key,
+                "client_order_id": result.client_order_id,
+                "exchange_order_id": result.exchange_order_id,
+                "error_kind": result.error_kind,
             }
             for result in execution_results
         ]
@@ -548,6 +566,8 @@ class ShadowOrchestrator:
                     "payload": command.payload.model_dump(mode="json"),
                     "idempotency_key": command.idempotency_key,
                 },
+                idempotency_key=command.idempotency_key,
+                error_kind="manual_entry_confirmation_required",
             )
             for command in execution_commands
             if command.target in blocked_targets
