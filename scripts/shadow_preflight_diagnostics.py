@@ -67,6 +67,9 @@ HANDOFF_DIAGNOSTIC_FIELDS = (
     "trailing_rule",
     "trailing_activation_ratio",
     "trailing_callback_rate_pct",
+    "tp_ladder",
+    "reduce_conditions",
+    "invalidate_conditions",
 )
 
 HANDOFF_SUMMARY_FIELDS = (*HANDOFF_BASE_FIELDS, *HANDOFF_DIAGNOSTIC_FIELDS)
