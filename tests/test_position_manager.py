@@ -145,6 +145,28 @@ def test_entry_handoff_uses_risk_sized_executable_size_in_adapter_payload() -> N
     assert commands[0].payload.position_size_pct == 0.05
 
 
+def test_position_manager_does_not_interpret_quant_sizing_tier() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "position_size_pct": 0.2,
+            "initial_stop_loss": 0.98,
+            "sizing_tier": "none",
+            "sizing_bias": "none",
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+    )
+
+    assert plan.effective_action == "entry_long"
+    assert plan.place_entry_order is True
+    assert plan.plan_reason == "quant_action_passthrough"
+
+
 def test_position_manager_keeps_observe_only_as_quant_action() -> None:
     plan = PositionManager().build_execution_plan(
         handoff={"action": "observe_only", "position_size_pct": 0.0},

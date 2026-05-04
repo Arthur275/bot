@@ -650,6 +650,70 @@ def test_real_exchange_adapter_preflight_entry_order_uses_executable_size_contra
     ]
 
 
+def test_real_exchange_adapter_preflight_entry_order_does_not_interpret_sizing_tier() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3120.5",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "3120.5"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+            executable_size_pct=0.05,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:30:30",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.15,
+            "sizing_tier": "full",
+            "sizing_bias": "constructive",
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].status == "preflight_ready"
+    assert commands[0].payload.position_size_pct == 0.05
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.016"
+    assert results[0].details["prepared_request"]["body"]["resolution_mode"] == "entry_quantity_from_size_pct"
+
+
 def test_real_exchange_adapter_preflight_refreshes_timestamp_offset_on_recv_window_error() -> None:
     transport = FakeTransport(
         responses=[

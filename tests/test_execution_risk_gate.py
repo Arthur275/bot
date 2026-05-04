@@ -45,6 +45,30 @@ def test_execution_risk_gate_derives_executable_size_from_stop_distance() -> Non
     assert decision.reason_codes == ["execution_risk_gate_pass"]
 
 
+def test_execution_risk_gate_does_not_interpret_quant_sizing_tier() -> None:
+    decision = ExecutionRiskGate(
+        ExecutionRiskGateConfig(
+            leverage=10,
+            entry_margin_budget_usdt=None,
+            max_account_risk_pct_per_trade=0.01,
+            require_execution_allowed=True,
+        )
+    ).evaluate(
+        handoff={
+            "action": "entry_long",
+            "position_size_pct": 0.8,
+            "initial_stop_loss": 0.98,
+            "execution_allowed": True,
+            "sizing_tier": "probe",
+            "sizing_bias": "conservative",
+        }
+    )
+
+    assert decision.allowed is True
+    assert decision.executable_size_pct == 0.05
+    assert decision.reason_codes == ["execution_risk_gate_pass"]
+
+
 def test_execution_risk_gate_caps_small_probe_size() -> None:
     decision = ExecutionRiskGate(
         ExecutionRiskGateConfig(
