@@ -1,5 +1,23 @@
 # ETH Trading Bot
 
+## 项目自述
+
+ETH Trading Bot 是一个面向真实交易执行的机器人壳层。它不负责重新发明策略，也不在本地解释量化因子；它的职责是消费 `quant_system_rebuild` 输出的 judgement / execution handoff，把量化侧的判断转成可审计、可降级、可恢复、可人工接管的执行流程。换句话说，quant 仓库负责“判断该不该做、做多大”，bot 仓库负责“在严格边界内怎样安全地执行”。
+
+这个仓库可以用来做：
+
+- 调用量化引擎获取 `strict-live` judgement 和 execution handoff。
+- 在 shadow / simulated-real / real 三种模式下编排执行流程。
+- 对接 Binance USDT perpetual，处理签名请求、仓位快照、订单状态和保护单。
+- 维护本地 state store、JSONL audit log、network guard、kill switch 和高风险动作锁。
+- 管理保护止损，包括 adopt、preview、只读 watcher、分阶段锁盈和缺失保护单补单。
+- 在执行前后做风险门校验，保证网络异常、状态冲突、过期 handoff、重复执行和人工确认缺失时不会扩大风险。
+- 只读展示 quant 侧给出的 `sizing_tier / sizing_bias`，不解释、不重算、不改变交易 gate。
+
+技术上，这个项目以 Python 为核心，围绕清晰的执行边界拆分为 engine client、orchestrator、exchange adapter、position manager、network guard、state store、audit logger 和 high-risk gate。测试侧使用 pytest 锁定 shadow / simulated-real / real 的行为边界；运行侧使用 PowerShell / CMD 脚本适配 Windows 本地常驻与人工操作。
+
+一句话概括：这个仓库负责“把已经审计过的量化判断安全地变成执行动作”。它不追求在 bot 内部变聪明，而是追求在真实交易边界上足够保守、足够透明、足够容易停下。
+
 ETH Trading Bot 是一个面向实盘执行的机器人壳层，负责消费 `quant_system_rebuild` 输出的 judgement / execution handoff，并把它转换为可审计、可降级、可恢复的交易执行流程。
 
 本仓库不重新发明策略，不生成 research bundle，也不把 sample-fallback 当成实时交易信号。策略判断、research readiness、execution handoff 语义由量化仓库负责；本仓库只处理执行边界、交易所适配、本地状态、审计日志、保护止损和故障降级。
