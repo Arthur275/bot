@@ -187,6 +187,73 @@ D:\开发\eth_trading_bot\scripts\start_protective_stop_watch_readonly.cmd -MaxI
 Mode: read-only. No cancel/place endpoint is called.
 ```
 
+## 一键 runtime stack
+
+当前推荐用统一管理器启动本地自动化链路和只读 dashboard：
+
+```powershell
+cd D:\开发\eth_trading_bot
+D:\开发\eth_trading_bot\scripts\manage_runtime_stack.cmd start
+```
+
+查看状态：
+
+```powershell
+D:\开发\eth_trading_bot\scripts\manage_runtime_stack.cmd status
+```
+
+停止：
+
+```powershell
+D:\开发\eth_trading_bot\scripts\manage_runtime_stack.cmd stop
+```
+
+默认启动内容：
+
+```text
+dashboard       -> http://127.0.0.1:8765
+factor_ingest   -> quant ingest-summary loop
+quant_judgement -> quant run-cycle strict-live loop
+bot_scheduler   -> consume handoff and write candidate package or blocked audit
+real_worker     -> dry-run worker loop
+```
+
+默认是 dry-run，不会真实提交订单。真实提交必须显式冷启动：
+
+```powershell
+D:\开发\eth_trading_bot\scripts\manage_runtime_stack.cmd start -EnableRealOrders
+```
+
+实盘安全边界：
+
+- `-EnableRealOrders` 只在启动时生效；dry-run 和 real-order 之间需要 stop -> start
+- kill switch 文件存在时不会启用真实提交：`runtime\controls\disable_real_execution.flag`
+- worker submit 前会再次检查 kill switch
+- status 会显示 dashboard HTTP/API、factor age、quant latest run id、bot latest sample、candidate package、worker mode/audit、kill switch 和近期日志错误
+- `candidate_package: missing` 通常表示当前策略没有允许执行的 package，不代表 runtime stack 没启动
+
+## Runtime dashboard
+
+页面地址：
+
+```text
+http://127.0.0.1:8765
+```
+
+API 地址：
+
+```text
+http://127.0.0.1:8765/api/overview
+```
+
+Dashboard 是只读观察页，不提供运行控制。三块主面板：
+
+- 样本采集与因子治理：sample、lookup、`factor_grade / factor_lifecycle / factor_effect`、win rate、stop hit rate、net expectancy
+- 量化市场判断：action、direction、confidence、sizing、research、risk、handoff、reason codes
+- bot 下单链路：candidate package、automation boundary、worker audit、kill switch、runtime status
+
+前端使用原生 HTML/CSS/JS，5 秒刷新，`/api/overview` 有 1 秒内存缓存。运行时数据用 DOM API 渲染，不拼接运行时 `innerHTML`。
+
 ## 保护止损流程
 
 合并版第一版目标：
