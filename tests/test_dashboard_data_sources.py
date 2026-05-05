@@ -322,6 +322,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     static_root = REPO_ROOT / "dashboard" / "static"
     html = (static_root / "index.html").read_text(encoding="utf-8")
     app_js = (static_root / "app.js").read_text(encoding="utf-8")
+    styles_css = (static_root / "styles.css").read_text(encoding="utf-8")
 
     html_ids = set(re.findall(r'id="([^"]+)"', html))
     referenced_ids = set(re.findall(r'\$\("([^"]+)"\)', app_js))
@@ -339,6 +340,11 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert ".innerHTML" not in app_js
     assert "replaceChildren" not in app_js
     assert "function clearElement(el)" in app_js
+    assert '"Microsoft YaHei UI"' in styles_css
+    assert "width: min(100%, 1680px)" in styles_css
+    assert "justify-items: center" in styles_css
+    assert "@media (max-width: 980px)" in styles_css
+    assert "@media (max-width: 720px)" in styles_css
 
 
 def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypatch) -> None:
