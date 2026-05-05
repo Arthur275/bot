@@ -336,6 +336,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert referenced_ids <= html_ids
     assert "�" not in html
     assert "�" not in app_js
+    assert ".innerHTML" not in app_js
+    assert "replaceChildren" not in app_js
+    assert "function clearElement(el)" in app_js
 
 
 def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypatch) -> None:

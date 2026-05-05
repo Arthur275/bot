@@ -96,9 +96,15 @@ function setError(message = "") {
   banner.textContent = message;
 }
 
+function clearElement(el) {
+  while (el.firstChild) {
+    el.removeChild(el.firstChild);
+  }
+}
+
 function renderRuntime(runtime) {
   const grid = $("runtimeGrid");
-  grid.replaceChildren();
+  clearElement(grid);
   for (const [key, label] of runtimeItems) {
     const item = runtime[key] || {};
     const card = document.createElement("div");
@@ -117,7 +123,7 @@ function renderRuntime(runtime) {
 
 function renderList(id, rows, nameKey = "name") {
   const ul = $(id);
-  ul.replaceChildren();
+  clearElement(ul);
   const normalizedRows = rows && rows.length > 0 ? rows : [{ [nameKey]: "none", count: 0 }];
   for (const row of normalizedRows) {
     const li = document.createElement("li");
@@ -132,7 +138,7 @@ function renderList(id, rows, nameKey = "name") {
 
 function renderChips(id, rows, level = "") {
   const wrap = $(id);
-  wrap.replaceChildren();
+  clearElement(wrap);
   const normalizedRows = rows && rows.length > 0 ? rows : ["none"];
   for (const value of normalizedRows) {
     const chip = document.createElement("span");
@@ -144,7 +150,7 @@ function renderChips(id, rows, level = "") {
 
 function renderReasonChips(id, rows, level = "") {
   const wrap = $(id);
-  wrap.replaceChildren();
+  clearElement(wrap);
   const normalizedRows = rows && rows.length > 0 ? rows : [{ code: "none", text: "无" }];
   for (const row of normalizedRows) {
     const chip = document.createElement("span");
@@ -160,7 +166,7 @@ function renderReasonChips(id, rows, level = "") {
 
 function renderDetails(id, entries) {
   const dl = $(id);
-  dl.replaceChildren();
+  clearElement(dl);
   for (const [key, value] of entries) {
     const dt = document.createElement("dt");
     const dd = document.createElement("dd");
@@ -172,7 +178,7 @@ function renderDetails(id, entries) {
 
 function renderAudit(events) {
   const wrap = $("auditEvents");
-  wrap.replaceChildren();
+  clearElement(wrap);
   if (!events || events.length === 0) {
     const item = document.createElement("div");
     const title = document.createElement("strong");
@@ -200,7 +206,7 @@ function renderAudit(events) {
 
 function renderGovernanceRows(id, rows) {
   const wrap = $(id);
-  replaceChildren(wrap);
+  clearElement(wrap);
   if (!rows || rows.length === 0) {
     const empty = document.createElement("div");
     empty.className = "audit-item";
