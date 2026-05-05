@@ -6,3 +6,6 @@ runtime/
 debug_*/
 .tmp_pytest*/
 *.log
+*.duckdb
+*.pid
+*.lock

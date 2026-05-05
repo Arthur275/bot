@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from bot.config import RuntimeMode
+from bot.audit_logger import AuditLogger
 from bot.exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult, ExecutionCommand, PositionSnapshot
 from bot.state_store import ExecutionLayerState, StateStore
 from scripts import real_order_worker
@@ -456,6 +457,28 @@ def test_real_order_worker_blocks_replayed_idempotency_key(tmp_path: Path) -> No
     assert second["status"] == "blocked"
     assert second["reason_codes"] == ["idempotency_key_already_completed"]
     assert second_adapter.executed_commands == []
+
+
+def test_real_order_worker_blocks_pending_idempotency_key_until_recovery(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path))
+    AuditLogger(args.audit_log_path).append(
+        event_type="real_order_worker_command_pending",
+        payload={
+            "status": "pending",
+            "package_id": "previous-package",
+            "commands": [{"target": "entry_order", "idempotency_key": "entry_long:key"}],
+        },
+    )
+    adapter = FakeRealOrderAdapter()
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "blocked"
+    assert result["reason_codes"] == ["pending_idempotency_key_requires_recovery"]
+    assert result["idempotency_keys"] == ["entry_long:key"]
+    assert adapter.executed_commands == []
 
 
 def test_real_order_worker_blocks_fresh_duplicate_lock(tmp_path: Path) -> None:

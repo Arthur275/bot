@@ -118,6 +118,49 @@ def test_bot_runtime_scheduler_enable_real_orders_still_blocks_shadow_payload(tm
     assert payload["candidate_execution_package"]["status"] == "skipped"
 
 
+def test_bot_runtime_scheduler_skips_candidate_package_when_handoff_execution_not_allowed(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "requested_action": "entry_long",
+            "effective_action": "entry_long",
+            "handoff": {
+                "action": "entry_long",
+                "direction": "long",
+                "execution_allowed": False,
+                "execution_block_reason": "runtime_veto",
+                "risk_filter_status": "veto",
+                "runtime_vetoes": ["research_not_ready"],
+                "initial_stop_loss": 0.97,
+            },
+            "execution_plan": {"place_entry_order": True, "maintain_protective_stop": True},
+            "runtime_snapshot": {"snapshot_valid": True, "position": {"position_state": "FLAT"}},
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            ],
+            "audit_log_path": "",
+        },
+    )
+
+    assert payload["real_order_gate"]["enabled"] is True
+    assert payload["real_order_gate"]["allowed"] is False
+    assert payload["automation_boundary"] == "real_order_submission_blocked"
+    assert "execution_not_allowed" in payload["real_order_gate"]["reason_codes"]
+    assert "risk_filter_not_pass" in payload["real_order_gate"]["reason_codes"]
+    assert payload["candidate_execution_package"] == {
+        "status": "skipped",
+        "reason": "candidate_execution_package_not_allowed",
+    }
+    assert not (Path(args.runtime_root) / "latest_candidate_execution_package.json").exists()
+
+
 def test_bot_runtime_scheduler_kill_switch_blocks_real_order_gate(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.enable_real_orders = True

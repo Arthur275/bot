@@ -566,6 +566,10 @@ def test_real_exchange_adapter_preflight_entry_order_resolves_request_without_di
     assert results[0].client_order_id.startswith("ethbot-eo-")
     assert results[0].details["preflight"] is True
     assert results[0].details["prepared_request"]["params"]["quantity"] == "0.048"
+    assert "balance_checked" not in results[0].details
+    assert "margin_checked" not in results[0].details
+    assert "prepared_request" in results[0].details
+    assert "signed_request" in results[0].details
     assert [request.path for request in transport.requests] == [
         "/fapi/v2/positionRisk",
         "/fapi/v1/openOrders",

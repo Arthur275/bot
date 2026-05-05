@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .reason_text import enrich_reason_codes, load_reason_code_text_map
 from .status_rules import kill_switch_status, lookup_status, runtime_status
 
 
@@ -43,9 +44,12 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     bot_samples = _jsonl_count(bot_scheduler_root / "samples.jsonl")
 
     quant_heartbeat = _read_json(quant_scheduler_root / "heartbeat.json")
+    research_health = _read_json(quant_scheduler_root / "research_health.json")
+    reason_code_text_map = load_reason_code_text_map(quant_scheduler_root / "reason_code_map.json")
     factor_summary = _read_json(quant_analysis_root / "factor_summary.json")
     factor_ingest = _read_json(quant_analysis_root / "factor_ingest_latest.json")
     factor_lookup = _read_latest_lookup(paths.quant_root)
+    factor_governance = _read_json(quant_analysis_root / "factor_governance_summary.json")
     quant_handoff = _read_latest_handoff(paths.quant_root)
     quant_cycle = _read_latest_quant_cycle(paths.quant_root)
     quant_decision = quant_cycle.get("decision", {})
@@ -100,6 +104,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 "factor_values": quant_db_counts.get("factor_values", 0),
             },
             "db_available": bool(quant_db_counts),
+            "governance": _factor_governance_summary(factor_governance),
         },
         "quant": {
             "action": bot_cycle.get("effective_action") or quant_decision.get("action") or quant_handoff.get("action") or "",
@@ -117,6 +122,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "factor_lookup_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
             "execution_warnings": quant_handoff.get("execution_warnings", []),
             "automation_boundary": bot_cycle.get("automation_boundary", ""),
+            "research": _research_summary(research_health, reason_code_text_map=reason_code_text_map),
         },
         "bot": {
             "execution_state": bot_state.get("execution_state", ""),
@@ -137,6 +143,62 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 "reason_codes": bot_cycle.get("reason_codes", []),
             },
         },
+}
+
+
+def _research_summary(payload: dict[str, Any], *, reason_code_text_map: dict[str, str] | None = None) -> dict[str, Any]:
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    research_bundle = metadata.get("research_bundle") if isinstance(metadata, dict) else {}
+    research_bundle = research_bundle if isinstance(research_bundle, dict) else {}
+    health = research_bundle.get("research_health") if isinstance(research_bundle, dict) else {}
+    health = health if isinstance(health, dict) else {}
+    refresh = metadata.get("research_refresh") if isinstance(metadata, dict) else {}
+    refresh = refresh if isinstance(refresh, dict) else {}
+    reason_codes = health.get("reason_codes") or research_bundle.get("reason_codes") or payload.get("issues") or []
+    generated_at = payload.get("generated_at") or research_bundle.get("generated_at") or ""
+    status = str(health.get("research_health_status") or payload.get("status") or "unknown")
+    decision = str(health.get("decision") or research_bundle.get("research_decision") or "")
+    return {
+        "status": status,
+        "decision": decision,
+        "freshness": health.get("freshness", ""),
+        "summary": health.get("research_health_summary", ""),
+        "generated_at": generated_at,
+        "dataset_timestamp": health.get("dataset_timestamp", ""),
+        "decision_ready": bool(research_bundle.get("decision_ready") or metadata.get("ready")),
+        "refresh_aliases": bool(refresh.get("refresh_aliases", False)),
+        "refresh_every": _int(refresh.get("refresh_aliases_every")),
+        "loop_iteration": _int(refresh.get("loop_iteration")),
+        "reason_codes": list(reason_codes)[:12] if isinstance(reason_codes, list) else [],
+        "reason_texts": enrich_reason_codes(reason_codes, limit=12, mapping=reason_code_text_map),
+    }
+
+
+def _factor_governance_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    rows = payload.get("rows") if isinstance(payload, dict) else []
+    rows = rows if isinstance(rows, list) else []
+    return {
+        "status": str(payload.get("status") or "unknown") if isinstance(payload, dict) else "unknown",
+        "lookup_version": str(payload.get("lookup_version") or "") if isinstance(payload, dict) else "",
+        "generated_at": str(payload.get("generated_at") or "") if isinstance(payload, dict) else "",
+        "reason_codes": list(payload.get("reason_codes") or [])[:8] if isinstance(payload, dict) else [],
+        "rows": [
+            {
+                "factor_name": str(row.get("factor_name") or ""),
+                "factor_value_bucket": str(row.get("factor_value_bucket") or ""),
+                "factor_grade": str(row.get("factor_grade") or ""),
+                "factor_lifecycle": str(row.get("factor_lifecycle") or ""),
+                "factor_effect": str(row.get("factor_effect") or ""),
+                "sample_count": _int(row.get("sample_count")),
+                "win_rate": row.get("win_rate"),
+                "stop_hit_rate": row.get("stop_hit_rate"),
+                "net_expectancy_pct": row.get("net_expectancy_pct"),
+                "reason_codes": list(row.get("reason_codes") or [])[:5],
+            }
+            for row in rows[:6]
+            if isinstance(row, dict)
+        ],
     }
 
 

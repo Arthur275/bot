@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import argparse
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,6 +13,29 @@ from .data_sources import DashboardPaths, load_dashboard_snapshot
 
 DASHBOARD_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = DASHBOARD_ROOT / "static"
+OVERVIEW_CACHE_TTL_SEC = 1.0
+
+
+class OverviewSnapshotCache:
+    def __init__(self, ttl_sec: float = OVERVIEW_CACHE_TTL_SEC) -> None:
+        self.ttl_sec = max(0.0, float(ttl_sec))
+        self._expires_at = 0.0
+        self._key: tuple[str, str] | None = None
+        self._payload: dict | None = None
+
+    def get(self, paths: DashboardPaths) -> dict:
+        now = time.monotonic()
+        key = (str(paths.bot_root), str(paths.quant_root))
+        if self._payload is not None and self._key == key and now < self._expires_at:
+            return self._payload
+        payload = load_dashboard_snapshot(paths)
+        self._payload = payload
+        self._key = key
+        self._expires_at = now + self.ttl_sec
+        return payload
+
+
+OVERVIEW_CACHE = OverviewSnapshotCache()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -20,7 +44,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/overview":
-            self._send_json(load_dashboard_snapshot(DashboardPaths.from_env()))
+            self._send_json(OVERVIEW_CACHE.get(DashboardPaths.from_env()))
             return
         if parsed.path in {"", "/"}:
             self._send_file(STATIC_ROOT / "index.html")

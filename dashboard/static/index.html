@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ETH 运行控制台</title>
+    <title>ETH 运行观察面板</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div>
-        <h1>ETH 运行控制台</h1>
+        <h1>ETH 运行观察面板</h1>
         <p>只读查看因子、量化决策和交易机器人运行状态</p>
       </div>
       <div class="toolbar">
@@ -38,6 +38,14 @@
             <div><span>因子值</span><strong id="factorValues">0</strong></div>
           </div>
           <dl id="factorDetails" class="details"></dl>
+          <div class="governance-box">
+            <div class="research-head">
+              <h3>因子治理</h3>
+              <span id="factorGovernanceBadge" class="badge gray">未知</span>
+            </div>
+            <dl id="factorGovernanceDetails" class="details compact-details"></dl>
+            <div id="factorGovernanceRows" class="governance-list"></div>
+          </div>
           <div class="split">
             <div>
               <h3>主要风险代码</h3>
@@ -66,6 +74,14 @@
           </div>
           <p id="reasoning" class="reasoning"></p>
           <dl id="quantDetails" class="details compact-details"></dl>
+          <div class="research-box">
+            <div class="research-head">
+              <h3>Research 健康</h3>
+              <span id="researchBadge" class="badge gray">未知</span>
+            </div>
+            <dl id="researchDetails" class="details compact-details"></dl>
+            <div id="researchReasons" class="chips reason-chips"></div>
+          </div>
           <div class="factor-columns">
             <div>
               <h3>支持因素</h3>

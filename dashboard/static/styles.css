@@ -217,6 +217,47 @@ main { padding: 18px 28px 28px; }
   overflow-wrap: anywhere;
 }
 
+.research-box {
+  margin-top: 14px;
+}
+
+.governance-box {
+  margin-top: 14px;
+  margin-bottom: 16px;
+}
+
+.governance-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.research-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.reason-chips {
+  margin-top: 10px;
+}
+
+.reason-chip {
+  display: grid;
+  gap: 4px;
+}
+
+.reason-chip strong {
+  font-size: 11px;
+  color: inherit;
+}
+
+.reason-chip span {
+  color: #cfd8e3;
+}
+
 dl {
   display: grid;
   grid-template-columns: 110px 1fr;

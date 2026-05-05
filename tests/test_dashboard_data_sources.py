@@ -8,7 +8,8 @@ from http.server import ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dashboard.app import DashboardHandler
+import dashboard.app as dashboard_app
+from dashboard.app import DashboardHandler, OverviewSnapshotCache
 from dashboard.data_sources import DashboardPaths, load_dashboard_snapshot
 from dashboard.status_rules import kill_switch_status, lookup_status, runtime_status
 
@@ -90,6 +91,43 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
 
     _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
     _write_json(
+        quant_root / "runtime" / "scheduler" / "reason_code_map.json",
+        {
+            "schema": "reason_code_map_v1",
+            "reason_code_text": {
+                "research_not_ready": "quant 共享映射：research 未就绪",
+                "wf_quality_insufficient": "quant 共享映射：walk-forward 质量不足",
+            },
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "scheduler" / "research_health.json",
+        {
+            "generated_at": generated_at,
+            "status": "blocked",
+            "issues": ["research_not_ready"],
+            "metadata": {
+                "ready": False,
+                "research_refresh": {
+                    "refresh_aliases": True,
+                    "refresh_aliases_every": 12,
+                    "loop_iteration": 24,
+                },
+                "research_bundle": {
+                    "decision_ready": False,
+                    "research_health": {
+                        "research_health_status": "unavailable",
+                        "decision": "unavailable",
+                        "freshness": "stale",
+                        "dataset_timestamp": "2026-05-04T00:00:00",
+                        "reason_codes": ["research_not_ready", "wf_quality_insufficient"],
+                        "research_health_summary": "bundle stale",
+                    },
+                },
+            },
+        },
+    )
+    _write_json(
         quant_root / "runtime" / "analysis" / "factor_summary.json",
         {
             "generated_at": generated_at,
@@ -106,6 +144,29 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "generated_at": generated_at,
             "lookup_version": "lookup-20260504",
             "factor_lookup_rows": 9,
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "analysis" / "factor_governance_summary.json",
+        {
+            "generated_at": generated_at,
+            "lookup_version": "lookup-20260504",
+            "status": "watch",
+            "reason_codes": ["sample_count_low"],
+            "rows": [
+                {
+                    "factor_name": "trigger_state.entry_timing_score",
+                    "factor_value_bucket": "0.50-0.75",
+                    "factor_grade": "core",
+                    "factor_lifecycle": "watch",
+                    "factor_effect": "neutral",
+                    "sample_count": 9,
+                    "win_rate": 0.55,
+                    "stop_hit_rate": 0.2,
+                    "net_expectancy_pct": 0.0,
+                    "reason_codes": ["sample_count_low"],
+                }
+            ],
         },
     )
     _write_json(quant_root / "runtime" / "analysis" / "factor_ingest_latest.json", {"generated_at": generated_at})
@@ -152,6 +213,10 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["factor"]["total_samples"] == 25
     assert snapshot["factor"]["lookup_version"] == "lookup-20260504"
     assert snapshot["factor"]["lookup_rows"] == 9
+    assert snapshot["factor"]["governance"]["status"] == "watch"
+    assert snapshot["factor"]["governance"]["rows"][0]["factor_lifecycle"] == "watch"
+    assert snapshot["factor"]["governance"]["rows"][0]["factor_effect"] == "neutral"
+    assert snapshot["factor"]["governance"]["rows"][0]["net_expectancy_pct"] == 0.0
     assert snapshot["factor"]["db_available"] is False
     assert snapshot["factor"]["sample_growth"]["bot_scheduler_samples"] == 1
     assert snapshot["quant"]["action"] == "entry_long"
@@ -160,6 +225,14 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["factor_lookup_version"] == "lookup-20260504"
     assert snapshot["quant"]["execution_warnings"] == ["route_c_missing"]
     assert snapshot["quant"]["automation_boundary"] == "real_order_submission_candidate"
+    assert snapshot["quant"]["research"]["status"] == "unavailable"
+    assert snapshot["quant"]["research"]["freshness"] == "stale"
+    assert snapshot["quant"]["research"]["refresh_every"] == 12
+    assert snapshot["quant"]["research"]["refresh_aliases"] is True
+    assert snapshot["quant"]["research"]["reason_texts"][0] == {
+        "code": "research_not_ready",
+        "text": "quant 共享映射：research 未就绪",
+    }
     assert snapshot["bot"]["candidate_package"]["gate_allowed"] is True
     assert snapshot["bot"]["candidate_package"]["command_targets"] == ["entry_order", "maintain_protective_stop"]
     assert snapshot["bot"]["worker_events"][0]["payload"]["status"] == "skipped"
@@ -255,7 +328,11 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
 
     assert '<script src="/app.js"></script>' in html
     assert '<link rel="stylesheet" href="/styles.css" />' in html
+    assert "ETH 运行观察面板" in html
+    assert "setInterval(refreshWithBanner, 5000)" in app_js
+    assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
+    assert {"researchBadge", "researchDetails", "researchReasons"} <= html_ids
     assert referenced_ids <= html_ids
     assert "�" not in html
     assert "�" not in app_js
@@ -280,7 +357,7 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         response = conn.getresponse()
         html = response.read().decode("utf-8")
         assert response.status == 200
-        assert "ETH 运行控制台" in html
+        assert "ETH 运行观察面板" in html
 
         conn.request("GET", "/app.js")
         response = conn.getresponse()
@@ -299,3 +376,27 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         conn.close()
         server.shutdown()
         server.server_close()
+
+
+def test_dashboard_overview_cache_reuses_snapshot_within_ttl(monkeypatch, tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    calls: list[DashboardPaths] = []
+    clock = {"now": 10.0}
+    cache = OverviewSnapshotCache(ttl_sec=1.0)
+
+    def fake_load_dashboard_snapshot(paths: DashboardPaths) -> dict:
+        calls.append(paths)
+        return {"call_count": len(calls), "paths": {"bot_root": str(paths.bot_root), "quant_root": str(paths.quant_root)}}
+
+    monkeypatch.setattr(dashboard_app, "load_dashboard_snapshot", fake_load_dashboard_snapshot)
+    monkeypatch.setattr(dashboard_app.time, "monotonic", lambda: clock["now"])
+
+    first = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+    second = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+    clock["now"] = 11.1
+    third = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert first == second
+    assert third["call_count"] == 2
+    assert len(calls) == 2

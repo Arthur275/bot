@@ -17,6 +17,11 @@ const valueLabels = {
   OK: "正常",
   BLOCKED: "已阻断",
   ALLOWED: "允许",
+  PASS: "通过",
+  VETO: "否决",
+  UNAVAILABLE: "不可用",
+  AGING: "接近过期",
+  FRESH: "新鲜",
   IDLE: "空闲",
   FLAT: "空仓",
   LONG: "多头",
@@ -38,6 +43,10 @@ const valueLabels = {
   neutral: "中性",
   flat: "空仓",
   pass: "通过",
+  veto: "否决",
+  unavailable: "不可用",
+  aging: "接近过期",
+  fresh: "新鲜",
   degraded: "降级",
   error: "错误",
   ok: "正常",
@@ -133,6 +142,22 @@ function renderChips(id, rows, level = "") {
   }
 }
 
+function renderReasonChips(id, rows, level = "") {
+  const wrap = $(id);
+  wrap.replaceChildren();
+  const normalizedRows = rows && rows.length > 0 ? rows : [{ code: "none", text: "无" }];
+  for (const row of normalizedRows) {
+    const chip = document.createElement("span");
+    const code = document.createElement("strong");
+    const label = document.createElement("span");
+    chip.className = `chip reason-chip ${row.code === "none" ? "" : level}`;
+    code.textContent = text(row.code);
+    label.textContent = row.text || text(row.code);
+    chip.append(code, label);
+    wrap.appendChild(chip);
+  }
+}
+
 function renderDetails(id, entries) {
   const dl = $(id);
   dl.replaceChildren();
@@ -173,6 +198,39 @@ function renderAudit(events) {
   }
 }
 
+function renderGovernanceRows(id, rows) {
+  const wrap = $(id);
+  replaceChildren(wrap);
+  if (!rows || rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "audit-item";
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    title.textContent = "暂无治理行";
+    detail.textContent = "factor governance summary 尚未生成";
+    empty.append(title, detail);
+    wrap.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const item = document.createElement("div");
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    item.className = "audit-item";
+    title.textContent = `${text(row.factor_name)} / ${text(row.factor_value_bucket)}`;
+    detail.textContent = [
+      `等级 ${text(row.factor_grade)}`,
+      `生命周期 ${text(row.factor_lifecycle)}`,
+      `效果 ${text(row.factor_effect)}`,
+      `样本 ${number(row.sample_count)}`,
+      `胜率 ${pct(row.win_rate)}`,
+      `净期望 ${pct(row.net_expectancy_pct)}`,
+    ].join(" / ");
+    item.append(title, detail);
+    wrap.appendChild(item);
+  }
+}
+
 function render(data) {
   $("updatedAt").textContent = `已更新 ${new Date().toLocaleTimeString()}`;
   renderRuntime(data.runtime || {});
@@ -188,6 +246,19 @@ function render(data) {
     ["机器人样本", factor.sample_growth?.bot_scheduler_samples],
     ["量化数据库", factor.db_available ? "available" : "missing"],
   ]);
+  const governance = factor.governance || {};
+  const governanceStatus = String(governance.status || "unknown").toUpperCase();
+  badge(
+    $("factorGovernanceBadge"),
+    governanceStatus,
+    governanceStatus === "ACTIVE" ? "green" : governanceStatus === "WATCH" ? "yellow" : governanceStatus === "UNKNOWN" ? "gray" : "red",
+  );
+  renderDetails("factorGovernanceDetails", [
+    ["治理版本", governance.lookup_version],
+    ["生成时间", governance.generated_at],
+    ["原因代码", governance.reason_codes || []],
+  ]);
+  renderGovernanceRows("factorGovernanceRows", governance.rows || []);
   renderList("riskCodes", factor.top_reason_codes || []);
   renderList("degradeFlags", factor.top_degrade_flags || []);
 
@@ -205,6 +276,24 @@ function render(data) {
     ["自动化边界", quant.automation_boundary],
     ["执行警告", quant.execution_warnings || []],
   ]);
+  const research = quant.research || {};
+  const researchStatus = String(research.status || "unknown").toUpperCase();
+  badge(
+    $("researchBadge"),
+    researchStatus,
+    researchStatus === "PASS" ? "green" : researchStatus === "DEGRADED" ? "yellow" : researchStatus === "UNKNOWN" ? "gray" : "red",
+  );
+  renderDetails("researchDetails", [
+    ["决策状态", research.decision],
+    ["新鲜度", research.freshness],
+    ["可用于决策", research.decision_ready ? "yes" : "no"],
+    ["检查时间", research.generated_at],
+    ["数据时间", research.dataset_timestamp],
+    ["刷新周期", research.refresh_every ? `${research.refresh_every} 轮` : "未启用"],
+    ["本轮刷新", research.refresh_aliases ? "yes" : "no"],
+    ["摘要", research.summary],
+  ]);
+  renderReasonChips("researchReasons", research.reason_texts || [], researchStatus === "PASS" ? "green" : "yellow");
   renderChips("supportingFactors", quant.supporting_factors || [], "green");
   renderChips("opposingFactors", quant.opposing_factors || quant.degrade_flags || [], "yellow");
   renderChips("vetoFactors", quant.veto_factors || [], "red");
@@ -232,7 +321,7 @@ function render(data) {
     ["完成时间", cycle.finished_at],
     ["请求动作", cycle.requested_action],
     ["生效动作", cycle.effective_action],
-    ["预检", cycle.preflight_error || "ok"],
+    ["预检错误", cycle.preflight_error || "ok"],
   ]);
   renderAudit(bot.worker_events || []);
 }
@@ -253,4 +342,4 @@ function refreshWithBanner() {
 
 $("refreshBtn").addEventListener("click", refreshWithBanner);
 refreshWithBanner();
-setInterval(refreshWithBanner, 15000);
+setInterval(refreshWithBanner, 5000);

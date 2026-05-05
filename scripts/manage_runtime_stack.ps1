@@ -6,6 +6,7 @@ param(
     [int]$DashboardPort = 8765,
     [int]$IntervalSec = 300,
     [int]$WorkerIntervalSec = 30,
+    [int]$ResearchRefreshEvery = 12,
     [int]$DependencyWaitSec = 30,
     [string]$ProxyUrl = "http://127.0.0.1:7897",
     [switch]$EnableRealOrders,
@@ -549,6 +550,8 @@ $QuantArgs = @(
     "15m",
     "--proxy-url",
     $ProxyUrl,
+    "--refresh-research-aliases-every",
+    ([string]$ResearchRefreshEvery),
     "--include-okx-overlay"
 )
 if ($IncludeCoinglassOverlay) {

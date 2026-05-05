@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.ps1"
 CMD_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.cmd"
 PLAN_PATH = REPO_ROOT / "docs" / "runtime_stack_manager_plan.md"
+FINAL_PLAN_PATH = REPO_ROOT / "docs" / "automation_research_factor_dashboard_final_plan.md"
 
 
 def _script() -> str:
@@ -21,6 +22,7 @@ def test_runtime_stack_manager_entrypoints_exist() -> None:
     assert CMD_PATH.exists()
     assert '[ValidateSet("start", "stop", "status")]' in script
     assert "[switch]$EnableRealOrders" in script
+    assert "[int]$ResearchRefreshEvery = 12" in script
     assert "manage_runtime_stack.ps1" in cmd
 
 
@@ -53,6 +55,19 @@ def test_runtime_stack_manager_keeps_real_orders_disabled_by_default() -> None:
     assert '$botReady = Wait-ForCondition -Name "bot_scheduler"' in script
     assert '--enable-real-orders' in script
     assert 'if ($EnableRealOrders) {' in script
+
+
+def test_runtime_stack_manager_treats_enable_real_orders_as_cold_start_mode() -> None:
+    script = _script()
+    status_block = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    start_block = script[script.index("$WorkerSubmitFlag =") :]
+
+    assert '"real_worker: {0} pid={1} mode={2}' in status_block
+    assert '$workerMode = if ($EnableRealOrders -and -not $killSwitch)' in status_block
+    assert "Start-ManagedProcess" not in status_block
+    assert "-SubmitRealOrders" in start_block
+    assert '$WorkerSubmitFlag = if ($EnableRealOrders -and -not (Test-Path -LiteralPath $KillSwitchPath))' in start_block
+    assert 'manage_real_order_worker.ps1\')\' $WorkerSubmitFlag' in start_block
 
 
 def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
@@ -99,6 +114,17 @@ def test_runtime_stack_manager_orders_quant_cycles_by_artifact_timestamp_not_dir
     assert "Sort-Object LastWriteTime -Descending" not in latest_function
 
 
+def test_runtime_stack_manager_keeps_scheduler_and_worker_locks_separate() -> None:
+    script = _script()
+
+    assert '$BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"' in script
+
+    worker_script = (REPO_ROOT / "scripts" / "real_order_worker.py").read_text(encoding="utf-8")
+    bot_scheduler_script = (REPO_ROOT / "scripts" / "bot_runtime_scheduler.py").read_text(encoding="utf-8")
+    assert 'locks" / "real_order_worker.lock"' in worker_script
+    assert 'Path(args.runtime_root) / "scheduler.lock"' in bot_scheduler_script
+
+
 def test_runtime_stack_manager_plan_matches_implemented_entrypoint() -> None:
     plan = PLAN_PATH.read_text(encoding="utf-8")
     script = _script()
@@ -114,3 +140,37 @@ def test_runtime_stack_manager_plan_matches_implemented_entrypoint() -> None:
     assert "quant_runtime_scheduler.py" in script
     assert "bot_runtime_scheduler.py" in script
     assert "real_order_worker.py" in script
+
+
+def test_gitignore_excludes_runtime_cache_temp_and_local_state_artifacts() -> None:
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    required_patterns = [
+        "runtime/",
+        ".pytest_cache/",
+        ".tmp_pytest*/",
+        "*.duckdb",
+        "*.pid",
+        "*.lock",
+        "*.log",
+    ]
+
+    for pattern in required_patterns:
+        assert pattern in ignore
+
+
+def test_runtime_stack_manager_refreshes_research_aliases_on_quant_schedule() -> None:
+    script = _script()
+    quant_args = script[script.index("$QuantArgs = @(") : script.index("if ($IncludeCoinglassOverlay)")]
+
+    assert '"--refresh-research-aliases"' not in quant_args
+    assert '"--refresh-research-aliases-every"' in quant_args
+    assert '([string]$ResearchRefreshEvery)' in quant_args
+
+
+def test_final_plan_documents_research_health_boundaries() -> None:
+    plan = FINAL_PLAN_PATH.read_text(encoding="utf-8")
+
+    assert "### 6.4.1 research ready / degraded / blocked 判定" in plan
+    assert "aging 不等于 blocked" in plan
+    assert "ready 不等于直接下单" in plan
+    assert "handoff.execution_allowed=false" in plan
