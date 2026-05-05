@@ -343,6 +343,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert '"Microsoft YaHei UI"' in styles_css
     assert "width: min(100%, 1680px)" in styles_css
     assert "justify-items: center" in styles_css
+    assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr)" in styles_css
+    assert "overflow-wrap: anywhere" in styles_css
+    assert "word-break: break-word" in styles_css
     assert "@media (max-width: 980px)" in styles_css
     assert "@media (max-width: 720px)" in styles_css
 
