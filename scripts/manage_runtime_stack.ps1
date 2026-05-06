@@ -6,10 +6,12 @@ param(
     [int]$DashboardPort = 8765,
     [int]$IntervalSec = 300,
     [int]$WorkerIntervalSec = 30,
+    [int]$ReviewIntervalSec = 300,
     [int]$ResearchRefreshEvery = 12,
     [int]$DependencyWaitSec = 30,
     [string]$ProxyUrl = "http://127.0.0.1:7897",
     [switch]$EnableRealOrders,
+    [switch]$EnableReviewWorker,
     [switch]$IncludeCoinglassOverlay
 )
 
@@ -425,6 +427,7 @@ function Show-Status {
     $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
     $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
     $worker = Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+    $review = Get-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
 
     $homeStatus = Get-HttpStatus -Uri ("http://{0}:{1}/" -f $HostName, $DashboardPort)
     $apiStatus = Get-HttpStatus -Uri ("http://{0}:{1}/api/overview" -f $HostName, $DashboardPort)
@@ -523,6 +526,12 @@ function Show-Status {
     $workerState = Format-ProcessHealth $worker
     $killSwitchState = if ($killSwitch) { "enabled" } else { "off" }
     Write-Output ("real_worker: {0} pid={1} mode={2} audit_age={3} audit_status={4} log={5}" -f $workerState, $worker.Pid, $workerMode, (Format-Age $auditAge), $auditStatus, (Get-LogErrorSummary "real_worker"))
+    $reviewPath = Join-Path $BotRoot "runtime\reviews\latest_decision_review.json"
+    $reviewPayload = Get-JsonFile $reviewPath
+    $reviewAge = Get-AgeSeconds ($reviewPayload.generated_at)
+    $reviewStatus = if ($null -ne $reviewPayload -and $null -ne $reviewPayload.review_status) { [string]$reviewPayload.review_status } else { "unavailable" }
+    $reviewState = Format-ProcessHealth $review
+    Write-Output ("review_worker: {0} pid={1} age={2} review_status={3} log={4}" -f $reviewState, $review.Pid, (Format-Age $reviewAge), $reviewStatus, (Get-LogErrorSummary "review_worker"))
     Write-Output ("kill_switch: {0} path={1}" -f $killSwitchState, $KillSwitchPath)
 }
 
@@ -582,6 +591,16 @@ while (`$true) {
 }
 "@
 $WorkerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $WorkerLoopCommand)
+$ReviewArgs = @(
+    "scripts\review_runtime_decisions.py",
+    "--loop",
+    "--interval-sec",
+    ([string]$ReviewIntervalSec),
+    "--bot-root",
+    $BotRoot,
+    "--quant-root",
+    $QuantRoot
+)
 
 if ($Action -eq "status") {
     Show-Status
@@ -589,6 +608,7 @@ if ($Action -eq "status") {
 }
 
 if ($Action -eq "stop") {
+    Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
     Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
     Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
     Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
@@ -613,6 +633,9 @@ elseif (-not $botReady -and -not (Test-BotReady)) {
 }
 else {
     Start-ManagedProcess -Name "real_worker" -FilePath "powershell.exe" -ArgumentList $WorkerArgs -WorkingDirectory $BotRoot -Pattern "real_order_worker.py"
+}
+if ($EnableReviewWorker) {
+    Start-ManagedProcess -Name "review_worker" -FilePath $Python -ArgumentList $ReviewArgs -WorkingDirectory $BotRoot -Pattern "review_runtime_decisions.py"
 }
 
 Write-Output ("dashboard_url=http://{0}:{1}" -f $HostName, $DashboardPort)

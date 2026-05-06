@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .decision_review import load_decision_review
 from .reason_text import enrich_reason_codes, load_reason_code_text_map
 from .status_rules import kill_switch_status, lookup_status, runtime_status
 
@@ -57,6 +58,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     quant_regime = quant_decision.get("regime_state", {}) if isinstance(quant_decision, dict) else {}
     quant_scheduler_status = quant_cycle.get("scheduler_status", {})
     quant_db_counts = _read_quant_duckdb_counts(quant_analysis_root / "quant_analysis.duckdb")
+    decision_review = load_decision_review(bot_root=paths.bot_root, quant_root=paths.quant_root)
 
     kill_switch_path = bot_runtime / "controls" / "disable_real_execution.flag"
     return {
@@ -143,7 +145,8 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 "reason_codes": bot_cycle.get("reason_codes", []),
             },
         },
-}
+        "decision_review": decision_review,
+    }
 
 
 def _research_summary(payload: dict[str, Any], *, reason_code_text_map: dict[str, str] | None = None) -> dict[str, Any]:

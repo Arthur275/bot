@@ -22,7 +22,9 @@ def test_runtime_stack_manager_entrypoints_exist() -> None:
     assert CMD_PATH.exists()
     assert '[ValidateSet("start", "stop", "status")]' in script
     assert "[switch]$EnableRealOrders" in script
+    assert "[switch]$EnableReviewWorker" in script
     assert "[int]$ResearchRefreshEvery = 12" in script
+    assert "[int]$ReviewIntervalSec = 300" in script
     assert "manage_runtime_stack.ps1" in cmd
 
 
@@ -70,6 +72,19 @@ def test_runtime_stack_manager_treats_enable_real_orders_as_cold_start_mode() ->
     assert 'manage_real_order_worker.ps1\')\' $WorkerSubmitFlag' in start_block
 
 
+def test_runtime_stack_manager_keeps_review_worker_as_explicit_sidecar() -> None:
+    script = _script()
+    status_block = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    start_block = script[script.index("$ReviewArgs = @(") :]
+
+    assert 'Get-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"' in status_block
+    assert '"review_worker: {0} pid={1} age={2} review_status={3}' in status_block
+    assert 'Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"' in script
+    assert 'if ($EnableReviewWorker) {' in start_block
+    assert 'Start-ManagedProcess -Name "review_worker"' in start_block
+    assert script.find('Start-ManagedProcess -Name "review_worker"') > script.find('Start-ManagedProcess -Name "real_worker"')
+
+
 def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
     script = _script()
 
@@ -91,6 +106,9 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
         "latest_cycle.json",
         "latest_candidate_execution_package.json",
         "audit.jsonl",
+        "review_worker",
+        "latest_decision_review.json",
+        "review_runtime_decisions.py",
         "latest_run_id",
         "Get-LogErrorSummary",
         "tail_error_lines",

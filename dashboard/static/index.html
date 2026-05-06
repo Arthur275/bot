@@ -8,120 +8,199 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
+      <div class="title-block">
         <h1>ETH 运行观察面板</h1>
-        <p>只读查看因子、量化决策和交易机器人运行状态</p>
+        <p>只读观察自动化实盘链路</p>
       </div>
       <div class="toolbar">
-        <span id="updatedAt">--</span>
+        <span id="refreshState" class="status-pill blue">等待刷新</span>
+        <span id="orderModePill" class="status-pill gray">真实提交：未知</span>
+        <span id="killSwitchPill" class="status-pill gray">熔断：未知</span>
+        <span id="updatedAt" class="updated-at">暂无更新时间</span>
         <button id="refreshBtn" type="button">刷新</button>
       </div>
     </header>
 
-    <main>
+    <main class="shell">
       <div id="errorBanner" class="error-banner" hidden></div>
-      <section class="status-grid" id="runtimeGrid"></section>
 
-      <section class="layout three-panel">
+      <section class="summary-bar" aria-label="当前链路摘要">
+        <div>
+          <span>当前动作</span>
+          <strong id="summaryAction">暂无</strong>
+        </div>
+        <div>
+          <span>风险状态</span>
+          <strong id="summaryRisk">暂无</strong>
+        </div>
+        <div>
+          <span>执行包</span>
+          <strong id="summaryCandidate">暂无</strong>
+        </div>
+        <div>
+          <span>审查</span>
+          <strong id="summaryReview">暂无</strong>
+        </div>
+      </section>
+
+      <section class="flow-section" aria-label="链路健康条">
+        <div id="runtimeGrid" class="flow-grid"></div>
+      </section>
+
+      <section class="dashboard-grid">
         <article class="panel factor-panel">
           <div class="panel-head">
             <div>
-              <h2>因子</h2>
-              <p>样本、查表和因子健康度</p>
+              <h2>样本采集与因子治理</h2>
+              <p>因子数据、查找表和治理质量</p>
             </div>
             <span id="factorLookupBadge" class="badge gray">未知</span>
           </div>
-          <div class="metric-row">
+          <div class="metric-grid five">
             <div><span>样本数</span><strong id="factorSamples">0</strong></div>
             <div><span>观察数</span><strong id="factorObservations">0</strong></div>
-            <div><span>查表行数</span><strong id="lookupRows">0</strong></div>
+            <div><span>查找表行数</span><strong id="lookupRows">0</strong></div>
             <div><span>因子值</span><strong id="factorValues">0</strong></div>
+            <div><span>治理</span><strong id="factorGovernanceStatus">未知</strong></div>
           </div>
-          <dl id="factorDetails" class="details"></dl>
-          <div class="governance-box">
-            <div class="research-head">
-              <h3>因子治理</h3>
-              <span id="factorGovernanceBadge" class="badge gray">未知</span>
-            </div>
-            <dl id="factorGovernanceDetails" class="details compact-details"></dl>
-            <div id="factorGovernanceRows" class="governance-list"></div>
+          <dl id="factorDetails" class="kv-grid"></dl>
+          <div class="section-head">
+            <h3>因子治理明细</h3>
+            <span id="factorGovernanceBadge" class="badge gray">未知</span>
           </div>
-          <div class="split">
-            <div>
-              <h3>主要风险代码</h3>
-              <ul id="riskCodes" class="compact-list"></ul>
-            </div>
-            <div>
+          <div id="factorGovernanceRows" class="compact-table governance-table"></div>
+          <div class="two-column">
+            <section>
+              <h3>风险代码</h3>
+              <ul id="riskCodes" class="signal-list"></ul>
+            </section>
+            <section>
               <h3>降级标记</h3>
-              <ul id="degradeFlags" class="compact-list"></ul>
-            </div>
+              <ul id="degradeFlags" class="signal-list"></ul>
+            </section>
           </div>
         </article>
 
         <article class="panel quant-panel">
           <div class="panel-head">
             <div>
-              <h2>量化</h2>
-              <p>最新决策和因子证据</p>
+              <h2>量化市场判断</h2>
+              <p>当前动作、方向、风控和因子证据</p>
             </div>
             <span id="quantRiskBadge" class="badge gray">未知</span>
           </div>
-          <div class="decision-strip">
-            <div><span>动作</span><strong id="quantAction">--</strong></div>
-            <div><span>方向</span><strong id="quantDirection">--</strong></div>
-            <div><span>仓位档位</span><strong id="quantSizing">--</strong></div>
-            <div><span>置信度</span><strong id="quantConfidence">--</strong></div>
+          <div class="metric-grid five">
+            <div><span>动作</span><strong id="quantAction">暂无</strong></div>
+            <div><span>方向</span><strong id="quantDirection">暂无</strong></div>
+            <div><span>风控</span><strong id="quantRiskStatus">暂无</strong></div>
+            <div><span>仓位档位</span><strong id="quantSizing">暂无</strong></div>
+            <div><span>置信度</span><strong id="quantConfidence">暂无</strong></div>
           </div>
-          <p id="reasoning" class="reasoning"></p>
-          <dl id="quantDetails" class="details compact-details"></dl>
-          <div class="research-box">
-            <div class="research-head">
-              <h3>Research 健康</h3>
-              <span id="researchBadge" class="badge gray">未知</span>
-            </div>
-            <dl id="researchDetails" class="details compact-details"></dl>
-            <div id="researchReasons" class="chips reason-chips"></div>
+          <section class="log-box">
+            <h3>量化摘要</h3>
+            <p id="reasoning">暂无推理摘要。</p>
+          </section>
+          <dl id="quantDetails" class="kv-grid"></dl>
+          <div class="section-head">
+            <h3>研究健康</h3>
+            <span id="researchBadge" class="badge gray">未知</span>
           </div>
-          <div class="factor-columns">
-            <div>
-              <h3>支持因素</h3>
-              <div id="supportingFactors" class="chips"></div>
-            </div>
-            <div>
-              <h3>反对因素</h3>
-              <div id="opposingFactors" class="chips"></div>
-            </div>
-            <div>
-              <h3>否决因素</h3>
-              <div id="vetoFactors" class="chips"></div>
-            </div>
+          <dl id="researchDetails" class="kv-grid compact"></dl>
+          <div id="researchReasons" class="chip-grid reason-chips"></div>
+          <div class="factor-evidence">
+            <section>
+              <h3>支持开仓</h3>
+              <div id="supportingFactors" class="chip-grid"></div>
+            </section>
+            <section>
+              <h3>反对开仓</h3>
+              <div id="opposingFactors" class="chip-grid"></div>
+            </section>
+            <section>
+              <h3>否决开仓</h3>
+              <div id="vetoFactors" class="chip-grid"></div>
+            </section>
           </div>
         </article>
 
         <article class="panel bot-panel">
           <div class="panel-head">
             <div>
-              <h2>机器人</h2>
-              <p>持仓、候选执行包和执行事件</p>
+              <h2>机器人下单链路</h2>
+              <p>持仓、候选执行包和执行器审计</p>
             </div>
             <span id="botStateBadge" class="badge gray">未知</span>
           </div>
-          <div class="metric-row">
-            <div><span>持仓</span><strong id="botPosition">--</strong></div>
-            <div><span>方向</span><strong id="botDirection">--</strong></div>
-            <div><span>仓位</span><strong id="botSize">--</strong></div>
+          <div class="metric-grid five">
+            <div><span>执行状态</span><strong id="botExecutionState">暂无</strong></div>
+            <div><span>持仓</span><strong id="botPosition">暂无</strong></div>
+            <div><span>方向</span><strong id="botDirection">暂无</strong></div>
+            <div><span>仓位</span><strong id="botSize">暂无</strong></div>
+            <div><span>执行包</span><strong id="candidateState">暂无</strong></div>
           </div>
-          <div class="candidate">
+          <div class="section-head">
             <h3>候选执行包</h3>
-            <dl id="candidateDetails"></dl>
+            <span id="candidateGateBadge" class="badge gray">未知</span>
           </div>
-          <div>
+          <dl id="candidateDetails" class="kv-grid"></dl>
+          <div class="section-head">
             <h3>最新周期</h3>
-            <dl id="cycleDetails"></dl>
           </div>
-          <div class="audit-section">
+          <dl id="cycleDetails" class="kv-grid compact"></dl>
+          <section class="log-box audit-box">
             <h3>执行事件</h3>
             <div id="auditEvents" class="audit-list"></div>
+          </section>
+        </article>
+
+        <article class="panel review-panel">
+          <div class="panel-head">
+            <div>
+              <h2>决策审查报告</h2>
+              <p>解释和复盘，不参与自动下单</p>
+            </div>
+            <span id="reviewStatusBadge" class="badge gray">未知</span>
+          </div>
+          <div class="notice-box">
+            审查报告仅供解释和复盘，不参与自动下单。审查清晰不代表允许下单，最终以下单链路和风控结果为准。
+          </div>
+          <div class="metric-grid five">
+            <div><span>审查状态</span><strong id="reviewStatus">暂无</strong></div>
+            <div><span>模式</span><strong id="reviewMode">暂无</strong></div>
+            <div><span>来源运行</span><strong id="reviewRunId">暂无</strong></div>
+            <div><span>交接包</span><strong id="reviewHandoffAge">暂无</strong></div>
+            <div><span>耗时</span><strong id="reviewLatency">暂无</strong></div>
+          </div>
+          <dl id="reviewDetails" class="kv-grid"></dl>
+          <div class="section-head">
+            <h3>数据源质量</h3>
+          </div>
+          <div id="reviewSourceQuality" class="compact-table quality-table"></div>
+          <div class="review-findings">
+            <section>
+              <h3>多头理由</h3>
+              <div id="reviewBullCase" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>空头理由</h3>
+              <div id="reviewBearCase" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>风险发现</h3>
+              <div id="reviewRiskFindings" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>执行链路发现</h3>
+              <div id="reviewExecutionFindings" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>治理复查建议</h3>
+              <div id="reviewGovernanceSuggestions" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>未解决问题</h3>
+              <div id="reviewQuestions" class="finding-list"></div>
+            </section>
           </div>
         </article>
       </section>

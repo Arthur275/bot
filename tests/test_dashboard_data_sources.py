@@ -11,6 +11,7 @@ from pathlib import Path
 import dashboard.app as dashboard_app
 from dashboard.app import DashboardHandler, OverviewSnapshotCache
 from dashboard.data_sources import DashboardPaths, load_dashboard_snapshot
+from dashboard.decision_review import build_daily_review, build_decision_review, normalize_decision_review, write_governance_suggestions
 from dashboard.status_rules import kill_switch_status, lookup_status, runtime_status
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -274,6 +275,8 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["quant"]["reasoning_summary"] == "latest quant cycle"
     assert snapshot["quant"]["degrade_flags"] == ["research_degraded"]
     assert snapshot["quant"]["regime_bucket"] == "trend_long"
+    assert snapshot["decision_review"]["review_status"] == "unavailable"
+    assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
 
 
 def test_load_dashboard_snapshot_prefers_complete_scheduler_cycle_over_newer_snapshot_cycle(tmp_path: Path) -> None:
@@ -330,22 +333,37 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert '<script src="/app.js"></script>' in html
     assert '<link rel="stylesheet" href="/styles.css" />' in html
     assert "ETH 运行观察面板" in html
+    assert "只读观察自动化实盘链路" in html
+    assert "样本采集与因子治理" in html
+    assert "量化市场判断" in html
+    assert "机器人下单链路" in html
+    assert "决策审查报告" in html
+    assert "审查报告仅供解释和复盘，不参与自动下单" in html
     assert "setInterval(refreshWithBanner, 5000)" in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
     assert {"researchBadge", "researchDetails", "researchReasons"} <= html_ids
+    assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction"} <= html_ids
     assert referenced_ids <= html_ids
     assert "�" not in html
     assert "�" not in app_js
     assert ".innerHTML" not in app_js
     assert "replaceChildren" not in app_js
     assert "function clearElement(el)" in app_js
+    assert "renderQuality(review.data_source_quality || {})" in app_js
+    assert "setPill($(" in app_js
+    assert "color-scheme: light" in styles_css
     assert '"Microsoft YaHei UI"' in styles_css
     assert "width: min(100%, 1680px)" in styles_css
-    assert "justify-items: center" in styles_css
-    assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr)" in styles_css
+    assert ".dashboard-grid" in styles_css
+    assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in styles_css
     assert "overflow-wrap: anywhere" in styles_css
     assert "word-break: break-word" in styles_css
+    assert "max-height: 260px" in styles_css
+    assert "overflow-x: hidden" in styles_css
+    assert "@media (max-width: 480px)" in styles_css
+    assert ".toolbar {\n    grid-template-columns: 1fr;" in styles_css
+    assert "@media (max-width: 1280px)" in styles_css
     assert "@media (max-width: 980px)" in styles_css
     assert "@media (max-width: 720px)" in styles_css
 
@@ -384,6 +402,8 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         assert payload["paths"]["bot_root"] == str(bot_root)
         assert payload["runtime"]["bot_scheduler"]["label"] == "RUNNING"
         assert payload["runtime"]["quant_scheduler"]["label"] == "RUNNING"
+        assert payload["decision_review"]["review_status"] == "unavailable"
+        assert payload["decision_review"]["summary"]
     finally:
         conn.close()
         server.shutdown()
@@ -412,3 +432,102 @@ def test_dashboard_overview_cache_reuses_snapshot_within_ttl(monkeypatch, tmp_pa
     assert first == second
     assert third["call_count"] == 2
     assert len(calls) == 2
+
+
+def test_decision_review_marks_missing_sources_as_watch(tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        quant_root / "runtime" / "cycles" / "cycle-1" / "execution_handoff.json",
+        {
+            "generated_at": generated_at,
+            "handoff_id": "handoff-1",
+            "supporting_factor_codes": ["funding_rate:negative"],
+            "opposing_factor_codes": [],
+            "veto_factor_codes": [],
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "cycle-1" / "decision.json",
+        {"generated_at": generated_at, "decision": {"risk_report": {"risk_filter_status": "pass"}}},
+    )
+
+    review = build_decision_review(bot_root=bot_root, quant_root=quant_root, now=datetime.now(timezone.utc))
+
+    assert review["review_status"] == "watch"
+    assert review["source_run_id"] == "cycle-1"
+    assert review["handoff_id"] == "handoff-1"
+    assert review["data_source_quality"]["handoff_available"] is True
+    assert review["data_source_quality"]["factor_lookup_available"] is False
+    assert any(item["code"] == "factor_lookup_missing" for item in review["risk_findings"])
+
+
+def test_decision_review_rejects_dangerous_governance_suggestion_fields() -> None:
+    review = normalize_decision_review(
+        {
+            "review_status": "clear",
+            "governance_review_suggestions": [
+                {
+                    "factor_name": "crowding_warning",
+                    "allow_entry": True,
+                    "set_sizing": "tier_3",
+                    "reason": "bad",
+                }
+            ],
+        }
+    )
+
+    suggestion = review["governance_review_suggestions"][0]
+    assert suggestion["suggested_action"] == "rejected_dangerous_fields"
+    assert suggestion["actionable"] is False
+    assert "allow_entry" in suggestion["reason"]
+    assert "set_sizing" in suggestion["reason"]
+
+
+def test_governance_suggestions_are_sanitized_before_landing(tmp_path: Path) -> None:
+    output_path = tmp_path / "runtime" / "reviews" / "governance_suggestions.json"
+
+    suggestions = write_governance_suggestions(
+        output_path,
+        [
+            {"factor_name": "funding_rate", "suggested_action": "manual_governance_review", "reason": "watch"},
+            {"factor_name": "crowding_warning", "bypass_veto": True},
+        ],
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert suggestions == payload
+    assert payload[0]["actionable"] is False
+    assert payload[1]["suggested_action"] == "rejected_dangerous_fields"
+    assert "bypass_veto" in payload[1]["reason"]
+
+
+def test_daily_review_summarizes_worker_audit_and_outcomes_without_execution_control(tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        quant_root / "runtime" / "cycles" / "cycle-1" / "execution_handoff.json",
+        {"generated_at": generated_at, "handoff_id": "handoff-1"},
+    )
+    _append_jsonl(
+        bot_root / "runtime" / "real_order_worker" / "audit.jsonl",
+        [
+            {"generated_at": generated_at, "event_type": "real_order_worker", "payload": {"status": "skipped"}},
+            {"generated_at": generated_at, "event_type": "real_order_worker", "payload": {"status": "submitted"}},
+        ],
+    )
+    _write_json(
+        quant_root / "runtime" / "analysis" / "decision_outcomes_summary.json",
+        {"resolved_count": 2, "avg_net_return_pct": 0.003, "stop_hit_rate": 0.5},
+    )
+
+    review = build_daily_review(bot_root=bot_root, quant_root=quant_root, now=datetime.now(timezone.utc))
+
+    assert review["schema"] == "daily_runtime_review_v1"
+    assert review["version"] == 1
+    assert review["review_mode"] == "daily_integrity_review"
+    assert review["worker_status_counts"] == {"skipped": 1, "submitted": 1}
+    assert review["resolved_outcome_count"] == 2
+    assert review["summary"] == "每日复盘只供审计和学习，不参与实时下单。"

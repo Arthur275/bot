@@ -1147,6 +1147,31 @@ class BinancePerpAdapter(RealExchangeAdapter):
             )
         return [item for item in response.payload if isinstance(item, dict)]
 
+    def fetch_user_trades_raw(
+        self,
+        *,
+        symbol: str = "ETHUSDT",
+        limit: int = 100,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        response = self._send_snapshot_request_with_recv_window_retry(
+            PreparedAdapterRequest(method="GET", path="/fapi/v1/userTrades", params=params)
+        )
+        if not isinstance(response.payload, list):
+            raise BinanceTransportError(
+                kind="json_error",
+                message="Malformed user trades response",
+                http_status=response.http_status,
+                payload=response.payload,
+            )
+        return [item for item in response.payload if isinstance(item, dict)]
+
     def cancel_algo_order_raw(self, *, algo_id: str = "", client_algo_id: str = "") -> dict[str, Any]:
         params: dict[str, Any] = {}
         if algo_id:
