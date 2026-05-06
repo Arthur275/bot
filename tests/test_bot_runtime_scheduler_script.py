@@ -348,6 +348,31 @@ def test_bot_runtime_scheduler_clears_stale_lock(tmp_path: Path) -> None:
     assert not lock_path.exists()
 
 
+def test_bot_runtime_scheduler_clears_dead_pid_lock_even_when_fresh(tmp_path: Path, monkeypatch) -> None:
+    args = _args(tmp_path)
+    args.command = "loop"
+    lock_path = Path(args.runtime_root) / "scheduler.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(json.dumps({"pid": 424242, "created_at": "2026-05-06T18:12:03"}), encoding="utf-8")
+    monkeypatch.setattr(bot_runtime_scheduler, "_process_exists", lambda pid: False)
+
+    exit_code = bot_runtime_scheduler.run_loop(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {"audit_log_path": ""},
+    )
+
+    assert exit_code == 0
+    assert not lock_path.exists()
+
+
+def test_bot_runtime_scheduler_console_output_is_ascii_safe_for_windows_redirect() -> None:
+    script = Path(bot_runtime_scheduler.__file__).read_text(encoding="utf-8")
+
+    assert "print(json.dumps(payload, ensure_ascii=True, indent=2))" in script
+    assert "print(json.dumps(payload, ensure_ascii=False, indent=2))" not in script
+
+
 def test_bot_runtime_scheduler_releases_lock_after_loop(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.command = "loop"

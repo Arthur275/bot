@@ -31,13 +31,14 @@ if (-not (Test-Path -LiteralPath $Python)) {
 $StackRoot = Join-Path $BotRoot "runtime\stack_manager"
 $PidRoot = Join-Path $StackRoot "pids"
 $LogRoot = Join-Path $StackRoot "logs"
+$WrapperRoot = Join-Path $StackRoot "wrappers"
 $BotRuntimeRoot = Join-Path $BotRoot "runtime\bot_runtime_scheduler"
 $BotAnalysisDb = Join-Path $BotRuntimeRoot "analysis\bot_runtime.duckdb"
 $BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"
 $KillSwitchPath = Join-Path $BotRoot "runtime\controls\disable_real_execution.flag"
 $PathSep = [System.IO.Path]::PathSeparator
 
-New-Item -ItemType Directory -Force -Path $PidRoot, $LogRoot, $BotRuntimeRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $PidRoot, $LogRoot, $WrapperRoot, $BotRuntimeRoot | Out-Null
 
 function Quote-Arg {
     param([string]$Value)
@@ -265,11 +266,94 @@ function Get-ManagedProcess {
 }
 
 function Remove-StalePid {
-    param([string]$Name)
-    $state = Get-ManagedProcess -Name $Name -Pattern ""
-    if ($state.StalePid) {
+    param(
+        [string]$Name,
+        [string]$Pattern,
+        [string]$FilePath
+    )
+    $state = Get-ManagedProcess -Name $Name -Pattern $Pattern
+    $expectedProcessName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $processNameMismatch = (
+        -not [string]::IsNullOrWhiteSpace($expectedProcessName) `
+        -and $null -ne $state.Process `
+        -and $state.Process.ProcessName -ne $expectedProcessName
+    )
+    if ($state.StalePid -or ($state.CommandLineAvailable -and $state.CommandLineMatches -eq $false) -or $processNameMismatch) {
         Remove-Item -LiteralPath (Get-PidPath $Name) -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Resolve-StartedProcessId {
+    param(
+        [string]$Name,
+        [int]$StartedPid,
+        [string]$FilePath
+    )
+    $startedProcessName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    if ($Name -ne "bot_scheduler" -or $startedProcessName -eq "powershell") {
+        return $StartedPid
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -le $deadline) {
+        if (Test-Path -LiteralPath $BotSchedulerLockPath) {
+            $payload = Get-JsonFile $BotSchedulerLockPath
+            $lockPid = 0
+            if ($null -ne $payload -and [int]::TryParse([string]$payload.pid, [ref]$lockPid)) {
+                $lockProc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+                if ($null -ne $lockProc) {
+                    return $lockPid
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $StartedPid
+}
+
+function Find-ProcessIdByCommandPattern {
+    param(
+        [string]$Pattern,
+        [int]$StartedPid
+    )
+    try {
+        $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object {
+                $_.CommandLine -like "*$Pattern*" -and (
+                    $_.ProcessId -eq $StartedPid -or $_.ParentProcessId -eq $StartedPid -or $_.CommandLine -like "*$BotRoot*"
+                )
+            } |
+            Sort-Object CreationDate -Descending)
+        if (@($matches).Count -gt 0) {
+            return [int]@($matches)[0].ProcessId
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Repair-PidFromCommandPattern {
+    param(
+        [string]$Name,
+        [string]$Pattern
+    )
+    $patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0
+    if ($null -eq $patternPid) {
+        return $false
+    }
+    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$patternPid) -Encoding ASCII
+    return $true
+}
+
+function Write-ManagedWrapper {
+    param(
+        [string]$Name,
+        [string]$Content
+    )
+    $path = Join-Path $WrapperRoot "$Name.ps1"
+    Set-Content -LiteralPath $path -Value $Content -Encoding UTF8
+    return $path
 }
 
 function Start-ManagedProcess {
@@ -281,7 +365,8 @@ function Start-ManagedProcess {
         [string]$Pattern
     )
 
-    Remove-StalePid -Name $Name
+    Remove-StalePid -Name $Name -Pattern $Pattern -FilePath $FilePath
+    Repair-PidFromCommandPattern -Name $Name -Pattern $Pattern | Out-Null
     $existing = Get-ManagedProcess -Name $Name -Pattern $Pattern
     if ($existing.Alive) {
         Write-Output ("{0}: already running pid={1}" -f $Name, $existing.Pid)
@@ -295,24 +380,42 @@ function Start-ManagedProcess {
     $env:PYTHONPATH = "$BotRoot$PathSep$(Join-Path $BotRoot 'src')"
     $env:PYTHONDONTWRITEBYTECODE = "1"
 
-    $proc = Start-Process `
-        -FilePath $FilePath `
-        -ArgumentList $ArgumentList `
-        -WorkingDirectory $WorkingDirectory `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath `
-        -WindowStyle Hidden `
-        -PassThru
+    if ($Name -eq "bot_scheduler") {
+        $proc = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -PassThru
+    }
+    else {
+        $proc = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -WorkingDirectory $WorkingDirectory `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+    }
 
-    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$proc.Id) -Encoding ASCII
+    $managedPid = Resolve-StartedProcessId -Name $Name -StartedPid $proc.Id -FilePath $FilePath
+    $startedProcessName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    if ($Name -eq "bot_scheduler" -and $startedProcessName -ne "powershell") {
+        $patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid $proc.Id
+        if ($null -ne $patternPid) {
+            $managedPid = $patternPid
+        }
+    }
+    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$managedPid) -Encoding ASCII
     Start-Sleep -Milliseconds 500
-    $started = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+    $started = Get-Process -Id $managedPid -ErrorAction SilentlyContinue
     if ($null -eq $started) {
         Remove-Item -LiteralPath (Get-PidPath $Name) -Force -ErrorAction SilentlyContinue
-        Write-Output ("{0}: failed_to_stay_running pid={1}; see logs in {2}" -f $Name, $proc.Id, $LogRoot)
+        Write-Output ("{0}: failed_to_stay_running pid={1}; see logs in {2}" -f $Name, $managedPid, $LogRoot)
         return
     }
-    Write-Output ("{0}: started pid={1}" -f $Name, $proc.Id)
+    Write-Output ("{0}: started pid={1}" -f $Name, $managedPid)
 }
 
 function Stop-ManagedProcess {
@@ -422,6 +525,7 @@ function Wait-ForCondition {
 }
 
 function Show-Status {
+    Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1" | Out-Null
     $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
     $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
     $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
@@ -492,6 +596,9 @@ function Show-Status {
         $botAge = Get-AgeSeconds ($botCycle.finished_at)
     }
     $botState = Format-ProcessHealth $bot
+    if ($botState -eq "stale_pid" -and (Test-BotReady)) {
+        $botState = "running"
+    }
     Write-Output ("bot_scheduler: {0} pid={1} age={2} latest_sample={3} log={4}" -f $botState, $bot.Pid, (Format-Age $botAge), $botCycle.sample_id, (Get-LogErrorSummary "bot_scheduler"))
 
     $candidate = Get-JsonFile (Join-Path $BotRuntimeRoot "latest_candidate_execution_package.json")
@@ -568,9 +675,7 @@ if ($IncludeCoinglassOverlay) {
 }
 $BotArgs = @(
     "scripts\bot_runtime_scheduler.py",
-    "loop",
-    "--interval-sec",
-    ([string]$IntervalSec),
+    "run-once",
     "--runtime-root",
     $BotRuntimeRoot,
     "--analysis-db-path",
@@ -579,6 +684,20 @@ $BotArgs = @(
 if ($EnableRealOrders) {
     $BotArgs += "--enable-real-orders"
 }
+$BotSchedulerWrapper = Write-ManagedWrapper -Name "bot_scheduler_loop" -Content @"
+`$env:ETH_BOT_ROOT = '$(($BotRoot) -replace "'", "''")'
+`$env:QUANT_ROOT = '$(($QuantRoot) -replace "'", "''")'
+`$env:PYTHONPATH = '$(($BotRoot) -replace "'", "''")$PathSep$((Join-Path $BotRoot 'src') -replace "'", "''")'
+`$stdoutPath = '$(Join-Path $LogRoot 'bot_scheduler_child_stdout.log')'
+`$stderrPath = '$(Join-Path $LogRoot 'bot_scheduler_child_stderr.log')'
+while (`$true) {
+    "`$(Get-Date -Format o) bot_scheduler run-once starting" | Add-Content -LiteralPath `$stdoutPath -Encoding UTF8
+    & '$(($Python) -replace "'", "''")' $(($BotArgs | ForEach-Object { Quote-Arg ([string]$_) }) -join " ") >> `$stdoutPath 2>> `$stderrPath
+    "`$(Get-Date -Format o) bot_scheduler run-once exit=`$LASTEXITCODE" | Add-Content -LiteralPath `$stdoutPath -Encoding UTF8
+    Start-Sleep -Seconds $IntervalSec
+}
+"@
+$BotSchedulerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BotSchedulerWrapper)
 
 $WorkerSubmitFlag = if ($EnableRealOrders -and -not (Test-Path -LiteralPath $KillSwitchPath)) { "-SubmitRealOrders" } else { "" }
 $WorkerLoopCommand = @"
@@ -622,7 +741,7 @@ Start-ManagedProcess -Name "factor_ingest" -FilePath $Python -ArgumentList $Fact
 Start-ManagedProcess -Name "quant_judgement" -FilePath $Python -ArgumentList $QuantArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
 Wait-ForCondition -Name "quant_judgement" -Condition { Test-QuantReady } -TimeoutSec $DependencyWaitSec | Out-Null
 Clear-StaleBotSchedulerLock
-Start-ManagedProcess -Name "bot_scheduler" -FilePath $Python -ArgumentList $BotArgs -WorkingDirectory $BotRoot -Pattern "bot_runtime_scheduler.py"
+Start-ManagedProcess -Name "bot_scheduler" -FilePath "powershell.exe" -ArgumentList $BotSchedulerArgs -WorkingDirectory $BotRoot -Pattern "bot_scheduler_loop.ps1"
 $botReady = Wait-ForCondition -Name "bot_scheduler" -Condition { Test-BotReady } -TimeoutSec $DependencyWaitSec
 
 if ($EnableRealOrders -and (Test-Path -LiteralPath $KillSwitchPath)) {

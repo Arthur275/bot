@@ -63,11 +63,11 @@ def main() -> int:
     bot_root = Path(__file__).resolve().parents[1]
     if args.command == "heartbeat":
         payload = write_heartbeat(runtime_root=Path(args.runtime_root), status="ok", mode="heartbeat")
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
         return 0
     if args.command == "run-once":
         payload = run_once(args=args, bot_root=bot_root)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
         return 0 if payload["status"] == "ok" else 1
     if args.command == "loop":
         return run_loop(args=args, bot_root=bot_root)
@@ -163,7 +163,7 @@ def _run_loop_unlocked(*, args: argparse.Namespace, bot_root: Path, cycle_runner
                 if degraded
                 else max(1, int(args.interval_sec))
             )
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
         if args.cycles <= 0 or cycle_count < args.cycles:
             time.sleep(sleep_sec)
     return 0
@@ -205,6 +205,13 @@ class SchedulerLock:
             stat = self._lock_path.stat()
         except FileNotFoundError:
             return True
+        lock_pid = self._read_lock_pid()
+        if lock_pid is not None and not _process_exists(lock_pid):
+            try:
+                self._lock_path.unlink()
+            except FileNotFoundError:
+                return True
+            return True
         age_sec = max(0.0, time.time() - stat.st_mtime)
         if age_sec < self._stale_after_sec:
             return False
@@ -213,6 +220,29 @@ class SchedulerLock:
         except FileNotFoundError:
             return True
         return True
+
+    def _read_lock_pid(self) -> int | None:
+        try:
+            payload = json.loads(self._lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        try:
+            pid = int(payload.get("pid"))
+        except (TypeError, ValueError):
+            return None
+        return pid if pid > 0 else None
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def write_heartbeat(*, runtime_root: Path, status: str, mode: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:

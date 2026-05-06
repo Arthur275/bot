@@ -47,6 +47,44 @@ def test_runtime_stack_manager_starts_components_in_dependency_order() -> None:
         cursor = found
 
 
+def test_runtime_stack_manager_runs_bot_scheduler_through_stable_powershell_wrapper() -> None:
+    script = _script()
+    start_block = script[script.index("$BotSchedulerWrapper =") : script.index("$botReady = Wait-ForCondition -Name \"bot_scheduler\"")]
+
+    assert "$BotSchedulerArgs" in start_block
+    assert "Write-ManagedWrapper -Name \"bot_scheduler_loop\"" in start_block
+    assert "while (`$true)" in start_block
+    assert "bot_scheduler_child_stdout.log" in start_block
+    assert "bot_scheduler_child_stderr.log" in start_block
+    assert "bot_scheduler run-once starting" in start_block
+    assert "bot_scheduler run-once exit=`$LASTEXITCODE" in start_block
+    assert '"scripts\\bot_runtime_scheduler.py"' in script
+    assert '"run-once"' in script
+    assert "Start-Sleep -Seconds $IntervalSec" in start_block
+    assert 'Start-ManagedProcess -Name "bot_scheduler" -FilePath "powershell.exe"' in start_block
+    assert '-ArgumentList $BotSchedulerArgs' in start_block
+    assert "-Pattern \"bot_scheduler_loop.ps1\"" in start_block
+
+
+def test_runtime_stack_manager_does_not_outer_redirect_bot_scheduler_wrapper() -> None:
+    script = _script()
+    start_function = script[script.index("function Start-ManagedProcess") : script.index("function Stop-ManagedProcess")]
+
+    assert 'if ($Name -eq "bot_scheduler") {' in start_function
+    bot_block = start_function[start_function.index('if ($Name -eq "bot_scheduler") {') : start_function.index("else {")]
+    assert "-RedirectStandardOutput" not in bot_block
+    assert "-RedirectStandardError" not in bot_block
+    assert "-PassThru" in bot_block
+
+
+def test_runtime_stack_manager_writes_wrapper_files_under_stack_manager() -> None:
+    script = _script()
+
+    assert '$WrapperRoot = Join-Path $StackRoot "wrappers"' in script
+    assert "function Write-ManagedWrapper" in script
+    assert 'Set-Content -LiteralPath $path -Value $Content -Encoding UTF8' in script
+
+
 def test_runtime_stack_manager_keeps_real_orders_disabled_by_default() -> None:
     script = _script()
 
@@ -117,6 +155,68 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
     ]
     for signal in required_signals:
         assert signal in script
+
+
+def test_runtime_stack_manager_removes_reused_pid_when_command_mismatches() -> None:
+    script = _script()
+
+    remove_function = script[script.index("function Remove-StalePid") : script.index("function Start-ManagedProcess")]
+    assert "[string]$Pattern" in remove_function
+    assert "[string]$FilePath" in remove_function
+    assert "Get-ManagedProcess -Name $Name -Pattern $Pattern" in remove_function
+    assert "[System.IO.Path]::GetFileNameWithoutExtension($FilePath)" in remove_function
+    assert "$state.Process.ProcessName -ne $expectedProcessName" in remove_function
+    assert "$state.StalePid -or ($state.CommandLineAvailable -and $state.CommandLineMatches -eq $false)" in remove_function
+    assert "Remove-StalePid -Name $Name -Pattern $Pattern -FilePath $FilePath" in script
+
+
+def test_runtime_stack_manager_records_scheduler_lock_pid_for_venv_launcher() -> None:
+    script = _script()
+
+    resolve_function = script[script.index("function Resolve-StartedProcessId") : script.index("function Start-ManagedProcess")]
+    assert '$Name -ne "bot_scheduler" -or $startedProcessName -eq "powershell"' in resolve_function
+    assert "[string]$FilePath" in resolve_function
+    assert "$BotSchedulerLockPath" in resolve_function
+    assert "(Get-Date).AddSeconds(10)" in resolve_function
+    assert "Start-Sleep -Milliseconds 250" in resolve_function
+    assert "[int]::TryParse([string]$payload.pid, [ref]$lockPid)" in resolve_function
+    assert "return $lockPid" in resolve_function
+    start_function = script[script.index("function Start-ManagedProcess") : script.index("function Stop-ManagedProcess")]
+    assert "$managedPid = Resolve-StartedProcessId -Name $Name -StartedPid $proc.Id -FilePath $FilePath" in start_function
+    assert '$Name -eq "bot_scheduler" -and $startedProcessName -ne "powershell"' in start_function
+    assert "$patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid $proc.Id" in start_function
+    assert "Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$managedPid)" in start_function
+
+
+def test_runtime_stack_manager_can_find_wrapper_process_by_command_pattern() -> None:
+    script = _script()
+
+    find_function = script[script.index("function Find-ProcessIdByCommandPattern") : script.index("function Start-ManagedProcess")]
+    assert "Get-CimInstance Win32_Process" in find_function
+    assert '$_.CommandLine -like "*$Pattern*"' in find_function
+    assert "$_.ParentProcessId -eq $StartedPid" in find_function
+    assert "$_.CommandLine -like \"*$BotRoot*\"" in find_function
+
+
+def test_runtime_stack_manager_repairs_scheduler_pid_from_wrapper_process() -> None:
+    script = _script()
+
+    repair_function = script[script.index("function Repair-PidFromCommandPattern") : script.index("function Write-ManagedWrapper")]
+    assert "Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0" in repair_function
+    assert "Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$patternPid)" in repair_function
+    start_function = script[script.index("function Start-ManagedProcess") : script.index("function Stop-ManagedProcess")]
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    assert "Repair-PidFromCommandPattern -Name $Name -Pattern $Pattern" in start_function
+    assert 'Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"' in status_function
+
+
+def test_runtime_stack_manager_treats_fresh_bot_artifact_as_running_when_pid_visibility_fails() -> None:
+    script = _script()
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+
+    assert '$botState = Format-ProcessHealth $bot' in status_function
+    assert '$botState -eq "stale_pid" -and (Test-BotReady)' in status_function
+    assert '$botState = "running"' in status_function
 
 
 def test_runtime_stack_manager_orders_quant_cycles_by_artifact_timestamp_not_directory_mtime() -> None:
