@@ -233,12 +233,51 @@ function pct(value) {
   return `${(n * 100).toFixed(2)}%`;
 }
 
+function money(value, currency = "$") {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "暂无";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${currency}${Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
+
+function rawNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function profitLevel(value) {
+  const n = rawNumber(value);
+  if (n === null || n === 0) return "gray";
+  return n > 0 ? "green" : "red";
+}
+
+function formatRunId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "暂无";
+  let parts = raw.split(/\s+/);
+  if (parts.length < 4) {
+    const hyphenMatch = raw.match(/^([A-Za-z0-9]+)-([A-Za-z0-9]+)-(\d{8}T\d{6}Z)-([A-Za-z0-9]+)$/);
+    if (hyphenMatch) parts = hyphenMatch.slice(1);
+  }
+  if (parts.length < 4) return text(raw);
+  const [symbol, timeframe, stamp, id] = parts;
+  const tf = timeframe.replace(/m$/i, "分钟").replace(/h$/i, "小时").replace(/d$/i, "天");
+  const match = stamp.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i);
+  const formattedTime = match
+    ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]} UTC`
+    : stamp;
+  return `${symbol.toUpperCase()} · ${tf} · ${formattedTime} · ${id}`;
+}
+
 function levelForStatus(value, fallback = "gray") {
   const raw = String(value || "").toLowerCase();
-  if (["running", "fresh", "ok", "pass", "allowed", "submitted", "active"].includes(raw)) return "green";
+  if (["running", "fresh", "ok", "pass", "allowed", "submitted_all_accepted", "active"].includes(raw)) return "green";
   if (["clear", "watch", "ready"].includes(raw)) return "blue";
   if (["degraded", "stale", "aging", "needs_attention"].includes(raw)) return "yellow";
-  if (["blocked", "veto", "error", "on"].includes(raw)) return "red";
+  if (["blocked", "veto", "error", "on", "partial_failed", "all_failed", "unknown_after_exception"].includes(raw)) return "red";
   if (["missing", "unavailable", "disabled", "off"].includes(raw)) return "gray";
   return fallback;
 }
@@ -457,6 +496,12 @@ function renderSummary(data) {
   const quant = data.quant || {};
   const bot = data.bot || {};
   const review = data.decision_review || {};
+  const performance = data.performance || {};
+  const profit = performance.total_profit_usd;
+  const equity = performance.account_equity;
+  $("summaryProfit").textContent = money(profit);
+  $("summaryProfit").className = profitLevel(profit);
+  $("summaryProfitMeta").textContent = rawNumber(equity) === null ? "权益暂无" : `权益 ${money(equity)}`;
   setText("summaryAction", quant.action);
   setText("summaryRisk", quant.risk_filter_status);
   setText("summaryCandidate", bot.candidate_package?.present ? "present" : "missing");
@@ -563,7 +608,8 @@ function render(data) {
   setBadge($("reviewStatusBadge"), reviewStatus, levelForStatus(reviewStatus));
   setText("reviewStatus", reviewStatus);
   setText("reviewMode", review.review_mode);
-  setText("reviewRunId", review.source_run_id);
+  $("reviewRunId").textContent = formatRunId(review.source_run_id);
+  $("reviewRunId").title = review.source_run_id || "";
   $("reviewHandoffAge").textContent = fmtAge(review.source_handoff_age_sec);
   $("reviewLatency").textContent = review.latency_ms === null || review.latency_ms === undefined ? "暂无" : `${number(review.latency_ms)} 毫秒`;
   renderDetails("reviewDetails", [

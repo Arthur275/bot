@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .risk_filter_contract import classify_risk_filter_status, risk_filter_reason_code
+
 _CROWDING_ENTRY_DEGRADE_FLAGS = {
     "crowding_warning",
     "okx_longs_crowded",
@@ -27,6 +29,8 @@ class GuardDecision(BaseModel):
     bundle_status: str = ""
     ready: bool = False
     allow_entry: bool = True
+    allow_signal_tracking: bool = True
+    allow_real_entry: bool = True
     allow_reduce: bool = True
     allow_exit: bool = True
     degraded: bool = False
@@ -59,6 +63,8 @@ class NetworkGuard:
         orderbook_short_pressure = bool((handoff or {}).get("orderbook_short_pressure"))
 
         allow_entry = True
+        allow_signal_tracking = True
+        allow_real_entry = True
         allow_reduce = True
         allow_exit = True
         degraded = False
@@ -98,11 +104,16 @@ class NetworkGuard:
             allow_exit = False
             reason_codes.append("diagnostic:pipeline")
 
-        if risk_filter_status in {"veto", "blocked"}:
+        risk_filter_class = classify_risk_filter_status(risk_filter_status)
+        if risk_filter_class == "blocked":
             allow_entry = False
-            reason_codes.append(f"risk_filter:{risk_filter_status}")
-        elif risk_filter_status == "degraded":
+            allow_real_entry = False
+            allow_signal_tracking = False
+            reason_codes.append(risk_filter_reason_code(risk_filter_status))
+        elif risk_filter_class == "degraded":
             degraded = True
+            allow_real_entry = False
+            reason_codes.append(risk_filter_reason_code(risk_filter_status))
 
         if runtime_vetoes or staleness_veto or conflict_veto or research_gate_status == "blocked":
             allow_entry = False
@@ -144,6 +155,8 @@ class NetworkGuard:
             bundle_status=bundle_status,
             ready=ready,
             allow_entry=allow_entry,
+            allow_signal_tracking=allow_signal_tracking,
+            allow_real_entry=allow_real_entry and allow_entry and not degraded and not blocked,
             allow_reduce=allow_reduce,
             allow_exit=allow_exit,
             degraded=degraded,

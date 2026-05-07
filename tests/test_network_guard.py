@@ -58,6 +58,9 @@ def test_network_guard_keeps_research_degraded_as_soft_penalty_when_research_gat
     )
     assert guard.degraded is True
     assert guard.allow_entry is True
+    assert guard.allow_signal_tracking is True
+    assert guard.allow_real_entry is False
+    assert "risk_filter:degraded" in guard.reason_codes
     assert "degrade_flag:research_degraded" in guard.reason_codes
 
 
@@ -104,6 +107,8 @@ def test_network_guard_allows_contrarian_short_entry_on_crowding_only_degrade() 
     )
     assert guard.degraded is True
     assert guard.allow_entry is True
+    assert guard.allow_signal_tracking is True
+    assert guard.allow_real_entry is False
     assert "degrade_flag:crowding_warning" in guard.reason_codes
     assert "degrade_flag:okx_longs_crowded" in guard.reason_codes
 
@@ -154,6 +159,8 @@ def test_network_guard_allows_trend_continuation_small_probe_on_crowding_degrade
 
     assert guard.degraded is True
     assert guard.allow_entry is True
+    assert guard.allow_signal_tracking is True
+    assert guard.allow_real_entry is False
     assert "degrade_flag:crowding_warning" in guard.reason_codes
     assert "degrade_flag:research_degraded" in guard.reason_codes
 
@@ -230,3 +237,30 @@ def test_network_guard_allows_contrarian_probe_with_orderbook_short_pressure() -
 
     assert guard.degraded is True
     assert guard.allow_entry is True
+    assert guard.allow_real_entry is False
+
+
+def test_network_guard_blocks_unavailable_risk_filter_status_for_real_entry() -> None:
+    for status in ("unavailable", "research_unavailable", "unknown_future_status"):
+        guard = NetworkGuard().evaluate(
+            judgement={
+                "status": "ok",
+                "diagnostic": "",
+                "research_bundle": {"ready": True, "bundle_status": "healthy"},
+            },
+            handoff={
+                "action": "entry_long",
+                "direction": "long",
+                "risk_filter_status": status,
+                "research_gate_status": "open",
+                "runtime_vetoes": [],
+                "degrade_flags": [],
+                "staleness_veto": False,
+                "conflict_veto": False,
+            },
+        )
+
+        assert guard.allow_entry is False
+        assert guard.allow_real_entry is False
+        assert guard.allow_signal_tracking is False
+        assert f"risk_filter:{status}" in guard.reason_codes

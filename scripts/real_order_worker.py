@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -23,6 +24,11 @@ from bot.state_store import StateStore
 ENTRY_ACTIONS = {"entry_long", "entry_short", "small_probe"}
 HIGH_RISK_ACTIONS = {"reduce", "exit"}
 PROTECT_ACTIONS = {"protect", "protective_stop_repair", "maintain_protective_stop"}
+ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED"}
+PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET"}
+BOT_PROTECTIVE_STOP_CLIENT_PREFIXES = ("ethbot-ps-", "ethbot-be-", "ethbot-ts-")
+STOP_PRICE_TOLERANCE = Decimal("0.00000001")
+WORKER_LOCK_OWNER = "real_order_worker"
 
 
 class RealOrderAdapter(Protocol):
@@ -70,7 +76,7 @@ def main() -> int:
     args = build_parser().parse_args()
     result = run_once(args=args)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result["status"] in {"submitted", "skipped", "blocked"} else 1
+    return 0 if result["status"] in {"submitted_all_accepted", "skipped", "blocked"} else 1
 
 
 def run_once(*, args: argparse.Namespace, adapter_factory: AdapterFactory | None = None) -> dict[str, Any]:
@@ -129,27 +135,63 @@ def run_once(*, args: argparse.Namespace, adapter_factory: AdapterFactory | None
         if final_legality:
             return _record_worker_event(audit=audit, event_type="real_order_worker_blocked", payload=final_legality)
 
+        pre_submit_snapshot = _fetch_runtime_snapshot_with_state(
+            adapter=adapter,
+            state_store=state_store,
+            context="immediate_pre_submit_position_check",
+        )
+        pre_submit_ghost_cleanup = _cleanup_ghost_stops_if_needed(adapter=adapter, package=package, runtime_snapshot=pre_submit_snapshot)
+        if pre_submit_ghost_cleanup:
+            return _record_worker_event(audit=audit, event_type="real_order_worker_blocked", payload=pre_submit_ghost_cleanup)
+        pre_submit_legality = _validate_action_still_legal(package=package, runtime_snapshot=pre_submit_snapshot)
+        if pre_submit_legality:
+            return _record_worker_event(audit=audit, event_type="real_order_worker_blocked", payload=pre_submit_legality)
+        if _kill_switch_enabled(Path(args.kill_switch_path)):
+            return _record_worker_event(
+                audit=audit,
+                event_type="real_order_worker_blocked",
+                payload=_blocked(reason_codes=["kill_switch_enabled_before_submit"], package=package, runtime_snapshot=pre_submit_snapshot),
+            )
+
         pending_payload = {
             "status": "pending",
             "package_id": package.get("package_id", ""),
             "action": package.get("action", ""),
             "commands": [_command_audit_payload(command) for command in commands],
-            "runtime_snapshot_before": final_snapshot.model_dump(mode="json"),
+            "runtime_snapshot_before": pre_submit_snapshot.model_dump(mode="json"),
         }
         pending_event = audit.append(event_type="real_order_worker_command_pending", payload=pending_payload)
 
         try:
-            results = _execute_with_action_closure(adapter=adapter, commands=commands, action=str(package.get("action") or ""))
+            results = _execute_with_action_closure(
+                adapter=adapter,
+                commands=commands,
+                action=str(package.get("action") or ""),
+                package=package,
+                state_store=state_store,
+                kill_switch_path=Path(args.kill_switch_path),
+            )
         except Exception as exc:
             state_store.record_api_failure(reason_code=f"submit_response_unknown:{exc.__class__.__name__}")
-            raise
+            result_payload = {
+                "status": "unknown_after_exception",
+                "package_id": package.get("package_id", ""),
+                "action": package.get("action", ""),
+                "pending_generated_at": pending_event.generated_at.isoformat(),
+                "commands": [_command_audit_payload(command) for command in commands],
+                "results": [],
+                "runtime_snapshot_after": {},
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+            }
+            return _record_worker_event(audit=audit, event_type="real_order_worker_command_result", payload=result_payload)
         after_snapshot = _fetch_runtime_snapshot_with_state(
             adapter=adapter,
             state_store=state_store,
             context="post_submit_position_refresh",
         )
+        status = _summarize_execution_status(results)
         result_payload = {
-            "status": "submitted",
+            "status": status,
             "package_id": package.get("package_id", ""),
             "action": package.get("action", ""),
             "pending_generated_at": pending_event.generated_at.isoformat(),
@@ -179,7 +221,13 @@ class WorkerLock:
         os.write(
             self._handle,
             json.dumps(
-                {"pid": os.getpid(), "created_at": datetime.now().replace(microsecond=0).isoformat()},
+                {
+                    "pid": os.getpid(),
+                    "owner": WORKER_LOCK_OWNER,
+                    "created_at": datetime.now().replace(microsecond=0).isoformat(),
+                    "process_start_token": _process_start_token(os.getpid()),
+                    "script_path": str(Path(__file__).resolve()),
+                },
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8"),
@@ -200,6 +248,9 @@ class WorkerLock:
             stat = self._lock_path.stat()
         except FileNotFoundError:
             return True
+        metadata = self._read_lock_metadata()
+        if self._has_live_worker_owner(metadata):
+            return False
         if max(0.0, time.time() - stat.st_mtime) < self._stale_after_sec:
             return False
         try:
@@ -207,6 +258,120 @@ class WorkerLock:
         except FileNotFoundError:
             return True
         return True
+
+    def _read_lock_metadata(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self._lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _has_live_worker_owner(metadata: dict[str, Any]) -> bool:
+        if not _lock_metadata_matches_worker(metadata):
+            return False
+        pid = _coerce_positive_int(metadata.get("pid"))
+        if pid is None or not _process_is_running(pid):
+            return False
+        recorded_start_token = str(metadata.get("process_start_token") or "")
+        if not recorded_start_token:
+            return True
+        current_start_token = _process_start_token(pid)
+        return not current_start_token or current_start_token == recorded_start_token
+
+
+def _lock_metadata_matches_worker(metadata: dict[str, Any]) -> bool:
+    owner = str(metadata.get("owner") or metadata.get("command") or "")
+    if owner == WORKER_LOCK_OWNER:
+        return True
+    script_path = str(metadata.get("script_path") or "").replace("\\", "/").lower()
+    return script_path.endswith("/real_order_worker.py")
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    try:
+        candidate = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return candidate if candidate > 0 else None
+
+
+def _process_is_running(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        return _windows_process_is_running(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _process_start_token(pid: int) -> str:
+    if os.name == "nt":
+        return _windows_process_start_token(pid)
+    proc_stat = Path(f"/proc/{pid}/stat")
+    try:
+        payload = proc_stat.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    parts = payload.rsplit(") ", maxsplit=1)
+    if len(parts) != 2:
+        return ""
+    stat_fields = parts[1].split()
+    if len(stat_fields) < 20:
+        return ""
+    return f"proc_start_ticks:{stat_fields[19]}"
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_process_start_token(pid: int) -> str:
+    import ctypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ""
+    try:
+        created_at = FileTime()
+        exit_time = FileTime()
+        kernel_time = FileTime()
+        user_time = FileTime()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created_at),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return ""
+        created_at_ticks = (int(created_at.dwHighDateTime) << 32) + int(created_at.dwLowDateTime)
+        return f"win_filetime:{created_at_ticks}"
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _build_binance_adapter(args: argparse.Namespace) -> BinancePerpAdapter:
@@ -307,6 +472,8 @@ def _check_idempotency(*, audit_path: Path, commands: list[ExecutionCommand]) ->
         return None
     pending_keys: set[str] = set()
     completed_keys: set[str] = set()
+    reconciliation_keys: set[str] = set()
+    failed_keys: set[str] = set()
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -325,12 +492,46 @@ def _check_idempotency(*, audit_path: Path, commands: list[ExecutionCommand]) ->
         if event_type == "real_order_worker_command_pending":
             pending_keys.update(matched)
         if event_type == "real_order_worker_command_result":
-            completed_keys.update(matched)
+            status = str(payload.get("status") or "")
+            if status == "unknown_after_exception":
+                reconciliation_keys.update(matched)
+                continue
+            matched_results = [
+                item
+                for item in payload.get("results") or []
+                if str(item.get("idempotency_key") or "") in matched
+            ]
+            for result in matched_results:
+                key = str(result.get("idempotency_key") or "")
+                if _result_has_submission_confirmation(result):
+                    completed_keys.add(key)
+                    continue
+                if str(result.get("status") or "") == "timeout" or str(result.get("error_kind") or "") == "timeout":
+                    reconciliation_keys.add(key)
+                else:
+                    failed_keys.add(key)
+    pending_keys.difference_update(completed_keys)
+    pending_keys.difference_update(reconciliation_keys)
+    pending_keys.difference_update(failed_keys)
     if completed_keys:
         return {"status": "blocked", "reason_codes": ["idempotency_key_already_completed"], "idempotency_keys": sorted(completed_keys)}
+    if reconciliation_keys:
+        return {"status": "blocked", "reason_codes": ["pending_idempotency_key_requires_recovery"], "idempotency_keys": sorted(reconciliation_keys)}
     if pending_keys:
         return {"status": "blocked", "reason_codes": ["pending_idempotency_key_requires_recovery"], "idempotency_keys": sorted(pending_keys)}
     return None
+
+
+def _result_has_submission_confirmation(result: dict[str, Any]) -> bool:
+    if result.get("accepted") is not True:
+        return False
+    if str(result.get("exchange_order_id") or "") or str(result.get("client_order_id") or ""):
+        return True
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    response_payload = details.get("response_payload")
+    if isinstance(response_payload, dict) and (response_payload.get("orderId") or response_payload.get("algoId") or response_payload.get("clientOrderId") or response_payload.get("clientAlgoId")):
+        return True
+    return False
 
 
 def _validate_action_still_legal(*, package: dict[str, Any], runtime_snapshot: AdapterRuntimeSnapshot) -> dict[str, Any] | None:
@@ -373,7 +574,25 @@ def _cleanup_ghost_stops_if_needed(
         return None
     try:
         open_algo_orders = adapter.fetch_open_algo_orders_raw()
-        canceled = _cancel_algo_orders(adapter=adapter, open_algo_orders=open_algo_orders)
+        cancelable, external, invalid = _classify_cancelable_algo_orders(
+            open_algo_orders=open_algo_orders,
+            runtime_snapshot=runtime_snapshot,
+            expected_direction="",
+            require_side_match=False,
+        )
+        if external:
+            return _blocked(
+                reason_codes=["external_algo_order_present"],
+                package=package,
+                runtime_snapshot=runtime_snapshot,
+            )
+        if invalid:
+            return _blocked(
+                reason_codes=["bot_algo_order_semantics_mismatch"],
+                package=package,
+                runtime_snapshot=runtime_snapshot,
+            )
+        canceled = _cancel_algo_orders(adapter=adapter, open_algo_orders=cancelable)
     except Exception as exc:
         return _blocked(
             reason_codes=["ghost_stop_cancel_failed", f"ghost_stop_cancel_error:{exc.__class__.__name__}"],
@@ -394,16 +613,54 @@ def _execute_with_action_closure(
     adapter: RealOrderAdapter,
     commands: list[ExecutionCommand],
     action: str,
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
 ) -> list[CommandExecutionResult]:
     if action in ENTRY_ACTIONS:
-        return _execute_entry_with_protective_stop_retry(adapter=adapter, commands=commands)
+        return _execute_entry_with_protective_stop_retry(
+            adapter=adapter,
+            commands=commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+        )
     if action in PROTECT_ACTIONS:
-        return _execute_protective_stop_with_retry(adapter=adapter, commands=commands, attempts=3)
+        return _execute_protective_stop_with_retry(
+            adapter=adapter,
+            commands=commands,
+            attempts=3,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            allow_when_kill_switch=True,
+        )
     if action == "reduce":
-        return _execute_reduce_with_stop_refresh(adapter=adapter, commands=commands)
-    results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
+        return _execute_reduce_with_stop_refresh(
+            adapter=adapter,
+            commands=commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+        )
+    results = _execute_command_batch_after_final_checks(
+        adapter=adapter,
+        commands=commands,
+        package=package,
+        state_store=state_store,
+        kill_switch_path=kill_switch_path,
+        block_on_kill_switch=False,
+    )
     if action == "exit":
-        _cleanup_open_algo_orders(adapter=adapter)
+        cleanup_result = _cleanup_open_algo_orders(
+            adapter=adapter,
+            expected_direction=_commands_direction(commands) or str(package.get("direction") or ""),
+            require_side_match=True,
+        )
+        if cleanup_result.get("invalid_orders"):
+            results.append(_synthetic_command_result(target="cleanup_open_algo_orders", reason="bot_algo_order_semantics_mismatch"))
+        elif cleanup_result.get("external_orders"):
+            results.append(_synthetic_command_result(target="cleanup_open_algo_orders", reason="external_algo_order_present"))
     return results
 
 
@@ -411,23 +668,61 @@ def _execute_reduce_with_stop_refresh(
     *,
     adapter: RealOrderAdapter,
     commands: list[ExecutionCommand],
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
 ) -> list[CommandExecutionResult]:
     reduce_commands = [command for command in commands if command.target == "reduce_order"]
     stop_commands = [command for command in commands if command.target == "maintain_protective_stop"]
     other_commands = [command for command in commands if command.target not in {"reduce_order", "maintain_protective_stop"}]
     results: list[CommandExecutionResult] = []
     if reduce_commands:
-        reduce_results = adapter.execute_commands(commands=reduce_commands, runtime_mode=RuntimeMode.REAL)
+        reduce_results = _execute_command_batch_after_final_checks(
+            adapter=adapter,
+            commands=reduce_commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            block_on_kill_switch=False,
+        )
         results.extend(reduce_results)
         if not all(result.accepted for result in reduce_results):
             return results
     if stop_commands:
-        stop_results = _execute_protective_stop_with_retry(adapter=adapter, commands=stop_commands, attempts=3)
+        old_stop_identities = _fetch_cancelable_algo_order_identities(
+            adapter=adapter,
+            expected_direction=_commands_direction(stop_commands) or str(package.get("direction") or ""),
+        )
+        stop_results = _execute_protective_stop_with_retry(
+            adapter=adapter,
+            commands=stop_commands,
+            attempts=3,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            allow_when_kill_switch=True,
+            old_stop_identities=old_stop_identities,
+        )
         results.extend(stop_results)
         if stop_results and all(result.accepted for result in stop_results):
-            _cleanup_open_algo_orders(adapter=adapter)
+            confirmed_new_identities = _confirmed_result_identities(stop_results)
+            _cleanup_open_algo_orders(
+                adapter=adapter,
+                expected_direction=_commands_direction(stop_commands) or str(package.get("direction") or ""),
+                allowed_identities=old_stop_identities,
+                excluded_identities=confirmed_new_identities,
+            )
     if other_commands:
-        results.extend(adapter.execute_commands(commands=other_commands, runtime_mode=RuntimeMode.REAL))
+        results.extend(
+            _execute_command_batch_after_final_checks(
+                adapter=adapter,
+                commands=other_commands,
+                package=package,
+                state_store=state_store,
+                kill_switch_path=kill_switch_path,
+                block_on_kill_switch=False,
+            )
+        )
     return results
 
 
@@ -435,21 +730,48 @@ def _execute_entry_with_protective_stop_retry(
     *,
     adapter: RealOrderAdapter,
     commands: list[ExecutionCommand],
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
 ) -> list[CommandExecutionResult]:
     entry_commands = [command for command in commands if command.target == "entry_order"]
     stop_commands = [command for command in commands if command.target == "maintain_protective_stop"]
     other_commands = [command for command in commands if command.target not in {"entry_order", "maintain_protective_stop"}]
     results: list[CommandExecutionResult] = []
     if entry_commands:
-        entry_results = adapter.execute_commands(commands=entry_commands, runtime_mode=RuntimeMode.REAL)
+        entry_results = _execute_command_batch_after_final_checks(
+            adapter=adapter,
+            commands=entry_commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            block_on_kill_switch=True,
+        )
         results.extend(entry_results)
         if not all(result.accepted for result in entry_results):
             return results
     if stop_commands:
-        stop_results = _execute_protective_stop_with_retry(adapter=adapter, commands=stop_commands, attempts=3)
+        stop_results = _execute_protective_stop_with_retry(
+            adapter=adapter,
+            commands=stop_commands,
+            attempts=3,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            allow_when_kill_switch=True,
+        )
         results.extend(stop_results)
     if other_commands:
-        results.extend(adapter.execute_commands(commands=other_commands, runtime_mode=RuntimeMode.REAL))
+        results.extend(
+            _execute_command_batch_after_final_checks(
+                adapter=adapter,
+                commands=other_commands,
+                package=package,
+                state_store=state_store,
+                kill_switch_path=kill_switch_path,
+                block_on_kill_switch=False,
+            )
+        )
     return results
 
 
@@ -458,23 +780,136 @@ def _execute_protective_stop_with_retry(
     adapter: RealOrderAdapter,
     commands: list[ExecutionCommand],
     attempts: int,
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
+    allow_when_kill_switch: bool,
+    old_stop_identities: set[tuple[str, str]] | None = None,
 ) -> list[CommandExecutionResult]:
     latest_results: list[CommandExecutionResult] = []
     for _ in range(max(1, attempts)):
-        latest_results = adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
-        if latest_results and all(result.accepted for result in latest_results) and _protective_stop_confirmed_active(adapter=adapter):
+        latest_results = _execute_command_batch_after_final_checks(
+            adapter=adapter,
+            commands=commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+            block_on_kill_switch=not allow_when_kill_switch,
+        )
+        if latest_results and all(result.accepted for result in latest_results) and _protective_stop_confirmed_active(
+            adapter=adapter,
+            commands=commands,
+            results=latest_results,
+            old_stop_identities=old_stop_identities or set(),
+        ):
             return latest_results
     return latest_results
 
 
-def _protective_stop_confirmed_active(*, adapter: RealOrderAdapter) -> bool:
-    open_algo_orders = adapter.fetch_open_algo_orders_raw()
-    return bool(open_algo_orders)
+def _execute_command_batch_after_final_checks(
+    *,
+    adapter: RealOrderAdapter,
+    commands: list[ExecutionCommand],
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
+    block_on_kill_switch: bool,
+) -> list[CommandExecutionResult]:
+    if not commands:
+        return []
+    if block_on_kill_switch and _kill_switch_enabled(kill_switch_path):
+        return [_synthetic_command_result(target=command.target, reason="kill_switch_enabled_before_submit", command=command) for command in commands]
+    runtime_snapshot = _fetch_runtime_snapshot_with_state(
+        adapter=adapter,
+        state_store=state_store,
+        context=f"immediate_pre_{commands[0].target}_submit_check",
+    )
+    reason_codes = _validate_commands_against_runtime_snapshot(
+        package=package,
+        commands=commands,
+        runtime_snapshot=runtime_snapshot,
+    )
+    if reason_codes:
+        reason = ",".join(reason_codes)
+        return [_synthetic_command_result(target=command.target, reason=reason, command=command) for command in commands]
+    if block_on_kill_switch and _kill_switch_enabled(kill_switch_path):
+        return [_synthetic_command_result(target=command.target, reason="kill_switch_enabled_before_submit", command=command) for command in commands]
+    return adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.REAL)
 
 
-def _cleanup_open_algo_orders(*, adapter: RealOrderAdapter) -> list[dict[str, Any]]:
+def _validate_commands_against_runtime_snapshot(
+    *,
+    package: dict[str, Any],
+    commands: list[ExecutionCommand],
+    runtime_snapshot: AdapterRuntimeSnapshot,
+) -> list[str]:
+    if not runtime_snapshot.snapshot_valid:
+        return ["runtime_snapshot_invalid"]
+    reason_codes: list[str] = []
+    package_direction = str(package.get("direction") or "")
+    for command in commands:
+        direction = str(getattr(command.payload, "direction", "") or package_direction)
+        if command.target == "entry_order":
+            if runtime_snapshot.position.position_state != "FLAT":
+                reason_codes.append("live_position_not_flat_before_submit")
+            if runtime_snapshot.protective_stop_present:
+                reason_codes.append("ghost_protective_stop_present_before_submit")
+        elif command.target in {"reduce_order", "exit_order", "maintain_protective_stop", "advance_breakeven_stop", "advance_trailing_stop"}:
+            if runtime_snapshot.position.position_state != "ENTERED":
+                reason_codes.append("live_position_not_entered_before_submit")
+            if direction and direction != runtime_snapshot.position.direction:
+                reason_codes.append("live_position_direction_mismatch_before_submit")
+            if command.target in {"reduce_order", "exit_order", "maintain_protective_stop"} and not runtime_snapshot.position.position_amt:
+                reason_codes.append("live_position_quantity_missing_before_submit")
+    return list(dict.fromkeys(reason_codes))
+
+
+def _protective_stop_confirmed_active(
+    *,
+    adapter: RealOrderAdapter,
+    commands: list[ExecutionCommand],
+    results: list[CommandExecutionResult],
+    old_stop_identities: set[tuple[str, str]],
+) -> bool:
     open_algo_orders = adapter.fetch_open_algo_orders_raw()
-    return _cancel_algo_orders(adapter=adapter, open_algo_orders=open_algo_orders)
+    if len(commands) != len(results):
+        return False
+    for command, result in zip(commands, results, strict=False):
+        match = find_matching_protective_stop(
+            command=command,
+            result=result,
+            open_algo_orders=open_algo_orders,
+            old_stop_identities=old_stop_identities,
+        )
+        if match is None:
+            return False
+        result.details["protective_stop_confirmation"] = {"matched_order": match}
+    return True
+
+
+def _cleanup_open_algo_orders(
+    *,
+    adapter: RealOrderAdapter,
+    expected_direction: str = "",
+    require_side_match: bool = True,
+    allowed_identities: set[tuple[str, str]] | None = None,
+    excluded_identities: set[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    open_algo_orders = adapter.fetch_open_algo_orders_raw()
+    cancelable, external, invalid = _classify_cancelable_algo_orders(
+        open_algo_orders=open_algo_orders,
+        runtime_snapshot=None,
+        expected_direction=expected_direction,
+        require_side_match=require_side_match,
+    )
+    allowed = allowed_identities
+    excluded = excluded_identities or set()
+    if allowed is not None:
+        cancelable = [order for order in cancelable if _algo_order_identity(order) in allowed]
+    if excluded:
+        cancelable = [order for order in cancelable if _algo_order_identity(order) not in excluded]
+    canceled = _cancel_algo_orders(adapter=adapter, open_algo_orders=cancelable)
+    return {"canceled": canceled, "external_orders": external, "invalid_orders": invalid}
 
 
 def _cancel_algo_orders(*, adapter: RealOrderAdapter, open_algo_orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -486,6 +921,239 @@ def _cancel_algo_orders(*, adapter: RealOrderAdapter, open_algo_orders: list[dic
             continue
         canceled.append(adapter.cancel_algo_order_raw(algo_id=algo_id, client_algo_id=client_algo_id))
     return canceled
+
+
+def _classify_cancelable_algo_orders(
+    *,
+    open_algo_orders: list[dict[str, Any]],
+    runtime_snapshot: AdapterRuntimeSnapshot | None,
+    expected_direction: str = "",
+    require_side_match: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    cancelable: list[dict[str, Any]] = []
+    external: list[dict[str, Any]] = []
+    invalid: list[dict[str, Any]] = []
+    direction = expected_direction or (runtime_snapshot.position.direction if runtime_snapshot is not None else "")
+    for order in open_algo_orders:
+        if not _is_bot_owned_protective_algo_order(order):
+            if _is_active_protective_algo_order(order):
+                external.append(order)
+            continue
+        reason_codes = _protective_order_mismatch_reasons(order=order, direction=direction, require_side_match=require_side_match)
+        if reason_codes:
+            invalid.append({**order, "_mismatch_reasons": reason_codes})
+            continue
+        cancelable.append(order)
+    return cancelable, external, invalid
+
+
+def find_matching_protective_stop(
+    *,
+    command: ExecutionCommand,
+    result: CommandExecutionResult,
+    open_algo_orders: list[dict[str, Any]],
+    old_stop_identities: set[tuple[str, str]] | None = None,
+) -> dict[str, Any] | None:
+    old_stop_identities = old_stop_identities or set()
+    result_identities = _result_identity_candidates(result)
+    for order in open_algo_orders:
+        if _algo_order_identity(order) in old_stop_identities and _algo_order_identity(order) not in result_identities:
+            continue
+        if not _is_bot_owned_protective_algo_order(order):
+            continue
+        if _algo_order_identity(order) in result_identities:
+            if _protective_order_mismatch_reasons(
+                order=order,
+                direction=str(getattr(command.payload, "direction", "") or ""),
+                require_side_match=True,
+            ):
+                continue
+            if not _quantity_matches_command_or_result(order=order, command=command, result=result):
+                continue
+            if not _trigger_price_matches_command_or_result(order=order, command=command, result=result):
+                continue
+            return order
+    for order in open_algo_orders:
+        if _algo_order_identity(order) in old_stop_identities:
+            continue
+        if not _is_bot_owned_protective_algo_order(order):
+            continue
+        if _protective_order_mismatch_reasons(
+            order=order,
+            direction=str(getattr(command.payload, "direction", "") or ""),
+            require_side_match=True,
+        ):
+            continue
+        if not _quantity_matches_command_or_result(order=order, command=command, result=result):
+            continue
+        if not _trigger_price_matches_command_or_result(order=order, command=command, result=result):
+            continue
+        return order
+    return None
+
+
+def _fetch_cancelable_algo_order_identities(*, adapter: RealOrderAdapter, expected_direction: str) -> set[tuple[str, str]]:
+    open_algo_orders = adapter.fetch_open_algo_orders_raw()
+    cancelable, _, _ = _classify_cancelable_algo_orders(
+        open_algo_orders=open_algo_orders,
+        runtime_snapshot=None,
+        expected_direction=expected_direction,
+        require_side_match=True,
+    )
+    return {_algo_order_identity(order) for order in cancelable}
+
+
+def _confirmed_result_identities(results: list[CommandExecutionResult]) -> set[tuple[str, str]]:
+    identities: set[tuple[str, str]] = set()
+    for result in results:
+        identities.update(_result_identity_candidates(result))
+        confirmation = result.details.get("protective_stop_confirmation") if isinstance(result.details, dict) else {}
+        if isinstance(confirmation, dict):
+            matched_order = confirmation.get("matched_order")
+            if isinstance(matched_order, dict):
+                identities.add(_algo_order_identity(matched_order))
+    identities.discard(("", ""))
+    return identities
+
+
+def _result_identity_candidates(result: CommandExecutionResult) -> set[tuple[str, str]]:
+    identities: set[tuple[str, str]] = set()
+    if result.exchange_order_id or result.client_order_id:
+        identities.add((str(result.exchange_order_id or ""), str(result.client_order_id or "")))
+    details = result.details if isinstance(result.details, dict) else {}
+    for payload in (
+        details.get("response_payload"),
+        details.get("response_summary"),
+        details.get("prepared_request", {}).get("params") if isinstance(details.get("prepared_request"), dict) else {},
+        details.get("signed_request", {}).get("params") if isinstance(details.get("signed_request"), dict) else {},
+    ):
+        if isinstance(payload, dict):
+            identities.add((str(payload.get("algoId") or payload.get("orderId") or ""), str(payload.get("clientAlgoId") or payload.get("clientOrderId") or "")))
+    identities.discard(("", ""))
+    return identities
+
+
+def _algo_order_identity(order: dict[str, Any]) -> tuple[str, str]:
+    return (str(order.get("algoId") or order.get("orderId") or ""), str(order.get("clientAlgoId") or order.get("clientOrderId") or ""))
+
+
+def _is_bot_owned_protective_algo_order(order: dict[str, Any]) -> bool:
+    client_algo_id = str(order.get("clientAlgoId") or "")
+    return client_algo_id.startswith(BOT_PROTECTIVE_STOP_CLIENT_PREFIXES) and _is_active_protective_algo_order(order)
+
+
+def _is_active_protective_algo_order(order: dict[str, Any]) -> bool:
+    status = str(order.get("algoStatus") or order.get("status") or "").upper()
+    order_type = str(order.get("orderType") or order.get("type") or "").upper()
+    return status in ACTIVE_ALGO_STATUSES and order_type in PROTECTIVE_ORDER_TYPES
+
+
+def _protective_order_mismatch_reasons(*, order: dict[str, Any], direction: str, require_side_match: bool) -> list[str]:
+    reason_codes: list[str] = []
+    symbol = str(order.get("symbol") or "ETHUSDT")
+    status = str(order.get("algoStatus") or order.get("status") or "").upper()
+    order_type = str(order.get("orderType") or order.get("type") or "").upper()
+    if symbol != "ETHUSDT":
+        reason_codes.append("symbol_mismatch")
+    if status not in ACTIVE_ALGO_STATUSES:
+        reason_codes.append("algo_status_not_active")
+    if order_type not in PROTECTIVE_ORDER_TYPES:
+        reason_codes.append("order_type_not_protective")
+    if not _to_bool(order.get("reduceOnly")) and not _to_bool(order.get("closePosition")):
+        reason_codes.append("reduce_only_missing")
+    if require_side_match and direction in {"long", "short"}:
+        expected_side = "SELL" if direction == "long" else "BUY"
+        if str(order.get("side") or "").upper() != expected_side:
+            reason_codes.append("side_mismatch")
+    if _to_decimal(order.get("triggerPrice") or order.get("stopPrice")) is None:
+        reason_codes.append("trigger_price_missing")
+    if not str(order.get("algoId") or order.get("clientAlgoId") or ""):
+        reason_codes.append("algo_identity_missing")
+    return reason_codes
+
+
+def _quantity_matches_command_or_result(*, order: dict[str, Any], command: ExecutionCommand, result: CommandExecutionResult) -> bool:
+    if _to_bool(order.get("closePosition")):
+        return True
+    order_quantity = _to_decimal(order.get("quantity") or order.get("origQty"))
+    if order_quantity is None:
+        return True
+    expected_values: list[Any] = []
+    details = result.details if isinstance(result.details, dict) else {}
+    expected_values.append(details.get("response_summary", {}).get("resolved_position_amt") if isinstance(details.get("response_summary"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("params", {}).get("quantity") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("params", {}).get("quantity") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(getattr(command.payload, "quantity", None))
+    for value in expected_values:
+        expected = _to_decimal(value)
+        if expected is not None and abs(order_quantity - expected) <= STOP_PRICE_TOLERANCE:
+            return True
+    return False
+
+
+def _trigger_price_matches_command_or_result(*, order: dict[str, Any], command: ExecutionCommand, result: CommandExecutionResult) -> bool:
+    order_trigger = _to_decimal(order.get("triggerPrice") or order.get("stopPrice"))
+    if order_trigger is None:
+        return False
+    expected_values: list[Any] = []
+    details = result.details if isinstance(result.details, dict) else {}
+    expected_values.append(details.get("response_summary", {}).get("resolved_stop_price") if isinstance(details.get("response_summary"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("params", {}).get("triggerPrice") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("params", {}).get("stopPrice") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("params", {}).get("triggerPrice") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("params", {}).get("stopPrice") if isinstance(details.get("signed_request"), dict) else None)
+    for value in expected_values:
+        expected = _to_decimal(value)
+        if expected is not None and abs(order_trigger - expected) <= STOP_PRICE_TOLERANCE:
+            return True
+    return False
+
+
+def _commands_direction(commands: list[ExecutionCommand]) -> str:
+    for command in commands:
+        direction = str(getattr(command.payload, "direction", "") or "")
+        if direction in {"long", "short"}:
+            return direction
+    return ""
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _synthetic_command_result(*, target: str, reason: str, command: ExecutionCommand | None = None) -> CommandExecutionResult:
+    return CommandExecutionResult(
+        target=target,
+        status="blocked",
+        accepted=False,
+        simulated=False,
+        reason=reason,
+        details={"synthetic_worker_block": True},
+        idempotency_key=command.idempotency_key if command is not None else "",
+        error_kind="worker_blocked",
+    )
+
+
+def _summarize_execution_status(results: list[CommandExecutionResult]) -> str:
+    if not results:
+        return "all_failed"
+    accepted = [result for result in results if result.accepted]
+    if len(accepted) == len(results):
+        return "submitted_all_accepted"
+    if not accepted:
+        return "all_failed"
+    return "partial_failed"
 
 
 def _record_worker_state_from_snapshot(

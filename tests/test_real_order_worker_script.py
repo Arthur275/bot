@@ -23,9 +23,14 @@ class FakeRealOrderAdapter:
         position_state: str = "FLAT",
         direction: str = "neutral",
         protective_stop_present: bool = False,
+        position_amt: float | None = None,
+        entry_price: float = 3000.0,
         stop_failures_before_success: int = 0,
         open_algo_orders: list[dict[str, object]] | None = None,
         cancel_raises: bool = False,
+        create_kill_switch_on_submit: Path | None = None,
+        create_kill_switch_on_snapshot: tuple[Path, int] | None = None,
+        mutate_position_before_submit: tuple[str, str] | None = None,
     ) -> None:
         self.snapshots_fetched = 0
         self.executed_commands: list[ExecutionCommand] = []
@@ -33,15 +38,41 @@ class FakeRealOrderAdapter:
         self._stop_failures_before_success = stop_failures_before_success
         self._open_algo_orders = list(open_algo_orders or [])
         self._cancel_raises = cancel_raises
+        self._create_kill_switch_on_submit = create_kill_switch_on_submit
+        self._create_kill_switch_on_snapshot = create_kill_switch_on_snapshot
+        self._mutate_position_before_submit = mutate_position_before_submit
+        resolved_position_amt = position_amt if position_amt is not None else (0.048 if position_state == "ENTERED" else 0.0)
         self._snapshot = AdapterRuntimeSnapshot(
             fetched_at=datetime(2026, 5, 4, 1, 0, 0),
-            position=PositionSnapshot(position_state=position_state, direction=direction, size_pct=0.0),
+            position=PositionSnapshot(
+                position_state=position_state,
+                direction=direction,
+                size_pct=0.02 if resolved_position_amt else 0.0,
+                position_amt=resolved_position_amt,
+                entry_price=entry_price if resolved_position_amt else None,
+                mark_price=entry_price,
+            ),
             protective_stop_present=protective_stop_present,
             snapshot_valid=True,
         )
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         self.snapshots_fetched += 1
+        if self._create_kill_switch_on_snapshot is not None:
+            path, snapshot_number = self._create_kill_switch_on_snapshot
+            if self.snapshots_fetched >= snapshot_number:
+                path.write_text("1", encoding="utf-8")
+                self._create_kill_switch_on_snapshot = None
+        if self._mutate_position_before_submit and self.snapshots_fetched >= 4:
+            state, direction = self._mutate_position_before_submit
+            self._snapshot.position = PositionSnapshot(
+                position_state=state,
+                direction=direction,
+                size_pct=0.02 if state == "ENTERED" else 0.0,
+                position_amt=0.048 if state == "ENTERED" else 0.0,
+                entry_price=3000.0 if state == "ENTERED" else None,
+                mark_price=3000.0,
+            )
         return self._snapshot
 
     def execute_commands(
@@ -51,6 +82,9 @@ class FakeRealOrderAdapter:
         runtime_mode: RuntimeMode,
     ) -> list[CommandExecutionResult]:
         assert runtime_mode == RuntimeMode.REAL
+        if self._create_kill_switch_on_submit is not None:
+            self._create_kill_switch_on_submit.write_text("1", encoding="utf-8")
+            self._create_kill_switch_on_submit = None
         self.executed_commands.extend(commands)
         if any(command.target == "maintain_protective_stop" for command in commands) and self._stop_failures_before_success > 0:
             self._stop_failures_before_success -= 1
@@ -66,19 +100,71 @@ class FakeRealOrderAdapter:
                 )
                 for command in commands
             ]
-        return [
-            CommandExecutionResult(
-                target=command.target,
-                status="accepted",
-                accepted=True,
-                simulated=False,
-                reason=command.reason,
-                idempotency_key=command.idempotency_key,
-                client_order_id=f"client-{command.target}",
-                exchange_order_id=f"exchange-{command.target}",
+        results: list[CommandExecutionResult] = []
+        for command in commands:
+            if command.target == "entry_order":
+                direction = str(getattr(command.payload, "direction", "") or "long")
+                self._snapshot.position = PositionSnapshot(
+                    position_state="ENTERED",
+                    direction=direction,
+                    size_pct=0.02,
+                    position_amt=0.048 if direction == "long" else -0.048,
+                    entry_price=3000.0,
+                    mark_price=3000.0,
+                )
+            client_id = f"ethbot-ps-{command.idempotency_key.replace(':', '-')}" if command.target == "maintain_protective_stop" else f"client-{command.target}"
+            exchange_id = f"algo-{command.idempotency_key.replace(':', '-')}" if command.target == "maintain_protective_stop" else f"exchange-{command.target}"
+            details = {}
+            if command.target == "maintain_protective_stop":
+                direction = str(getattr(command.payload, "direction", "") or self._snapshot.position.direction or "long")
+                side = "SELL" if direction == "long" else "BUY"
+                quantity = str(abs(float(self._snapshot.position.position_amt or 0.048)))
+                trigger_price = "2910.0"
+                details = {
+                    "prepared_request": {
+                        "params": {
+                            "symbol": "ETHUSDT",
+                            "clientAlgoId": client_id,
+                            "side": side,
+                            "type": "STOP_MARKET",
+                            "reduceOnly": "true",
+                            "quantity": quantity,
+                            "triggerPrice": trigger_price,
+                        }
+                    },
+                    "response_payload": {"algoId": exchange_id, "clientAlgoId": client_id, "status": "NEW"},
+                    "response_summary": {
+                        "algoId": exchange_id,
+                        "clientAlgoId": client_id,
+                        "resolved_stop_price": trigger_price,
+                        "resolved_position_amt": quantity,
+                    },
+                }
+                if not any(str(order.get("clientAlgoId") or "") == client_id for order in self._open_algo_orders):
+                    self._open_algo_orders.append(
+                        _algo_order(
+                            algoId=exchange_id,
+                            clientAlgoId=client_id,
+                            side=side,
+                            quantity=quantity,
+                            triggerPrice=trigger_price,
+                        )
+                    )
+                self._snapshot.protective_stop_present = True
+            results.append(
+                CommandExecutionResult(
+                    target=command.target,
+                    status="accepted",
+                    accepted=True,
+                    simulated=False,
+                    reason=command.reason,
+                    idempotency_key=command.idempotency_key,
+                    client_order_id=client_id,
+                    exchange_order_id=exchange_id,
+                    details=details,
+                )
             )
-            for command in commands
-        ]
+        return results
 
     def fetch_open_algo_orders_raw(self) -> list[dict[str, object]]:
         return list(self._open_algo_orders)
@@ -107,6 +193,55 @@ class InvalidSnapshotAdapter(FakeRealOrderAdapter):
             error_kind="timeout",
             error_message="timeout",
         )
+
+
+class RejectingStopAdapter(FakeRealOrderAdapter):
+    def execute_commands(
+        self,
+        *,
+        commands: list[ExecutionCommand],
+        runtime_mode: RuntimeMode,
+    ) -> list[CommandExecutionResult]:
+        if any(command.target == "maintain_protective_stop" for command in commands):
+            self.executed_commands.extend(commands)
+            return [
+                CommandExecutionResult(
+                    target=command.target,
+                    status="rejected",
+                    accepted=False,
+                    simulated=False,
+                    reason="exchange_rejected",
+                    idempotency_key=command.idempotency_key,
+                    error_kind="http_error",
+                )
+                for command in commands
+            ]
+        return super().execute_commands(commands=commands, runtime_mode=runtime_mode)
+
+
+def _algo_order(
+    *,
+    algoId: object = "algo-1",
+    clientAlgoId: str = "ethbot-ps-existing",
+    side: str = "SELL",
+    quantity: object = "0.048",
+    triggerPrice: object = "2910.0",
+    reduceOnly: object = True,
+    symbol: str = "ETHUSDT",
+    algoStatus: str = "NEW",
+    orderType: str = "STOP_MARKET",
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "algoId": algoId,
+        "clientAlgoId": clientAlgoId,
+        "algoStatus": algoStatus,
+        "orderType": orderType,
+        "side": side,
+        "quantity": quantity,
+        "triggerPrice": triggerPrice,
+        "reduceOnly": reduceOnly,
+    }
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -221,14 +356,14 @@ def test_real_order_worker_writes_pending_before_submit_and_result(tmp_path: Pat
         if line.strip()
     ]
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "submitted_all_accepted"
     assert [event["event_type"] for event in events] == [
         "real_order_worker_command_pending",
         "real_order_worker_command_result",
     ]
     assert events[0]["payload"]["commands"][0]["idempotency_key"] == "entry_long:key"
     assert events[1]["payload"]["results"][0]["idempotency_key"] == "entry_long:key"
-    assert adapter.snapshots_fetched == 3
+    assert adapter.snapshots_fetched == 5
     assert [command.target for command in adapter.executed_commands] == ["entry_order"]
     assert not Path(args.lock_path).exists()
 
@@ -253,7 +388,7 @@ def test_real_order_worker_retries_protective_stop_after_entry(tmp_path: Path) -
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "submitted_all_accepted"
     assert [command.target for command in adapter.executed_commands] == [
         "entry_order",
         "maintain_protective_stop",
@@ -268,13 +403,49 @@ def test_real_order_worker_cancels_ghost_stop_before_entry(tmp_path: Path) -> No
     _write_package(Path(args.package_path))
     adapter = FakeRealOrderAdapter(
         protective_stop_present=True,
-        open_algo_orders=[{"algoId": "123", "clientAlgoId": "ghost-stop"}],
+        open_algo_orders=[_algo_order(algoId="123", clientAlgoId="ethbot-ps-ghost")],
     )
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
-    assert result["status"] == "submitted"
-    assert adapter.canceled_algo_orders == [{"algoId": "123", "clientAlgoId": "ghost-stop", "status": "canceled"}]
+    assert result["status"] == "submitted_all_accepted"
+    assert adapter.canceled_algo_orders == [{"algoId": "123", "clientAlgoId": "ethbot-ps-ghost", "status": "canceled"}]
+
+
+def test_real_order_worker_blocks_ghost_cleanup_when_external_algo_present(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path))
+    adapter = FakeRealOrderAdapter(
+        protective_stop_present=True,
+        open_algo_orders=[_algo_order(algoId="manual", clientAlgoId="manual-stop")],
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "blocked"
+    assert result["reason_codes"] == ["external_algo_order_present"]
+    assert adapter.canceled_algo_orders == []
+    assert adapter.executed_commands == []
+
+
+def test_real_order_worker_blocks_cleanup_for_bot_stop_with_wrong_side(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path), action="exit")
+    adapter = FakeRealOrderAdapter(
+        position_state="ENTERED",
+        direction="long",
+        protective_stop_present=True,
+        open_algo_orders=[_algo_order(algoId="bad-side", clientAlgoId="ethbot-ps-bad-side", side="BUY")],
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    assert result["results"][-1]["target"] == "cleanup_open_algo_orders"
+    assert result["results"][-1]["reason"] == "bot_algo_order_semantics_mismatch"
+    assert adapter.canceled_algo_orders == []
 
 
 def test_real_order_worker_blocks_entry_when_ghost_stop_cancel_fails(tmp_path: Path) -> None:
@@ -283,7 +454,7 @@ def test_real_order_worker_blocks_entry_when_ghost_stop_cancel_fails(tmp_path: P
     _write_package(Path(args.package_path))
     adapter = FakeRealOrderAdapter(
         protective_stop_present=True,
-        open_algo_orders=[{"algoId": "123", "clientAlgoId": "ghost-stop"}],
+        open_algo_orders=[_algo_order(algoId="123", clientAlgoId="ethbot-ps-ghost")],
         cancel_raises=True,
     )
 
@@ -302,13 +473,13 @@ def test_real_order_worker_cleans_algo_orders_after_exit(tmp_path: Path) -> None
         position_state="ENTERED",
         direction="long",
         protective_stop_present=True,
-        open_algo_orders=[{"algoId": "456", "clientAlgoId": "exit-cleanup"}],
+        open_algo_orders=[_algo_order(algoId="456", clientAlgoId="ethbot-ps-exit")],
     )
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
-    assert result["status"] == "submitted"
-    assert adapter.canceled_algo_orders == [{"algoId": "456", "clientAlgoId": "exit-cleanup", "status": "canceled"}]
+    assert result["status"] == "submitted_all_accepted"
+    assert adapter.canceled_algo_orders == [{"algoId": "456", "clientAlgoId": "ethbot-ps-exit", "status": "canceled"}]
 
 
 def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: Path) -> None:
@@ -331,17 +502,52 @@ def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: 
         position_state="ENTERED",
         direction="long",
         protective_stop_present=True,
-        open_algo_orders=[{"algoId": "789", "clientAlgoId": "old-stop"}],
+        open_algo_orders=[_algo_order(algoId="789", clientAlgoId="ethbot-ps-old")],
     )
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "submitted_all_accepted"
     assert [command.target for command in adapter.executed_commands] == [
         "reduce_order",
         "maintain_protective_stop",
     ]
-    assert adapter.canceled_algo_orders == [{"algoId": "789", "clientAlgoId": "old-stop", "status": "canceled"}]
+    assert adapter.canceled_algo_orders == [{"algoId": "789", "clientAlgoId": "ethbot-ps-old", "status": "canceled"}]
+
+
+def test_real_order_worker_reduce_cleanup_keeps_new_and_external_stops(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path), action="reduce")
+    package["execution_commands"].append(
+        {
+            "command_type": "order",
+            "operation": "upsert",
+            "target": "maintain_protective_stop",
+            "idempotency_key": "reduce-stop:key",
+            "reason": "protective_stop_required",
+            "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": []},
+        }
+    )
+    package["preflight"].append({"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""})
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = FakeRealOrderAdapter(
+        position_state="ENTERED",
+        direction="long",
+        protective_stop_present=True,
+        open_algo_orders=[
+            _algo_order(algoId="old", clientAlgoId="ethbot-ps-old"),
+            _algo_order(algoId="manual", clientAlgoId="manual-stop"),
+        ],
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "submitted_all_accepted"
+    assert adapter.canceled_algo_orders == [{"algoId": "old", "clientAlgoId": "ethbot-ps-old", "status": "canceled"}]
+    remaining_client_ids = {str(order.get("clientAlgoId") or "") for order in adapter.fetch_open_algo_orders_raw()}
+    assert "manual-stop" in remaining_client_ids
+    assert "ethbot-ps-reduce-stop-key" in remaining_client_ids
 
 
 def test_real_order_worker_repairs_missing_protective_stop_with_retry(tmp_path: Path) -> None:
@@ -353,12 +559,12 @@ def test_real_order_worker_repairs_missing_protective_stop_with_retry(tmp_path: 
         direction="long",
         protective_stop_present=False,
         stop_failures_before_success=1,
-        open_algo_orders=[{"algoId": "repair-stop", "clientAlgoId": "repair-stop"}],
+        open_algo_orders=[],
     )
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "submitted_all_accepted"
     assert [command.target for command in adapter.executed_commands] == [
         "maintain_protective_stop",
         "maintain_protective_stop",
@@ -369,20 +575,87 @@ def test_real_order_worker_requires_open_algo_confirmation_after_stop_place(tmp_
     args = _args(tmp_path)
     args.submit_real_orders = True
     _write_package(Path(args.package_path), action="protective_stop_repair")
-    adapter = FakeRealOrderAdapter(
-        position_state="ENTERED",
-        direction="long",
-        protective_stop_present=False,
-        open_algo_orders=[],
-    )
+    adapter = RejectingStopAdapter(position_state="ENTERED", direction="long", protective_stop_present=False)
 
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
     state = StateStore(tmp_path / "state.json").load()
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "all_failed"
     assert len(adapter.executed_commands) == 3
     assert state.execution_state is ExecutionLayerState.RECONCILING
     assert state.protective_stop_required is True
+
+
+def test_real_order_worker_rejects_unrelated_algo_as_stop_confirmation(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path), action="protective_stop_repair")
+    adapter = FakeRealOrderAdapter(
+        position_state="ENTERED",
+        direction="long",
+        protective_stop_present=False,
+        open_algo_orders=[_algo_order(algoId="manual", clientAlgoId="manual-stop")],
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "submitted_all_accepted"
+    assert len(adapter.executed_commands) == 1
+    assert result["results"][0]["details"]["protective_stop_confirmation"]["matched_order"]["clientAlgoId"].startswith("ethbot-ps-")
+
+
+def test_find_matching_protective_stop_rejects_wrong_direction_quantity_and_reduce_only() -> None:
+    command = ExecutionCommand.model_validate(
+        {
+            "command_type": "order",
+            "operation": "upsert",
+            "target": "maintain_protective_stop",
+            "idempotency_key": "stop:key",
+            "reason": "protective_stop_required",
+            "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": []},
+        }
+    )
+    result = CommandExecutionResult(
+        target="maintain_protective_stop",
+        status="accepted",
+        accepted=True,
+        simulated=False,
+        reason="protective_stop_required",
+        idempotency_key="stop:key",
+        client_order_id="ethbot-ps-stop-key",
+        exchange_order_id="algo-stop-key",
+        details={
+            "prepared_request": {
+                "params": {
+                    "clientAlgoId": "ethbot-ps-stop-key",
+                    "side": "SELL",
+                    "quantity": "0.048",
+                    "triggerPrice": "2910.0",
+                }
+            }
+        },
+    )
+
+    assert real_order_worker.find_matching_protective_stop(
+        command=command,
+        result=result,
+        open_algo_orders=[_algo_order(algoId="algo-stop-key", clientAlgoId="ethbot-ps-stop-key", side="BUY")],
+    ) is None
+    assert real_order_worker.find_matching_protective_stop(
+        command=command,
+        result=result,
+        open_algo_orders=[_algo_order(algoId="algo-stop-key", clientAlgoId="ethbot-ps-stop-key", quantity="0.001")],
+    ) is None
+    assert real_order_worker.find_matching_protective_stop(
+        command=command,
+        result=result,
+        open_algo_orders=[_algo_order(algoId="algo-stop-key", clientAlgoId="ethbot-ps-stop-key", reduceOnly=False)],
+    ) is None
+    assert real_order_worker.find_matching_protective_stop(
+        command=command,
+        result=result,
+        open_algo_orders=[_algo_order(algoId="algo-stop-key", clientAlgoId="ethbot-ps-stop-key")],
+    ) is not None
 
 
 def test_real_order_worker_blocks_repair_when_stop_already_present(tmp_path: Path) -> None:
@@ -438,9 +711,60 @@ def test_real_order_worker_success_clears_previous_api_failure_count(tmp_path: P
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: FakeRealOrderAdapter())
     state = StateStore(tmp_path / "state.json").load()
 
-    assert result["status"] == "submitted"
+    assert result["status"] == "submitted_all_accepted"
     assert state.consecutive_api_failure_count == 0
     assert state.last_api_failure_at == ""
+
+
+def test_real_order_worker_blocks_entry_if_kill_switch_appears_after_pending(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path))
+    adapter = FakeRealOrderAdapter(create_kill_switch_on_snapshot=(Path(args.kill_switch_path), 4))
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "all_failed"
+    assert result["results"][0]["reason"] == "kill_switch_enabled_before_submit"
+    assert adapter.executed_commands == []
+
+
+def test_real_order_worker_allows_stop_after_entry_when_kill_switch_appears(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path))
+    package["execution_commands"].append(
+        {
+            "command_type": "order",
+            "operation": "upsert",
+            "target": "maintain_protective_stop",
+            "idempotency_key": "stop:key",
+            "reason": "protective_stop_required",
+            "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": []},
+        }
+    )
+    package["preflight"].append({"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""})
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = FakeRealOrderAdapter(create_kill_switch_on_submit=Path(args.kill_switch_path))
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "submitted_all_accepted"
+    assert [command.target for command in adapter.executed_commands] == ["entry_order", "maintain_protective_stop"]
+    assert Path(args.kill_switch_path).exists()
+
+
+def test_real_order_worker_blocks_entry_if_position_changes_after_pending(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path))
+    adapter = FakeRealOrderAdapter(mutate_position_before_submit=("ENTERED", "long"))
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "all_failed"
+    assert result["results"][0]["reason"] == "live_position_not_flat_before_submit"
+    assert adapter.executed_commands == []
 
 
 def test_real_order_worker_blocks_replayed_idempotency_key(tmp_path: Path) -> None:
@@ -453,10 +777,47 @@ def test_real_order_worker_blocks_replayed_idempotency_key(tmp_path: Path) -> No
     first = real_order_worker.run_once(args=args, adapter_factory=lambda _: first_adapter)
     second = real_order_worker.run_once(args=args, adapter_factory=lambda _: second_adapter)
 
-    assert first["status"] == "submitted"
+    assert first["status"] == "submitted_all_accepted"
     assert second["status"] == "blocked"
     assert second["reason_codes"] == ["idempotency_key_already_completed"]
     assert second_adapter.executed_commands == []
+
+
+def test_real_order_worker_does_not_complete_failed_idempotency_key(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path), action="protective_stop_repair")
+    first_adapter = RejectingStopAdapter(position_state="ENTERED", direction="long", protective_stop_present=False)
+    second_adapter = FakeRealOrderAdapter(position_state="ENTERED", direction="long", protective_stop_present=False)
+
+    first = real_order_worker.run_once(args=args, adapter_factory=lambda _: first_adapter)
+    second = real_order_worker.run_once(args=args, adapter_factory=lambda _: second_adapter)
+
+    assert first["status"] == "all_failed"
+    assert second["status"] == "submitted_all_accepted"
+    assert [command.target for command in second_adapter.executed_commands] == ["maintain_protective_stop"]
+
+
+def test_real_order_worker_timeout_idempotency_requires_recovery(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path))
+    AuditLogger(args.audit_log_path).append(
+        event_type="real_order_worker_command_result",
+        payload={
+            "status": "all_failed",
+            "package_id": "previous-package",
+            "commands": [{"target": "entry_order", "idempotency_key": "entry_long:key"}],
+            "results": [{"target": "entry_order", "idempotency_key": "entry_long:key", "status": "timeout", "accepted": False, "error_kind": "timeout"}],
+        },
+    )
+    adapter = FakeRealOrderAdapter()
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "blocked"
+    assert result["reason_codes"] == ["pending_idempotency_key_requires_recovery"]
+    assert adapter.executed_commands == []
 
 
 def test_real_order_worker_blocks_pending_idempotency_key_until_recovery(tmp_path: Path) -> None:
@@ -493,6 +854,55 @@ def test_real_order_worker_blocks_fresh_duplicate_lock(tmp_path: Path) -> None:
 def test_real_order_worker_clears_stale_lock(tmp_path: Path) -> None:
     lock_path = tmp_path / "real_order_worker.lock"
     lock_path.write_text("stale", encoding="utf-8")
+    old_time = time.time() - 3600
+    os.utime(lock_path, (old_time, old_time))
+
+    with real_order_worker.WorkerLock(lock_path=lock_path, stale_after_sec=1):
+        assert lock_path.exists()
+
+    assert not lock_path.exists()
+
+
+def test_real_order_worker_keeps_stale_lock_when_worker_pid_is_live(tmp_path: Path) -> None:
+    lock_path = tmp_path / "real_order_worker.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": real_order_worker.WORKER_LOCK_OWNER,
+                "pid": os.getpid(),
+                "process_start_token": real_order_worker._process_start_token(os.getpid()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_time = time.time() - 3600
+    os.utime(lock_path, (old_time, old_time))
+
+    with pytest.raises(RuntimeError, match="already running"):
+        with real_order_worker.WorkerLock(lock_path=lock_path, stale_after_sec=1):
+            pass
+
+    assert lock_path.exists()
+
+
+def test_real_order_worker_clears_stale_lock_for_dead_worker_pid(tmp_path: Path) -> None:
+    lock_path = tmp_path / "real_order_worker.lock"
+    lock_path.write_text(
+        json.dumps({"owner": real_order_worker.WORKER_LOCK_OWNER, "pid": 999_999_999}),
+        encoding="utf-8",
+    )
+    old_time = time.time() - 3600
+    os.utime(lock_path, (old_time, old_time))
+
+    with real_order_worker.WorkerLock(lock_path=lock_path, stale_after_sec=1):
+        assert lock_path.exists()
+
+    assert not lock_path.exists()
+
+
+def test_real_order_worker_clears_stale_non_worker_lock_even_if_pid_is_live(tmp_path: Path) -> None:
+    lock_path = tmp_path / "real_order_worker.lock"
+    lock_path.write_text(json.dumps({"owner": "external-tool", "pid": os.getpid()}), encoding="utf-8")
     old_time = time.time() - 3600
     os.utime(lock_path, (old_time, old_time))
 

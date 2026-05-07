@@ -3,10 +3,17 @@ from __future__ import annotations
 import argparse
 import os
 import json
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from bot.atomic_io import atomic_write_json
 
 try:
     from .run_shadow_preflight_cycle import DEFAULT_QUANT_ROOT, ParsedArgs, default_output_root, run_cycle
@@ -388,8 +395,7 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, payload, sort_keys=True)
 
 
 if __name__ == "__main__":

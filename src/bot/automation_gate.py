@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action_enums import PositionAction
+from .risk_filter_contract import risk_filter_allows_real_entry
 
 ENTRY_ACTIONS = {
     PositionAction.ENTRY_LONG.value,
@@ -66,7 +67,10 @@ def evaluate_real_order_gate(
     if action not in ENTRY_ACTIONS and action not in HIGH_RISK_ACTIONS and action not in PROTECT_ACTIONS:
         reason_codes.append("action_not_executable")
 
-    if action in HIGH_RISK_ACTIONS:
+    if action == PositionAction.REDUCE.value:
+        reason_codes.append("real_reduce_not_implemented")
+        reason_codes.append("high_risk_auto_submit_not_enabled")
+    elif action in HIGH_RISK_ACTIONS:
         reason_codes.append("high_risk_auto_submit_not_enabled")
     elif action in PROTECT_ACTIONS:
         _append_protective_repair_gate_reasons(
@@ -107,7 +111,7 @@ def _append_entry_gate_reasons(
 ) -> None:
     if handoff.get("execution_allowed") is not True:
         reason_codes.append("execution_not_allowed")
-    if str(handoff.get("risk_filter_status") or "") != "pass":
+    if not risk_filter_allows_real_entry(handoff.get("risk_filter_status")):
         reason_codes.append("risk_filter_not_pass")
     if runtime_snapshot and runtime_snapshot.get("snapshot_valid") is not True:
         reason_codes.append("runtime_snapshot_invalid")

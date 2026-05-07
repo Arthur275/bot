@@ -41,8 +41,20 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     bot_cycle = _read_json(bot_scheduler_root / "latest_cycle.json")
     bot_state = _read_json(bot_runtime / "state_store.json")
     candidate = _read_json(bot_scheduler_root / "latest_candidate_execution_package.json")
+    json_source_quality = {
+        "bot_heartbeat": _json_read_status(bot_scheduler_root / "heartbeat.json"),
+        "bot_latest_cycle": _json_read_status(bot_scheduler_root / "latest_cycle.json"),
+        "bot_state": _json_read_status(bot_runtime / "state_store.json"),
+        "bot_candidate_package": _json_read_status(bot_scheduler_root / "latest_candidate_execution_package.json"),
+        "quant_heartbeat": _json_read_status(quant_scheduler_root / "heartbeat.json"),
+        "quant_research_health": _json_read_status(quant_scheduler_root / "research_health.json"),
+        "quant_factor_summary": _json_read_status(quant_analysis_root / "factor_summary.json"),
+        "quant_factor_ingest": _json_read_status(quant_analysis_root / "factor_ingest_latest.json"),
+        "quant_factor_governance": _json_read_status(quant_analysis_root / "factor_governance_summary.json"),
+    }
     worker_audit = _tail_jsonl(bot_runtime / "real_order_worker" / "audit.jsonl", limit=8)
     bot_samples = _jsonl_count(bot_scheduler_root / "samples.jsonl")
+    performance = _performance_summary(bot_runtime / "reports" / "protective_stop_replace" / "latest_preview.json")
 
     quant_heartbeat = _read_json(quant_scheduler_root / "heartbeat.json")
     research_health = _read_json(quant_scheduler_root / "research_health.json")
@@ -67,6 +79,14 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "bot_root": str(paths.bot_root),
             "quant_root": str(paths.quant_root),
             "kill_switch_path": str(kill_switch_path),
+        },
+        "data_quality": {
+            "json_sources": json_source_quality,
+            "json_source_issues": [
+                {"name": name, **status}
+                for name, status in json_source_quality.items()
+                if status["status"] not in {"ok", "missing"}
+            ],
         },
         "runtime": {
             "factor_collector": runtime_status(
@@ -145,6 +165,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 "reason_codes": bot_cycle.get("reason_codes", []),
             },
         },
+        "performance": performance,
         "decision_review": decision_review,
     }
 
@@ -213,11 +234,16 @@ def _worker_status(*, worker_audit: list[dict[str, Any]], candidate: dict[str, A
     latest = worker_audit[-1]
     payload = latest.get("payload") or {}
     status = str(payload.get("status") or "")
+    failed_statuses = {"partial_failed", "all_failed", "unknown_after_exception"}
     return runtime_status(
         generated_at=latest.get("generated_at"),
-        ok=status in {"submitted", "skipped"} or not status,
+        ok=status in {"submitted_all_accepted", "skipped"} or not status,
         stale_after_sec=15 * 60,
-        error="" if status != "blocked" else ",".join(payload.get("reason_codes") or ["blocked"]),
+        error=(
+            ",".join(payload.get("reason_codes") or [status])
+            if status == "blocked" or status in failed_statuses
+            else ""
+        ),
     )
 
 
@@ -233,6 +259,27 @@ def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "expires_at": candidate.get("expires_at", ""),
         "gate_allowed": bool((candidate.get("real_order_gate") or {}).get("allowed", False)),
         "command_targets": [item.get("target") for item in candidate.get("execution_commands") or []],
+    }
+
+
+def _performance_summary(preview_path: Path) -> dict[str, Any]:
+    preview = _read_json(preview_path)
+    snapshot = preview.get("snapshot") if isinstance(preview, dict) else {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    pnl_state = preview.get("pnl_state") if isinstance(preview, dict) else {}
+    pnl_state = pnl_state if isinstance(pnl_state, dict) else {}
+    position = snapshot.get("position") if isinstance(snapshot, dict) else {}
+    position = position if isinstance(position, dict) else {}
+    return {
+        "account_equity": snapshot.get("account_equity"),
+        "account_equity_source": snapshot.get("account_equity_source", ""),
+        "total_profit_usd": pnl_state.get("unrealized_pnl_usd"),
+        "total_profit_pct": pnl_state.get("unrealized_pnl_pct_on_margin"),
+        "price_vs_entry_pct": pnl_state.get("price_vs_entry_pct"),
+        "position_state": position.get("position_state", ""),
+        "mark_price": position.get("mark_price"),
+        "fetched_at": snapshot.get("fetched_at") or preview.get("created_at", ""),
+        "snapshot_valid": bool(snapshot.get("snapshot_valid", False)),
     }
 
 
@@ -370,13 +417,24 @@ def _duckdb_table_exists(conn: Any, table: str) -> bool:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    status = _json_read_status(path)
+    return status["payload"] if isinstance(status.get("payload"), dict) else {}
+
+
+def _json_read_status(path: Path) -> dict[str, Any]:
     try:
         if not path.exists():
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+            return {"status": "missing", "path": str(path), "payload": {}}
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"status": "read_error", "path": str(path), "error": str(exc), "payload": {}}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"status": "invalid_json", "path": str(path), "error": str(exc), "payload": {}}
+    if not isinstance(payload, dict):
+        return {"status": "not_object", "path": str(path), "payload": {}}
+    return {"status": "ok", "path": str(path), "payload": payload}
 
 
 def _tail_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:

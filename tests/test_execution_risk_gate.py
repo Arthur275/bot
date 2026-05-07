@@ -90,9 +90,42 @@ def test_execution_risk_gate_caps_small_probe_size() -> None:
     )
 
     assert decision.allowed is True
+    assert decision.requested_size_pct == 0.5
     assert decision.executable_size_pct == 0.02
+    assert decision.size_cap_source == "bot_execution_risk_gate"
+    assert decision.size_cap_reason == "max_probe_size_pct"
     assert decision.stop_distance_pct == 0.005
     assert decision.account_risk_pct == 0.002
+    assert "size_truncated_by_bot_risk_gate" in decision.reason_codes
+
+
+def test_execution_risk_gate_reports_probe_truncation_for_quant_8pct_request() -> None:
+    decision = ExecutionRiskGate(
+        ExecutionRiskGateConfig(
+            leverage=10,
+            entry_margin_budget_usdt=None,
+            max_account_risk_pct_per_trade=0.01,
+            max_probe_account_risk_pct=0.002,
+            max_probe_size_pct=0.02,
+            require_execution_allowed=True,
+        )
+    ).evaluate(
+        handoff={
+            "action": "small_probe",
+            "direction": "long",
+            "requested_size_pct": 0.08,
+            "position_size_pct": 0.08,
+            "initial_stop_loss": 0.99,
+            "execution_allowed": True,
+        }
+    )
+
+    assert decision.allowed is True
+    assert decision.requested_size_pct == 0.08
+    assert decision.executable_size_pct == 0.02
+    assert decision.size_cap_source == "bot_execution_risk_gate"
+    assert decision.size_cap_reason == "max_probe_size_pct"
+    assert "size_truncated_by_bot_risk_gate" in decision.reason_codes
 
 
 def test_execution_risk_gate_caps_technical_contrarian_probe_risk() -> None:
@@ -207,7 +240,10 @@ def test_execution_risk_gate_allows_when_rounded_exchange_qty_meets_min_qty() ->
     )
 
     assert decision.allowed is True
-    assert decision.reason_codes == ["execution_risk_gate_pass"]
+    assert decision.reason_codes == [
+        "execution_risk_gate_pass",
+        "size_truncated_by_bot_risk_gate",
+    ]
 
 
 def test_execution_risk_gate_uses_fixed_margin_budget_when_runtime_equity_is_available() -> None:

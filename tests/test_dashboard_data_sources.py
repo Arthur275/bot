@@ -352,7 +352,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "function clearElement(el)" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
     assert "setPill($(" in app_js
-    assert "color-scheme: light" in styles_css
+    assert "submitted_all_accepted" in app_js
+    assert "partial_failed" in app_js
+    assert "color-scheme: dark" in styles_css
     assert '"Microsoft YaHei UI"' in styles_css
     assert "width: min(100%, 1680px)" in styles_css
     assert ".dashboard-grid" in styles_css
@@ -410,6 +412,21 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         server.server_close()
 
 
+def test_dashboard_reports_invalid_json_source_quality(tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    heartbeat_path = bot_root / "runtime" / "bot_runtime_scheduler" / "heartbeat.json"
+    heartbeat_path.parent.mkdir(parents=True)
+    heartbeat_path.write_text("{not-json", encoding="utf-8")
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    heartbeat_quality = snapshot["data_quality"]["json_sources"]["bot_heartbeat"]
+    assert heartbeat_quality["status"] == "invalid_json"
+    assert heartbeat_quality["path"] == str(heartbeat_path)
+    assert any(item["name"] == "bot_heartbeat" and item["status"] == "invalid_json" for item in snapshot["data_quality"]["json_source_issues"])
+
+
 def test_dashboard_overview_cache_reuses_snapshot_within_ttl(monkeypatch, tmp_path: Path) -> None:
     bot_root = tmp_path / "bot"
     quant_root = tmp_path / "quant"
@@ -461,6 +478,27 @@ def test_decision_review_marks_missing_sources_as_watch(tmp_path: Path) -> None:
     assert review["data_source_quality"]["handoff_available"] is True
     assert review["data_source_quality"]["factor_lookup_available"] is False
     assert any(item["code"] == "factor_lookup_missing" for item in review["risk_findings"])
+
+
+def test_decision_review_prefers_handoff_source_run_id(tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        quant_root / "runtime" / "cycles" / "cycle-1" / "execution_handoff.json",
+        {
+            "generated_at": generated_at,
+            "run_id": "legacy-run",
+            "source_run_id": "explicit-source-run",
+            "supporting_factor_codes": [],
+            "opposing_factor_codes": [],
+            "veto_factor_codes": [],
+        },
+    )
+
+    review = build_decision_review(bot_root=bot_root, quant_root=quant_root, now=datetime.now(timezone.utc))
+
+    assert review["source_run_id"] == "explicit-source-run"
 
 
 def test_decision_review_rejects_dangerous_governance_suggestion_fields() -> None:

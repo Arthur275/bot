@@ -46,6 +46,7 @@ class AdapterRuntimeSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fetched_at: datetime | None = None
+    mark_price_fetched_at: datetime | None = None
     position: PositionSnapshot = Field(default_factory=PositionSnapshot)
     open_orders: list[OrderSnapshot] = Field(default_factory=list)
     protective_stop_present: bool = False
@@ -446,6 +447,14 @@ class BaseExchangeAdapter:
         generated_at = str((handoff or {}).get("generated_at") or "")
         action = str((handoff or {}).get("action") or "wait")
         direction = BaseExchangeAdapter._resolve_handoff_direction(handoff) or "neutral"
+        package_scope = str(
+            (handoff or {}).get("source_run_id")
+            or (handoff or {}).get("handoff_id")
+            or (handoff or {}).get("package_id")
+            or ""
+        )
+        if package_scope:
+            return f"{target}:{package_scope}:{generated_at}:{action}:{direction}"
         return f"{target}:{generated_at}:{action}:{direction}"
 
     @staticmethod
@@ -1042,6 +1051,8 @@ class RealExchangeAdapter(BaseExchangeAdapter):
 
 
 class BinancePerpAdapter(RealExchangeAdapter):
+    ENTRY_MARK_PRICE_MAX_AGE_SEC = 15.0
+
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         fetched_at = datetime.now().replace(microsecond=0)
         try:
@@ -1107,6 +1118,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
         account_equity, account_equity_source = self._extract_account_equity_with_source(account_payload)
         snapshot = AdapterRuntimeSnapshot(
             fetched_at=fetched_at,
+            mark_price_fetched_at=fetched_at if position_snapshot.mark_price is not None else None,
             position=position_snapshot,
             open_orders=open_orders,
             protective_stop_present=self._has_protective_stop(open_orders),
@@ -1253,7 +1265,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
             direction = "long"
         elif position_amt < 0:
             direction = "short"
-        entry_price = BinancePerpAdapter._to_optional_float((current or {}).get("entryPrice"))
+        entry_price = BinancePerpAdapter._to_optional_positive_float((current or {}).get("entryPrice"))
         leverage = BinancePerpAdapter._to_optional_int((current or {}).get("leverage"))
         size_pct = BinancePerpAdapter._resolve_position_size_pct(current=current, account_payload=account_payload, leverage=leverage)
         return PositionSnapshot(
@@ -1262,7 +1274,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
             size_pct=size_pct,
             position_amt=position_amt,
             entry_price=entry_price,
-            mark_price=BinancePerpAdapter._to_optional_float((current or {}).get("markPrice")),
+            mark_price=BinancePerpAdapter._to_optional_positive_float((current or {}).get("markPrice")),
             leverage=leverage,
         )
 
@@ -1276,10 +1288,10 @@ class BinancePerpAdapter(RealExchangeAdapter):
 
     @staticmethod
     def _resolve_position_size_pct(*, current: dict[str, Any], account_payload: Any, leverage: int | None) -> float:
-        notional = BinancePerpAdapter._to_optional_float(current.get("notional"))
+        notional = BinancePerpAdapter._to_optional_float_preserve_zero(current.get("notional"))
         if notional is None:
-            entry_price = BinancePerpAdapter._to_optional_float(current.get("entryPrice"))
-            position_amt = BinancePerpAdapter._to_optional_float(current.get("positionAmt"))
+            entry_price = BinancePerpAdapter._to_optional_positive_float(current.get("entryPrice"))
+            position_amt = BinancePerpAdapter._to_optional_float_preserve_zero(current.get("positionAmt"))
             if entry_price is not None and position_amt is not None:
                 notional = abs(entry_price * position_amt)
         if notional is None or notional <= 0.0:
@@ -1303,7 +1315,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
         if not isinstance(account_payload, dict):
             return None, ""
         for key in ("totalWalletBalance", "totalMarginBalance", "totalCrossWalletBalance"):
-            value = BinancePerpAdapter._to_optional_float(account_payload.get(key))
+            value = BinancePerpAdapter._to_optional_positive_float(account_payload.get(key))
             if value is not None and value > 0.0:
                 return value, key
         assets = account_payload.get("assets")
@@ -1314,7 +1326,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
                 if str(asset.get("asset") or "") != "USDT":
                     continue
                 for key in ("walletBalance", "marginBalance", "crossWalletBalance"):
-                    value = BinancePerpAdapter._to_optional_float(asset.get(key))
+                    value = BinancePerpAdapter._to_optional_positive_float(asset.get(key))
                     if value is not None and value > 0.0:
                         return value, f"assets.USDT.{key}"
         return None, ""
@@ -1335,8 +1347,8 @@ class BinancePerpAdapter(RealExchangeAdapter):
                     status=str(item.get("status") or "open"),
                     side=str(item.get("side") or ""),
                     reduce_only=reduce_only,
-                    price=BinancePerpAdapter._to_optional_float(item.get("price")),
-                    trigger_price=BinancePerpAdapter._to_optional_float(item.get("stopPrice")),
+                    price=BinancePerpAdapter._to_optional_positive_float(item.get("price")),
+                    trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("stopPrice")),
                 )
             )
         return orders
@@ -1360,8 +1372,8 @@ class BinancePerpAdapter(RealExchangeAdapter):
                     status=algo_status.lower(),
                     side=str(item.get("side") or ""),
                     reduce_only=reduce_only,
-                    price=BinancePerpAdapter._to_optional_float(item.get("price")),
-                    trigger_price=BinancePerpAdapter._to_optional_float(item.get("triggerPrice") or item.get("stopPrice")),
+                    price=BinancePerpAdapter._to_optional_positive_float(item.get("price")),
+                    trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("triggerPrice") or item.get("stopPrice")),
                 )
             )
         return orders
@@ -1372,12 +1384,20 @@ class BinancePerpAdapter(RealExchangeAdapter):
         return any(order.reduce_only and order.order_type in protective_types for order in open_orders)
 
     @staticmethod
-    def _to_optional_float(value: Any) -> float | None:
+    def _to_optional_float_preserve_zero(value: Any) -> float | None:
         try:
-            parsed = float(value)
+            return float(value)
         except (TypeError, ValueError):
             return None
-        return None if parsed == 0.0 else parsed
+
+    @staticmethod
+    def _to_optional_positive_float(value: Any) -> float | None:
+        parsed = BinancePerpAdapter._to_optional_float_preserve_zero(value)
+        if parsed is None or parsed <= 0.0:
+            return None
+        return parsed
+
+    _to_optional_float = _to_optional_positive_float
 
     @staticmethod
     def _to_optional_int(value: Any) -> int | None:
@@ -1439,7 +1459,10 @@ class BinancePerpAdapter(RealExchangeAdapter):
         account_equity = self._resolve_account_equity_for_entry(runtime_snapshot)
         symbol_contract = self._fetch_symbol_contract()
         leverage = self._resolve_entry_leverage(runtime_snapshot)
-        mark_price = self._resolve_entry_mark_price(symbol_contract=symbol_contract, runtime_snapshot=runtime_snapshot)
+        mark_price, mark_price_source, mark_price_age_sec = self._resolve_entry_mark_price(
+            symbol_contract=symbol_contract,
+            runtime_snapshot=runtime_snapshot,
+        )
         quantity = self._derive_entry_quantity(
             position_size_pct=position_size_pct,
             account_equity=account_equity,
@@ -1458,6 +1481,8 @@ class BinancePerpAdapter(RealExchangeAdapter):
                     **prepared.body,
                     "resolved_quantity": quantity,
                     "resolved_mark_price": format(mark_price, "f"),
+                    "mark_price_source": mark_price_source,
+                    "mark_price_age_sec": mark_price_age_sec,
                     "resolved_account_equity": format(account_equity, "f"),
                     "resolved_leverage": leverage,
                     "resolved_step_size": format(symbol_contract["step_size"], "f"),
@@ -1523,14 +1548,36 @@ class BinancePerpAdapter(RealExchangeAdapter):
         return leverage
 
     @staticmethod
-    def _resolve_entry_mark_price(*, symbol_contract: dict[str, Decimal], runtime_snapshot: AdapterRuntimeSnapshot) -> Decimal:
+    def _resolve_entry_mark_price(
+        *,
+        symbol_contract: dict[str, Decimal],
+        runtime_snapshot: AdapterRuntimeSnapshot,
+    ) -> tuple[Decimal, str, float | None]:
         runtime_mark_price = runtime_snapshot.position.mark_price
-        if runtime_mark_price is not None and runtime_mark_price > 0.0:
-            return Decimal(str(runtime_mark_price))
+        mark_price_timestamp = runtime_snapshot.mark_price_fetched_at or runtime_snapshot.fetched_at
+        mark_price_age_sec = BinancePerpAdapter._mark_price_age_sec(mark_price_timestamp)
+        if (
+            runtime_mark_price is not None
+            and runtime_mark_price > 0.0
+            and mark_price_age_sec is not None
+            and mark_price_age_sec <= BinancePerpAdapter.ENTRY_MARK_PRICE_MAX_AGE_SEC
+        ):
+            return Decimal(str(runtime_mark_price)), "runtime_snapshot", mark_price_age_sec
         mark_price = symbol_contract["mark_price"]
         if mark_price <= 0:
             raise BinanceRequestMappingError("Real entry order requires a positive mark price")
-        return mark_price
+        return mark_price, "premium_index", mark_price_age_sec
+
+    @staticmethod
+    def _mark_price_age_sec(mark_price_timestamp: datetime | None) -> float | None:
+        if mark_price_timestamp is None:
+            return None
+        now = (
+            datetime.now(mark_price_timestamp.tzinfo).replace(microsecond=0)
+            if mark_price_timestamp.tzinfo is not None
+            else datetime.now().replace(microsecond=0)
+        )
+        return max(0.0, (now - mark_price_timestamp.replace(microsecond=0)).total_seconds())
 
     def _fetch_account_equity_for_entry(self) -> Decimal:
         account_response = self._transport.send(

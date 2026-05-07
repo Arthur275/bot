@@ -34,7 +34,10 @@ class ExecutionRiskDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowed: bool = True
+    requested_size_pct: float = Field(default=0.0, ge=0.0, le=1.0)
     executable_size_pct: float = Field(default=0.0, ge=0.0, le=1.0)
+    size_cap_source: str = ""
+    size_cap_reason: str = ""
     stop_distance_pct: float | None = None
     account_risk_pct: float | None = None
     reason_codes: list[str] = Field(default_factory=list)
@@ -99,9 +102,14 @@ class ExecutionRiskGate:
             return self._blocked("stop_distance_invalid")
 
         budget_size = self._resolve_budget_size_pct(runtime_state)
+        requested_size = self._resolve_requested_size_pct(handoff)
+        size_cap_source = ""
+        size_cap_reason = ""
         reason_codes = ["execution_risk_gate_pass"]
         if budget_size is not None:
             executable_size = budget_size
+            size_cap_source = "fixed_margin_budget"
+            size_cap_reason = "entry_margin_budget_usdt"
             account_risk_pct = executable_size * float(self._config.leverage) * stop_distance
             reason_codes.append("fixed_margin_budget_sizing")
             if account_risk_pct > self._config.max_account_risk_pct_per_trade:
@@ -109,10 +117,16 @@ class ExecutionRiskGate:
         else:
             account_risk_pct = self._resolve_account_risk_pct(action=action, handoff=handoff)
             size_from_risk = account_risk_pct / stop_distance / float(self._config.leverage)
-            requested_size = self._resolve_requested_size_pct(handoff)
             executable_size = min(size_from_risk, requested_size) if requested_size > 0.0 else size_from_risk
+            size_cap_source = "account_risk_cap"
+            size_cap_reason = "account_risk_pct_per_trade"
             if action == PositionAction.SMALL_PROBE.value:
-                executable_size = min(executable_size, self._config.max_probe_size_pct)
+                probe_capped_size = min(executable_size, self._config.max_probe_size_pct)
+                if requested_size > probe_capped_size:
+                    reason_codes.append("size_truncated_by_bot_risk_gate")
+                    size_cap_source = "bot_execution_risk_gate"
+                    size_cap_reason = "max_probe_size_pct"
+                executable_size = probe_capped_size
         executable_size = max(0.0, min(1.0, round(executable_size, 6)))
         if executable_size <= 0.0:
             return self._blocked("executable_size_zero", stop_distance=stop_distance, account_risk_pct=account_risk_pct)
@@ -126,7 +140,10 @@ class ExecutionRiskGate:
             reason_codes.append(exchange_reason)
         return ExecutionRiskDecision(
             allowed=True,
+            requested_size_pct=round(requested_size, 6),
             executable_size_pct=executable_size,
+            size_cap_source=size_cap_source,
+            size_cap_reason=size_cap_reason,
             stop_distance_pct=round(stop_distance, 6),
             account_risk_pct=round(account_risk_pct, 6),
             reason_codes=reason_codes,
@@ -142,6 +159,9 @@ class ExecutionRiskGate:
         return max(0.0, account_risk)
 
     def _resolve_requested_size_pct(self, handoff: dict[str, Any]) -> float:
+        requested_size_pct = self._to_float(handoff.get("requested_size_pct"))
+        if requested_size_pct and requested_size_pct > 0.0:
+            return min(requested_size_pct, self._contrarian_size_cap(handoff))
         executable = self._to_float(handoff.get("executable_size_pct"))
         if executable and executable > 0.0:
             return min(executable, self._contrarian_size_cap(handoff))

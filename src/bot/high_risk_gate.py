@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import EngineMode, RuntimeMode
 from .network_guard import GuardDecision
+from .risk_filter_contract import classify_risk_filter_status, risk_filter_reason_code
 
 
 HighRiskAction = Literal["trailing", "reduce", "exit"]
@@ -153,8 +154,9 @@ class HighRiskGate:
             blocked.append("symbol_scope_mismatch")
         if handoff.position_state != "ENTERED":
             blocked.append("position_state_not_entered")
-        if handoff.risk_filter_status in {"blocked", "veto", "degraded"}:
-            blocked.append(f"risk_filter:{handoff.risk_filter_status}")
+        risk_filter_class = classify_risk_filter_status(handoff.risk_filter_status)
+        if risk_filter_class != "pass":
+            blocked.append(risk_filter_reason_code(handoff.risk_filter_status))
         blocked.extend(
             self._validate_snapshot(
                 handoff=handoff,

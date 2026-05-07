@@ -103,6 +103,18 @@ def test_high_risk_gate_blocks_network_degraded_for_all_actions(tmp_path) -> Non
     assert "network_unhealthy" in decision.reason_codes
 
 
+def test_high_risk_gate_blocks_all_non_pass_risk_filter_statuses(tmp_path) -> None:
+    for status in ("degraded", "unavailable", "research_unavailable", "veto", "blocked", "future_unknown"):
+        decision = _gate(tmp_path).evaluate(
+            raw_handoff=_handoff(risk_filter_status=status),
+            network_decision=_network(),
+            runtime_snapshot=_snapshot(),
+        )
+
+        assert decision.allowed is False
+        assert f"risk_filter:{status}" in decision.reason_codes
+
+
 def test_high_risk_gate_blocks_kill_switch_and_lock(tmp_path) -> None:
     (tmp_path / "disable_real_execution.flag").write_text("1", encoding="utf-8")
     (tmp_path / "high_risk_action.lock").write_text("lock", encoding="utf-8")

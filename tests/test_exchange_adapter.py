@@ -367,6 +367,34 @@ def test_exchange_adapter_uses_current_position_direction_in_idempotency_key() -
     assert key == "reduce_order:2026-04-26T12:17:30:reduce:long"
 
 
+def test_exchange_adapter_includes_source_run_id_in_new_idempotency_keys() -> None:
+    key = ExchangeAdapter()._build_idempotency_key(
+        target="entry_order",
+        handoff={
+            "source_run_id": "eth-15m-20260418T200900Z-a1b2c3d4",
+            "generated_at": "2026-04-26T12:17:30",
+            "action": "entry_long",
+            "direction": "long",
+        },
+    )
+
+    assert key == "entry_order:eth-15m-20260418T200900Z-a1b2c3d4:2026-04-26T12:17:30:entry_long:long"
+
+
+def test_exchange_adapter_uses_handoff_id_for_idempotency_when_source_run_id_missing() -> None:
+    key = ExchangeAdapter()._build_idempotency_key(
+        target="advance_trailing_stop",
+        handoff={
+            "handoff_id": "hr-eth-trailing-20260426121730",
+            "generated_at": "2026-04-26T12:17:30",
+            "action": "wait",
+            "current_position_direction": "short",
+        },
+    )
+
+    assert key == "advance_trailing_stop:hr-eth-trailing-20260426121730:2026-04-26T12:17:30:wait:short"
+
+
 def test_binance_entry_side_uses_direction_for_small_probe() -> None:
     command = ExchangeAdapter().build_commands(
         execution_plan=ExecutionPlan(
@@ -577,6 +605,134 @@ def test_real_exchange_adapter_preflight_entry_order_resolves_request_without_di
         "/fapi/v1/exchangeInfo",
         "/fapi/v1/premiumIndex",
     ]
+
+
+def test_real_exchange_adapter_preflight_entry_order_uses_fresh_runtime_mark_price(monkeypatch) -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3000.0",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "2500.0"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    monkeypatch.setattr(BinancePerpAdapter, "_mark_price_age_sec", staticmethod(lambda _: 5.0))
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:30:15",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.15,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    body = results[0].details["prepared_request"]["body"]
+    assert results[0].status == "preflight_ready"
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.050"
+    assert body["resolved_mark_price"] == "3000.0"
+    assert body["mark_price_source"] == "runtime_snapshot"
+    assert body["mark_price_age_sec"] == 5.0
+
+
+def test_real_exchange_adapter_preflight_entry_order_rejects_stale_runtime_mark_price(monkeypatch) -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload=[
+                    {
+                        "positionAmt": "0",
+                        "entryPrice": "0",
+                        "markPrice": "3000.0",
+                        "leverage": "10",
+                    }
+                ],
+            ),
+            TransportResponse(http_status=200, payload=[]),
+            TransportResponse(http_status=200, payload={"totalWalletBalance": "100.0"}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "filters": [
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}
+                            ],
+                        }
+                    ]
+                },
+            ),
+            TransportResponse(http_status=200, payload={"symbol": "ETHUSDT", "markPrice": "2500.0"}),
+        ]
+    )
+    signer = BinanceRequestSigner(
+        _credentials(),
+        env_getter=lambda key: {"BINANCE_API_KEY": "key123", "BINANCE_API_SECRET": "secret456"}.get(key),
+        clock=lambda: 1714132800000,
+    )
+    monkeypatch.setattr(BinancePerpAdapter, "_mark_price_age_sec", staticmethod(lambda _: 30.0))
+    adapter = BinancePerpAdapter(_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:30:30",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.15,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    body = results[0].details["prepared_request"]["body"]
+    assert results[0].status == "preflight_ready"
+    assert results[0].details["prepared_request"]["params"]["quantity"] == "0.060"
+    assert body["resolved_mark_price"] == "2500.0"
+    assert body["mark_price_source"] == "premium_index"
+    assert body["mark_price_age_sec"] == 30.0
 
 
 def test_real_exchange_adapter_preflight_entry_order_uses_executable_size_contract() -> None:
@@ -2766,6 +2922,14 @@ def test_binance_perp_adapter_keeps_zero_size_pct_when_account_equity_unavailabl
 
     assert snapshot.position.position_state == "ENTERED"
     assert snapshot.position.size_pct == 0.0
+
+
+def test_binance_perp_adapter_float_helpers_preserve_zero_only_for_diagnostics() -> None:
+    assert BinancePerpAdapter._to_optional_float_preserve_zero("0") == 0.0
+    assert BinancePerpAdapter._to_optional_float_preserve_zero("-1.25") == -1.25
+    assert BinancePerpAdapter._to_optional_positive_float("0") is None
+    assert BinancePerpAdapter._to_optional_positive_float("-1.25") is None
+    assert BinancePerpAdapter._to_optional_positive_float("3120.5") == 3120.5
 
 
 def test_binance_perp_adapter_returns_empty_runtime_snapshot_on_transport_error() -> None:

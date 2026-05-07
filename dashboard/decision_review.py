@@ -317,7 +317,7 @@ def _extract_risk_report(*, quant_root: Path, handoff: Mapping[str, Any]) -> dic
 
 
 def _resolve_source_run_id(*, handoff: Mapping[str, Any], handoff_path: Path | None) -> str:
-    for key in ("run_id", "source_run_id"):
+    for key in ("source_run_id", "run_id"):
         if handoff.get(key):
             return str(handoff[key])
     if handoff_path is not None:

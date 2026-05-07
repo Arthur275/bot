@@ -1,9 +1,29 @@
+import json
 from pathlib import Path
 
+import pytest
+
+from bot.atomic_io import atomic_write_json
 from bot.exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult, PositionSnapshot
 from bot.network_guard import GuardDecision
 from bot.automation_state import AutomationState
 from bot.state_store import BotRuntimeState, ExecutionLayerState, StateStore
+
+
+def test_atomic_write_json_preserves_existing_file_on_replace_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "state.json"
+    path.write_text('{"status": "old"}', encoding="utf-8")
+
+    def fail_replace(_src, _dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("bot.atomic_io.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_write_json(path, {"status": "new"})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "old"}
+    assert list(tmp_path.glob(".*.tmp")) == []
 
 
 def test_state_store_records_shadow_cycle_and_persists_state(tmp_path: Path) -> None:
@@ -976,9 +996,17 @@ def test_state_store_uses_handoff_fallback_for_state_and_direction_when_no_other
     store = StateStore(tmp_path / "state.json")
     updated = store.record_shadow_cycle(
         state=store.load(),
-        judgement={"status": "ok"},
+        judgement={
+            "status": "ok",
+            "decision": {
+                "generated_at": "2026-04-26T12:37:15",
+                "metadata": {"run_id": "cycle-123"},
+            },
+        },
         handoff={
             "generated_at": "2026-04-26T12:37:15",
+            "expires_at": "2026-04-26T12:40:15",
+            "source_run_id": "cycle-123",
             "action": "wait",
             "position_state": "ENTERED",
             "current_position_direction": "long",
@@ -999,8 +1027,83 @@ def test_state_store_uses_handoff_fallback_for_state_and_direction_when_no_other
     assert updated.observed_position_state == "ENTERED"
     assert updated.observed_position_direction == "long"
     assert updated.observed_position_size_pct == 0.2
+    assert updated.metadata["state_source"] == "handoff_fallback"
+    assert updated.metadata["handoff_fallback_source_run_id"] == "cycle-123"
     assert updated.execution_state is ExecutionLayerState.POSITION_OPEN
 
+
+
+def test_state_store_skips_expired_handoff_fallback(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok", "decision": {"generated_at": "2026-04-26T12:37:15"}},
+        handoff={
+            "generated_at": "2026-04-26T12:35:00",
+            "expires_at": "2026-04-26T12:36:00",
+            "action": "wait",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.2,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=None,
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_direction == "neutral"
+    assert updated.observed_position_size_pct == 0.0
+    assert updated.metadata["handoff_fallback_skipped"] is True
+    assert updated.metadata["handoff_fallback_skip_reason"] == "handoff_expired"
+    assert updated.execution_state is ExecutionLayerState.IDLE
+
+
+def test_state_store_skips_mismatched_source_run_id_handoff_fallback(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={
+            "status": "ok",
+            "decision": {
+                "generated_at": "2026-04-26T12:37:15",
+                "metadata": {"run_id": "cycle-current"},
+            },
+        },
+        handoff={
+            "generated_at": "2026-04-26T12:37:15",
+            "expires_at": "2026-04-26T12:40:15",
+            "source_run_id": "cycle-old",
+            "action": "wait",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.2,
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="wait",
+        execution_results=None,
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+    assert updated.observed_position_state == "FLAT"
+    assert updated.observed_position_direction == "neutral"
+    assert updated.observed_position_size_pct == 0.0
+    assert updated.metadata["handoff_fallback_skipped"] is True
+    assert updated.metadata["handoff_fallback_skip_reason"] == "source_run_id_mismatch"
+    assert updated.execution_state is ExecutionLayerState.IDLE
 
 
 def test_state_store_does_not_use_blocked_entry_handoff_as_observed_position(tmp_path: Path) -> None:

@@ -90,6 +90,23 @@ def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_pa
     assert len(samples) == 1
 
 
+def test_bot_runtime_scheduler_write_json_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "runtime" / "latest_cycle.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"status": "old"}', encoding="utf-8")
+
+    def fail_replace(_src, _dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(bot_runtime_scheduler.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        bot_runtime_scheduler._write_json(path, {"status": "new"})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "old"}
+    assert list(path.parent.glob(".*.tmp")) == []
+
+
 def test_bot_runtime_scheduler_enable_real_orders_still_blocks_shadow_payload(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.enable_real_orders = True

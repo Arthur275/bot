@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action_enums import PositionAction
@@ -68,11 +69,7 @@ class StateStore:
         return BotRuntimeState.model_validate(payload)
 
     def save(self, state: BotRuntimeState) -> BotRuntimeState:
-        self._output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._output_path.write_text(
-            json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_json(self._output_path, state.model_dump(mode="json"))
         return state
 
     def record_api_success(self, *, state: BotRuntimeState | None = None) -> BotRuntimeState:
@@ -132,6 +129,7 @@ class StateStore:
         previous_observed_position_size_pct = state.observed_position_size_pct
         self._apply_observed_position_inputs(
             next_state=next_state,
+            judgement=judgement,
             handoff=handoff,
             effective_action=effective_action,
             execution_results=execution_results,
@@ -204,6 +202,7 @@ class StateStore:
     def _apply_observed_position_inputs(
         *,
         next_state: BotRuntimeState,
+        judgement: dict[str, Any],
         handoff: dict[str, Any] | None,
         effective_action: str,
         execution_results: Sequence[CommandExecutionResult] | None,
@@ -233,16 +232,84 @@ class StateStore:
         entry_actions = {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}
         if requested_action in entry_actions and effective_action not in entry_actions:
             return
+        skip_reason = StateStore._handoff_fallback_skip_reason(handoff=handoff, judgement=judgement)
+        if skip_reason:
+            metadata = dict(next_state.metadata)
+            metadata["handoff_fallback_skipped"] = True
+            metadata["handoff_fallback_skip_reason"] = skip_reason
+            next_state.metadata = metadata
+            return
         fallback_state = str(handoff.get("position_state") or "")
         fallback_direction = str(handoff.get("current_position_direction") or "")
         fallback_size = handoff.get("position_size_pct")
         observed_size_pct = float(next_state.observed_position_size_pct)
+        used_fallback = False
         if fallback_state and next_state.observed_position_state in {"", "FLAT"} and observed_size_pct <= 0.0:
             next_state.observed_position_state = fallback_state
+            used_fallback = True
         if fallback_direction and next_state.observed_position_direction in {"", "neutral"} and observed_size_pct <= 0.0:
             next_state.observed_position_direction = fallback_direction
+            used_fallback = True
         if observed_size_pct <= 0.0 and fallback_size is not None:
             next_state.observed_position_size_pct = float(fallback_size)
+            used_fallback = True
+        if used_fallback:
+            metadata = dict(next_state.metadata)
+            metadata["state_source"] = "handoff_fallback"
+            metadata["handoff_fallback_generated_at"] = str(handoff.get("generated_at") or "")
+            metadata["handoff_fallback_source_run_id"] = StateStore._handoff_run_id(handoff)
+            next_state.metadata = metadata
+
+    @staticmethod
+    def _handoff_fallback_skip_reason(*, handoff: dict[str, Any], judgement: dict[str, Any]) -> str:
+        expires_at = StateStore._parse_datetime(handoff.get("expires_at"))
+        if expires_at is not None:
+            reference_time = StateStore._judgement_reference_time(judgement) or datetime.now().replace(microsecond=0)
+            if expires_at <= reference_time:
+                return "handoff_expired"
+        handoff_run_id = StateStore._handoff_run_id(handoff)
+        judgement_run_id = StateStore._judgement_run_id(judgement)
+        if handoff_run_id and judgement_run_id and handoff_run_id != judgement_run_id:
+            return "source_run_id_mismatch"
+        return ""
+
+    @staticmethod
+    def _handoff_run_id(handoff: dict[str, Any]) -> str:
+        return str(handoff.get("source_run_id") or handoff.get("run_id") or "").strip()
+
+    @staticmethod
+    def _judgement_run_id(judgement: dict[str, Any]) -> str:
+        for payload in StateStore._judgement_candidate_payloads(judgement):
+            run_id = str(payload.get("source_run_id") or payload.get("run_id") or "").strip()
+            if run_id:
+                return run_id
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                run_id = str(metadata.get("source_run_id") or metadata.get("run_id") or "").strip()
+                if run_id:
+                    return run_id
+        return ""
+
+    @staticmethod
+    def _judgement_reference_time(judgement: dict[str, Any]) -> datetime | None:
+        for payload in StateStore._judgement_candidate_payloads(judgement):
+            generated_at = StateStore._parse_datetime(payload.get("generated_at"))
+            if generated_at is not None:
+                return generated_at
+        return None
+
+    @staticmethod
+    def _judgement_candidate_payloads(judgement: dict[str, Any]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if isinstance(judgement, dict):
+            payloads.append(judgement)
+            decision = judgement.get("decision")
+            if isinstance(decision, dict):
+                payloads.append(decision)
+                nested_decision = decision.get("decision")
+                if isinstance(nested_decision, dict):
+                    payloads.append(nested_decision)
+        return payloads
 
     @staticmethod
     def _resolve_execution_state(

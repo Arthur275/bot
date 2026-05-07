@@ -96,6 +96,38 @@ def test_real_order_gate_blocks_entry_without_protective_stop_preflight() -> Non
     assert "protective_stop_preflight_not_ready" in decision.reason_codes
 
 
+def test_real_order_gate_blocks_all_non_pass_risk_filter_statuses() -> None:
+    for status in ("degraded", "unavailable", "research_unavailable", "veto", "blocked", "future_unknown"):
+        decision = evaluate_real_order_gate(
+            enable_real_orders=True,
+            payload={
+                "runtime_mode": "real",
+                "engine_mode": "strict-live",
+                "effective_action": "entry_long",
+                "handoff": {
+                    "execution_allowed": True,
+                    "risk_filter_status": status,
+                    "initial_stop_loss": 0.97,
+                },
+                "execution_plan": {
+                    "place_entry_order": True,
+                    "maintain_protective_stop": True,
+                },
+                "runtime_snapshot": {
+                    "snapshot_valid": True,
+                    "position": {"position_state": "FLAT"},
+                },
+                "preflight": [
+                    {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                    {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+                ],
+            },
+        )
+
+        assert decision.allowed is False
+        assert "risk_filter_not_pass" in decision.reason_codes
+
+
 def test_real_order_gate_blocks_high_risk_auto_submit_for_now() -> None:
     decision = evaluate_real_order_gate(
         enable_real_orders=True,
@@ -108,6 +140,22 @@ def test_real_order_gate_blocks_high_risk_auto_submit_for_now() -> None:
 
     assert decision.allowed is False
     assert "high_risk_auto_submit_not_enabled" in decision.reason_codes
+    assert "real_reduce_not_implemented" in decision.reason_codes
+
+
+def test_real_order_gate_blocks_exit_without_reduce_contract_reason() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload={
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "effective_action": "exit",
+        },
+    )
+
+    assert decision.allowed is False
+    assert "high_risk_auto_submit_not_enabled" in decision.reason_codes
+    assert "real_reduce_not_implemented" not in decision.reason_codes
 
 
 def test_real_order_gate_allows_protective_stop_repair_when_position_open_and_stop_missing() -> None:
