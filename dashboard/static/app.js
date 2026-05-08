@@ -611,7 +611,12 @@ function renderSummary(data) {
   const equity = performance.account_equity;
   $("summaryProfit").textContent = money(profit);
   $("summaryProfit").className = profitLevel(profit);
-  $("summaryProfitMeta").textContent = rawNumber(equity) === null ? "权益暂无" : `权益 ${money(equity)}`;
+  if (performance.ignored_source === "binance_usdt_perp") {
+    $("summaryProfitMeta").textContent = "OKX 权益暂无；已忽略 Binance 旧快照";
+  } else {
+    const source = performance.account_equity_source ? ` · ${displayCode(performance.account_equity_source)}` : "";
+    $("summaryProfitMeta").textContent = rawNumber(equity) === null ? "OKX 权益暂无" : `OKX 权益 ${money(equity)}${source}`;
+  }
   setText("summaryAction", quant.action);
   setText("summaryRisk", quant.risk_filter_status);
   setText("summaryCandidate", bot.candidate_package?.present ? "present" : "missing");

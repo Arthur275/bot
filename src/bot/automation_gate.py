@@ -113,7 +113,7 @@ def _append_entry_gate_reasons(
         reason_codes.append("execution_not_allowed")
     if not risk_filter_allows_real_entry(handoff.get("risk_filter_status")):
         reason_codes.append("risk_filter_not_pass")
-    if runtime_snapshot and runtime_snapshot.get("snapshot_valid") is not True:
+    if runtime_snapshot.get("snapshot_valid") is not True:
         reason_codes.append("runtime_snapshot_invalid")
     if str(position.get("position_state") or "FLAT") != "FLAT":
         reason_codes.append("live_position_not_flat")
@@ -144,7 +144,7 @@ def _append_protective_repair_gate_reasons(
     position: dict[str, Any],
     payload: dict[str, Any],
 ) -> None:
-    if runtime_snapshot and runtime_snapshot.get("snapshot_valid") is not True:
+    if runtime_snapshot.get("snapshot_valid") is not True:
         reason_codes.append("runtime_snapshot_invalid")
     if str(position.get("position_state") or "FLAT") != "ENTERED":
         reason_codes.append("live_position_not_entered")

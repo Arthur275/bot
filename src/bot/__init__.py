@@ -18,6 +18,7 @@ from .exchange_adapter import (
     ExecutionCommand,
     CommandExecutionResult,
     ExitOrderPayload,
+    OkxUsdtSwapAdapter,
     OrderSnapshot,
     PositionSnapshot,
     PreparedAdapterRequest,
@@ -30,6 +31,7 @@ from .exchange_adapter import (
     TrailingStopPayload,
 )
 from .network_guard import GuardDecision, NetworkGuard
+from .okx_transport import OkxRequestConfigError, OkxRequestSigner, OkxTransport, OkxTransportError
 from .orchestrator import RiskAssistCycleReport, ShadowCycleReport, ShadowOrchestrator
 from .position_manager import ExecutionPlan, PositionManager
 from .state_store import BotRuntimeState, ExecutionLayerState, StateStore
@@ -67,6 +69,11 @@ __all__ = [
     "ExitOrderPayload",
     "GuardDecision",
     "NetworkGuard",
+    "OkxRequestConfigError",
+    "OkxRequestSigner",
+    "OkxTransport",
+    "OkxTransportError",
+    "OkxUsdtSwapAdapter",
     "OrderSnapshot",
     "PositionManager",
     "PositionSnapshot",

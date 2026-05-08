@@ -10,8 +10,9 @@ def test_manual_entry_panel_renders_human_preview_with_risk_and_final_confirm_co
         proxy_url="http://127.0.0.1:7897",
         include_okx_overlay=True,
         include_coinglass_overlay=False,
-        api_key_env="BINANCE_TRADE_API_KEY",
-        api_secret_env="BINANCE_TRADE_API_SECRET",
+        api_key_env="OKX_TRADE_API_KEY",
+        api_secret_env="OKX_TRADE_API_SECRET",
+        api_passphrase_env="OKX_TRADE_PASSPHRASE",
     )
     payload = {
         "mode": "preview",
@@ -48,8 +49,8 @@ def test_manual_entry_panel_renders_human_preview_with_risk_and_final_confirm_co
             {
                 "target": "entry_order",
                 "status": "preflight_ready",
-                "side": "BUY",
-                "type": "MARKET",
+                "side": "buy",
+                "type": "market",
                 "quantity": "0.043",
             },
             {
@@ -101,8 +102,9 @@ def test_manual_entry_panel_suppresses_confirm_command_when_entry_preflight_not_
         proxy_url="http://127.0.0.1:7897",
         include_okx_overlay=True,
         include_coinglass_overlay=False,
-        api_key_env="BINANCE_TRADE_API_KEY",
-        api_secret_env="BINANCE_TRADE_API_SECRET",
+        api_key_env="OKX_TRADE_API_KEY",
+        api_secret_env="OKX_TRADE_API_SECRET",
+        api_passphrase_env="OKX_TRADE_PASSPHRASE",
     )
     payload = {
         "mode": "preview",
@@ -112,7 +114,7 @@ def test_manual_entry_panel_suppresses_confirm_command_when_entry_preflight_not_
         "runtime_snapshot": {
             "snapshot_valid": True,
             "account_equity": None,
-            "error_endpoint": "/fapi/v2/account",
+            "error_endpoint": "/api/v5/account/balance",
             "error_kind": "http_error",
             "error_message": "HTTP 400",
             "position": {"position_state": "FLAT", "direction": "neutral", "size_pct": 0.0, "leverage": 10},

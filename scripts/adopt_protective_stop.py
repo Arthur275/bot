@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 
+
 DEFAULT_STATE_PATH = "D:/开发/eth_trading_bot/runtime/shared_state/bot_state.json"
 DEFAULT_REPORT_ROOT = "D:/开发/eth_trading_bot/runtime/reports/protective_stop_adopt"
-ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED"}
-PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET"}
+ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED", "LIVE", "EFFECTIVE"}
+PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET", "CONDITIONAL"}
 
 BOT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE_PATH = str(BOT_ROOT / "runtime" / "shared_state" / "bot_state.json")
@@ -20,12 +21,13 @@ DEFAULT_REPORT_ROOT = str(BOT_ROOT / "runtime" / "reports" / "protective_stop_ad
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Preview or confirm adoption of an existing Binance protective algo stop.")
+    parser = argparse.ArgumentParser(description="Preview or confirm adoption of an existing protective algo stop.")
     parser.add_argument("--state-path", default=DEFAULT_STATE_PATH)
     parser.add_argument("--report-root", default=DEFAULT_REPORT_ROOT)
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
-    parser.add_argument("--api-key-env", default="BINANCE_TRADE_API_KEY")
-    parser.add_argument("--api-secret-env", default="BINANCE_TRADE_API_SECRET")
+    parser.add_argument("--api-key-env", default="OKX_TRADE_API_KEY")
+    parser.add_argument("--api-secret-env", default="OKX_TRADE_API_SECRET")
+    parser.add_argument("--api-passphrase-env", default="OKX_TRADE_PASSPHRASE")
     parser.add_argument("--confirm-token", default="")
     parser.add_argument("--preview-file", default="")
     parser.add_argument("--max-preview-age-sec", type=int, default=180)
@@ -46,7 +48,8 @@ def main() -> int:
 
 def run(*, args: argparse.Namespace) -> dict[str, Any]:
     from bot.config import BotConfig
-    from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter
+    from bot import exchange_adapter
+    from bot.exchange_adapter import AdapterCredentials
     from bot.state_store import StateStore
 
     now = datetime.now().replace(microsecond=0)
@@ -58,17 +61,24 @@ def run(*, args: argparse.Namespace) -> dict[str, Any]:
         audit_log_path=report_root / "adopt_audit.jsonl",
         artifacts_root=report_root / "artifacts",
         proxy_url=args.proxy_url or None,
+        exchange_venue="binance_usdt_perp" if str(args.api_key_env).startswith("BINANCE_") else "okx_usdt_swap",
+        exchange_symbol="ETHUSDT" if str(args.api_key_env).startswith("BINANCE_") else "ETH-USDT-SWAP",
+        exchange_api_base_url="https://fapi.binance.com" if str(args.api_key_env).startswith("BINANCE_") else "https://www.okx.com",
     )
-    adapter = BinancePerpAdapter(
-        AdapterCredentials(
-            venue=config.exchange_venue,
-            api_key_env=args.api_key_env,
-            api_secret_env=args.api_secret_env,
-            recv_window_ms=config.recv_window_ms,
-            timeout_sec=config.timeout_sec,
-            proxy_url=config.proxy_url,
-            api_base_url=config.exchange_api_base_url,
-        )
+    credentials = AdapterCredentials(
+        venue=config.exchange_venue,
+        api_key_env=args.api_key_env,
+        api_secret_env=args.api_secret_env,
+        api_passphrase_env=getattr(args, "api_passphrase_env", None) or getattr(config, "exchange_api_passphrase_env", ""),
+        recv_window_ms=config.recv_window_ms,
+        timeout_sec=config.timeout_sec,
+        proxy_url=config.proxy_url,
+        api_base_url=config.exchange_api_base_url,
+    )
+    adapter = (
+        exchange_adapter.OkxUsdtSwapAdapter(credentials)
+        if config.exchange_venue == "okx_usdt_swap"
+        else exchange_adapter.BinancePerpAdapter(credentials)
     )
     store = StateStore(state_path)
     state = store.load()
@@ -86,6 +96,9 @@ def run(*, args: argparse.Namespace) -> dict[str, Any]:
         previous_preview=previous_preview,
         confirm_token=str(args.confirm_token or ""),
         max_preview_age_sec=int(args.max_preview_age_sec),
+        api_key_env=credentials.api_key_env,
+        api_secret_env=credentials.api_secret_env,
+        api_passphrase_env=credentials.api_passphrase_env,
     )
     if mode == "confirm" and payload["adopt_ready"]:
         metadata = dict(state.metadata or {})
@@ -117,6 +130,9 @@ def _build_adopt_payload(
     previous_preview: dict[str, Any] | None,
     confirm_token: str,
     max_preview_age_sec: int,
+    api_key_env: str,
+    api_secret_env: str,
+    api_passphrase_env: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "mode": mode,
@@ -185,6 +201,9 @@ def _build_adopt_payload(
             report_root=report_root,
             token=payload["confirm_token"],
             preview_file=str(report_root / "latest_preview.json"),
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
+            api_passphrase_env=api_passphrase_env,
         )
 
     if mode == "confirm":
@@ -204,14 +223,40 @@ def _build_adopt_payload(
     return payload
 
 
+def _order_status(order: dict[str, Any]) -> str:
+    return str(order.get("algoStatus") or order.get("state") or order.get("status") or "").upper()
+
+
+def _order_type(order: dict[str, Any]) -> str:
+    return str(order.get("ordType") or order.get("orderType") or order.get("type") or "").upper()
+
+
+def _order_trigger_price(order: dict[str, Any]) -> Any:
+    return order.get("triggerPx") or order.get("triggerPrice") or order.get("stopPrice")
+
+
+def _order_quantity(order: dict[str, Any]) -> Any:
+    return order.get("sz") or order.get("quantity") or order.get("origQty")
+
+
+def _order_close_position(order: dict[str, Any]) -> bool:
+    return _to_bool(order.get("closePosition")) or str(order.get("closeFraction") or "") == "1"
+
+
+def _order_algo_id(order: dict[str, Any]) -> str:
+    return str(order.get("algoId") or order.get("ordId") or order.get("orderId") or "")
+
+
+def _order_client_algo_id(order: dict[str, Any]) -> str:
+    return str(order.get("algoClOrdId") or order.get("clientAlgoId") or order.get("clOrdId") or order.get("clientOrderId") or "")
+
+
 def _filter_protective_algo_orders(raw_orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     orders: list[dict[str, Any]] = []
     for item in raw_orders:
-        status = str(item.get("algoStatus") or item.get("status") or "").upper()
-        order_type = str(item.get("orderType") or item.get("type") or "").upper()
-        if status not in ACTIVE_ALGO_STATUSES:
+        if _order_status(item) not in ACTIVE_ALGO_STATUSES:
             continue
-        if order_type not in PROTECTIVE_ORDER_TYPES:
+        if _order_type(item) not in PROTECTIVE_ORDER_TYPES:
             continue
         orders.append(item)
     return orders
@@ -255,17 +300,17 @@ def _validate_snapshot_and_candidate(
     checks["side_matches"] = str(candidate.get("side") or "").upper() == expected_side
     if not checks["side_matches"]:
         blocked.append("side_mismatch")
-    close_position = _to_bool(candidate.get("closePosition"))
+    close_position = _order_close_position(candidate)
     checks["close_position"] = close_position
     if close_position:
         checks["quantity_matches"] = True
     else:
-        checks["quantity_matches"] = _decimal_equal(candidate.get("quantity"), abs(float(position.position_amt or 0.0)))
+        checks["quantity_matches"] = _decimal_equal(_order_quantity(candidate), abs(float(position.position_amt or 0.0)))
         if not checks["quantity_matches"]:
             blocked.append("quantity_mismatch")
-    if _to_decimal(candidate.get("triggerPrice") or candidate.get("stopPrice")) is None:
+    if _to_decimal(_order_trigger_price(candidate)) is None:
         blocked.append("trigger_price_missing")
-    if not str(candidate.get("algoId") or ""):
+    if not _order_algo_id(candidate):
         blocked.append("algo_id_missing")
     return checks
 
@@ -299,25 +344,25 @@ def _validate_confirm(
         blocked.append("state_path_mismatch")
     current = current_payload.get("candidate_order") or {}
     previous = previous_preview.get("candidate_order") or {}
-    for key in ("algoId", "clientAlgoId", "side", "orderType", "type", "triggerPrice", "stopPrice", "quantity", "closePosition"):
+    for key in ("algoId", "algoClOrdId", "clientAlgoId", "side", "ordType", "orderType", "type", "triggerPx", "triggerPrice", "stopPrice", "sz", "quantity", "closePosition", "closeFraction"):
         if _normalize_optional(current.get(key)) != _normalize_optional(previous.get(key)):
             blocked.append(f"candidate_{key}_changed")
     return checks
 
 
 def _build_adopt_record(*, candidate: dict[str, Any], snapshot: Any, preview_created_at: str, confirmed_at: str) -> dict[str, Any]:
-    close_position = _to_bool(candidate.get("closePosition"))
-    quantity = None if close_position else _to_optional_float(candidate.get("quantity"))
+    close_position = _order_close_position(candidate)
+    quantity = None if close_position else _to_optional_float(_order_quantity(candidate))
     return {
         "version": 1,
-        "venue": "binance_usdt_perp",
-        "symbol": "ETHUSDT",
-        "algo_id": str(candidate.get("algoId") or ""),
-        "client_algo_id": str(candidate.get("clientAlgoId") or ""),
+        "venue": "okx_usdt_swap" if str(candidate.get("instId") or "") == "ETH-USDT-SWAP" else "binance_usdt_perp",
+        "symbol": str(candidate.get("instId") or candidate.get("symbol") or ""),
+        "algo_id": _order_algo_id(candidate),
+        "client_algo_id": _order_client_algo_id(candidate),
         "side": str(candidate.get("side") or ""),
-        "order_type": str(candidate.get("orderType") or candidate.get("type") or ""),
-        "algo_status": str(candidate.get("algoStatus") or candidate.get("status") or ""),
-        "trigger_price": _to_optional_float(candidate.get("triggerPrice") or candidate.get("stopPrice")),
+        "order_type": _order_type(candidate),
+        "algo_status": _order_status(candidate),
+        "trigger_price": _to_optional_float(_order_trigger_price(candidate)),
         "close_position": close_position,
         "quantity": quantity,
         "position_amt_at_adopt": snapshot.position.position_amt,
@@ -333,21 +378,33 @@ def _build_confirm_token(*, state_path: Path, created_at: str, candidate: dict[s
     basis = {
         "state_path": str(state_path),
         "created_at": created_at,
-        "algo_id": str(candidate.get("algoId") or ""),
-        "client_algo_id": str(candidate.get("clientAlgoId") or ""),
-        "trigger_price": str(candidate.get("triggerPrice") or candidate.get("stopPrice") or ""),
+        "algo_id": _order_algo_id(candidate),
+        "client_algo_id": _order_client_algo_id(candidate),
+        "trigger_price": str(_order_trigger_price(candidate) or ""),
         "position_amt": str(snapshot.position.position_amt or ""),
     }
     serialized = "|".join(f"{key}={basis[key]}" for key in sorted(basis))
     return "ADOPT-" + sha256(serialized.encode("utf-8")).hexdigest()[:12].upper()
 
 
-def _build_confirm_command(*, args_state_path: Path, report_root: Path, token: str, preview_file: str) -> str:
+def _build_confirm_command(
+    *,
+    args_state_path: Path,
+    report_root: Path,
+    token: str,
+    preview_file: str,
+    api_key_env: str = "",
+    api_secret_env: str = "",
+    api_passphrase_env: str = "",
+) -> str:
     return (
         "python scripts\\adopt_protective_stop.py `\n"
         f"  --state-path {_quote_arg(str(args_state_path))} `\n"
         f"  --report-root {_quote_arg(str(report_root))} `\n"
         f"  --preview-file {_quote_arg(preview_file)} `\n"
+        f"  --api-key-env {_quote_arg(api_key_env)} `\n"
+        f"  --api-secret-env {_quote_arg(api_secret_env)} `\n"
+        f"  --api-passphrase-env {_quote_arg(api_passphrase_env)} `\n"
         f"  --confirm-token {token}"
     )
 
@@ -374,13 +431,13 @@ def render_panel(payload: dict[str, Any], *, args: argparse.Namespace) -> str:
         f"  Snapshot age: {_fmt(checks.get('snapshot_age_sec'))} sec",
         "",
         "Exchange Algo Stop",
-        f"  algoId: {candidate.get('algoId', '')}",
-        f"  clientAlgoId: {candidate.get('clientAlgoId', '')}",
-        f"  status: {candidate.get('algoStatus') or candidate.get('status') or ''}",
-        f"  side/type: {candidate.get('side', '')} {candidate.get('orderType') or candidate.get('type') or ''}",
-        f"  trigger: {_money(candidate.get('triggerPrice') or candidate.get('stopPrice'))}",
-        f"  closePosition: {_normalize_optional(candidate.get('closePosition'))}",
-        f"  quantity: {_normalize_optional(candidate.get('quantity'))}",
+        f"  algoId: {_order_algo_id(candidate)}",
+        f"  clientAlgoId: {_order_client_algo_id(candidate)}",
+        f"  status: {_order_status(candidate)}",
+        f"  side/type: {candidate.get('side', '')} {_order_type(candidate)}",
+        f"  trigger: {_money(_order_trigger_price(candidate))}",
+        f"  closePosition: {_normalize_optional(candidate.get('closePosition') or candidate.get('closeFraction'))}",
+        f"  quantity: {_normalize_optional(_order_quantity(candidate))}",
         "",
         "Checks",
         f"  Active protective order count: {checks.get('candidate_count', 1 if candidate else 0)}",

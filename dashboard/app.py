@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import argparse
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,7 +14,7 @@ from .data_sources import DashboardPaths, load_dashboard_snapshot
 
 DASHBOARD_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = DASHBOARD_ROOT / "static"
-OVERVIEW_CACHE_TTL_SEC = 1.0
+OVERVIEW_CACHE_TTL_SEC = 15.0
 
 
 class OverviewSnapshotCache:
@@ -22,17 +23,49 @@ class OverviewSnapshotCache:
         self._expires_at = 0.0
         self._key: tuple[str, str] | None = None
         self._payload: dict | None = None
+        self._refreshing = False
+        self._lock = threading.Lock()
 
     def get(self, paths: DashboardPaths) -> dict:
         now = time.monotonic()
         key = (str(paths.bot_root), str(paths.quant_root))
-        if self._payload is not None and self._key == key and now < self._expires_at:
-            return self._payload
+        refresh_stale = False
+        with self._lock:
+            payload = self._payload
+            cache_hit = payload is not None and self._key == key
+            fresh = cache_hit and now < self._expires_at
+            if fresh:
+                return payload
+            if cache_hit:
+                refresh_stale = not self._refreshing
+                if refresh_stale:
+                    self._refreshing = True
+        if cache_hit:
+            if refresh_stale:
+                self._refresh_async(paths, key)
+            return payload
         payload = load_dashboard_snapshot(paths)
+        with self._lock:
+            self._store(payload, key)
+        return payload
+
+    def _refresh_async(self, paths: DashboardPaths, key: tuple[str, str]) -> None:
+        thread = threading.Thread(target=self._refresh_worker, args=(paths, key), daemon=True)
+        thread.start()
+
+    def _refresh_worker(self, paths: DashboardPaths, key: tuple[str, str]) -> None:
+        try:
+            payload = load_dashboard_snapshot(paths)
+            with self._lock:
+                self._store(payload, key)
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+    def _store(self, payload: dict, key: tuple[str, str]) -> None:
         self._payload = payload
         self._key = key
-        self._expires_at = now + self.ttl_sec
-        return payload
+        self._expires_at = time.monotonic() + self.ttl_sec
 
 
 OVERVIEW_CACHE = OverviewSnapshotCache()

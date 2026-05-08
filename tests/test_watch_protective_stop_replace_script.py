@@ -259,6 +259,7 @@ def test_auto_confirm_replace_uses_preview_then_confirm(tmp_path: Path, monkeypa
         proxy_url="http://127.0.0.1:7897",
         api_key_env="BINANCE_TRADE_API_KEY",
         api_secret_env="BINANCE_TRADE_API_SECRET",
+        api_passphrase_env="",
         ready_buffer_pct=0.005,
         max_preview_age_sec=180,
     )

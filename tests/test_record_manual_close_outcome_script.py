@@ -15,7 +15,7 @@ class FakeTradeHistoryAdapter:
     def fetch_user_trades_raw(
         self,
         *,
-        symbol: str = "ETHUSDT",
+        symbol: str = "ETH-USDT-SWAP",
         limit: int = 100,
         start_time_ms: int | None = None,
         end_time_ms: int | None = None,
@@ -33,13 +33,14 @@ class FakeTradeHistoryAdapter:
 
 def _args(tmp_path: Path, *, dry_run: bool = True) -> argparse.Namespace:
     return argparse.Namespace(
-        symbol="ETHUSDT",
+        symbol="ETH-USDT-SWAP",
         timeframe="15m",
         limit=100,
         start_time="",
         end_time="",
-        api_key_env="BINANCE_TRADE_API_KEY",
-        api_secret_env="BINANCE_TRADE_API_SECRET",
+        api_key_env="OKX_TRADE_API_KEY",
+        api_secret_env="OKX_TRADE_API_SECRET",
+        api_passphrase_env="OKX_TRADE_PASSPHRASE",
         proxy_url=None,
         quant_root=str(tmp_path / "quant"),
         db_path=str(tmp_path / "quant" / "runtime" / "analysis" / "quant_analysis.duckdb"),
@@ -115,10 +116,10 @@ def test_run_dry_run_fetches_read_only_history_and_writes_manual_artifact(tmp_pa
     result = record_manual_close_outcome.run(args=_args(tmp_path), adapter=adapter)
 
     assert result["status"] == "dry_run"
-    assert adapter.requests == [{"symbol": "ETHUSDT", "limit": 100, "start_time_ms": None, "end_time_ms": None}]
+    assert adapter.requests == [{"symbol": "ETH-USDT-SWAP", "limit": 100, "start_time_ms": None, "end_time_ms": None}]
     payload = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
     assert payload["manual_close"] is True
-    assert payload["source"] == "binance_user_trades_read_only"
+    assert payload["source"] == "exchange_user_trades_read_only"
     assert payload["match"]["close_order_id"] == "12"
     assert payload["outcome"]["candidate_package_id"] == "manual_close"
     assert payload["outcome"]["status"] == "resolved"
@@ -147,3 +148,24 @@ def test_run_records_no_match_without_outcome(tmp_path: Path) -> None:
     payload = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
     assert payload["status"] == "no_match"
     assert "outcome" not in payload
+
+
+def test_build_adapter_uses_binance_env_names_for_legacy_ethusdt(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeBinanceAdapter:
+        def __init__(self, credentials) -> None:
+            captured["credentials"] = credentials
+
+    monkeypatch.setattr(record_manual_close_outcome, "BinancePerpAdapter", FakeBinanceAdapter)
+    args = _args(tmp_path)
+    args.symbol = "ETHUSDT"
+
+    adapter = record_manual_close_outcome._build_adapter(args)
+
+    assert isinstance(adapter, FakeBinanceAdapter)
+    credentials = captured["credentials"]
+    assert credentials.venue == "binance_usdt_perp"
+    assert credentials.api_key_env == "BINANCE_TRADE_API_KEY"
+    assert credentials.api_secret_env == "BINANCE_TRADE_API_SECRET"
+    assert credentials.api_passphrase_env == ""

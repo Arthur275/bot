@@ -37,8 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-root", default=DEFAULT_REPLACE_REPORT_ROOT)
     parser.add_argument("--watch-report-root", default=DEFAULT_WATCH_REPORT_ROOT)
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
-    parser.add_argument("--api-key-env", default="BINANCE_TRADE_API_KEY")
-    parser.add_argument("--api-secret-env", default="BINANCE_TRADE_API_SECRET")
+    parser.add_argument("--api-key-env", default="OKX_TRADE_API_KEY")
+    parser.add_argument("--api-secret-env", default="OKX_TRADE_API_SECRET")
+    parser.add_argument("--api-passphrase-env", default="OKX_TRADE_PASSPHRASE")
     parser.add_argument("--watch-interval-sec", type=float, default=30.0)
     parser.add_argument("--ready-buffer-pct", type=float, default=0.005)
     parser.add_argument("--reset-buffer-pct", type=float, default=0.003)
@@ -59,7 +60,7 @@ def main() -> int:
 
 def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: Any | None = None, sleep_fn: Any = time.sleep) -> int:
     from bot.config import BotConfig
-    from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter
+    from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter, OkxUsdtSwapAdapter
     from bot.state_store import StateStore
 
     state_path = Path(args.state_path)
@@ -72,18 +73,21 @@ def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: An
             audit_log_path=watch_report_root / "watch_audit.jsonl",
             artifacts_root=watch_report_root / "artifacts",
             proxy_url=args.proxy_url or None,
+            exchange_venue="binance_usdt_perp" if str(args.api_key_env).startswith("BINANCE_") else "okx_usdt_swap",
+            exchange_symbol="ETHUSDT" if str(args.api_key_env).startswith("BINANCE_") else "ETH-USDT-SWAP",
+            exchange_api_base_url="https://fapi.binance.com" if str(args.api_key_env).startswith("BINANCE_") else "https://www.okx.com",
         )
-        adapter = BinancePerpAdapter(
-            AdapterCredentials(
-                venue=config.exchange_venue,
-                api_key_env=args.api_key_env,
-                api_secret_env=args.api_secret_env,
-                recv_window_ms=config.recv_window_ms,
-                timeout_sec=config.timeout_sec,
-                proxy_url=config.proxy_url,
-                api_base_url=config.exchange_api_base_url,
-            )
+        credentials = AdapterCredentials(
+            venue=config.exchange_venue,
+            api_key_env=args.api_key_env,
+            api_secret_env=args.api_secret_env,
+            api_passphrase_env=getattr(args, "api_passphrase_env", None) or config.exchange_api_passphrase_env,
+            recv_window_ms=config.recv_window_ms,
+            timeout_sec=config.timeout_sec,
+            proxy_url=config.proxy_url,
+            api_base_url=config.exchange_api_base_url,
         )
+        adapter = OkxUsdtSwapAdapter(credentials) if config.exchange_venue == "okx_usdt_swap" else BinancePerpAdapter(credentials)
     if state_store is None:
         state_store = StateStore(state_path)
 
@@ -428,6 +432,7 @@ def _replace_args_from_watch(
         proxy_url=str(args.proxy_url or ""),
         api_key_env=str(args.api_key_env),
         api_secret_env=str(args.api_secret_env),
+        api_passphrase_env=str(getattr(args, "api_passphrase_env", "")),
         target_mode="ratchet",
         allow_missing_repair=bool(getattr(args, "allow_missing_repair", False)),
         min_profit_lock_pct=0.003,

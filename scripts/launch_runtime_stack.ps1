@@ -5,7 +5,7 @@ param(
     [int]$WorkerIntervalSec = 30,
     [string]$ProxyUrl = "http://127.0.0.1:7897",
     [switch]$EnableRealOrders,
-    [switch]$IncludeCoinglassOverlay
+    [switch]$DisableCoinglassOverlay
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,10 +64,12 @@ $quantCycleArgs = @(
     "15m",
     "--proxy-url",
     $ProxyUrl,
-    "--include-okx-overlay"
+    "--include-okx-overlay",
+    "--include-coinglass-overlay"
 )
-if ($IncludeCoinglassOverlay) {
-    $quantCycleArgs += "--include-coinglass-overlay"
+if ($DisableCoinglassOverlay) {
+    $quantCycleArgs = @($quantCycleArgs | Where-Object { $_ -ne "--include-coinglass-overlay" })
+    $quantCycleArgs += "--no-include-coinglass-overlay"
 }
 $quantCycleArgText = ($quantCycleArgs | ForEach-Object { "'$_'" }) -join " "
 $quantCycleCommand = "& '$Python' $quantCycleArgText"
@@ -91,10 +93,16 @@ $botSchedulerCommand = @(
     "-Action start",
     "-IntervalSec $IntervalSec",
     "-RuntimeRoot '$BotRuntimeRoot'",
-    "-AnalysisDbPath '$BotRuntimeRoot\analysis\bot_runtime.duckdb'"
+    "-AnalysisDbPath '$BotRuntimeRoot\analysis\bot_runtime.duckdb'",
+    "-ApiKeyEnv OKX_TRADE_API_KEY",
+    "-ApiSecretEnv OKX_TRADE_API_SECRET",
+    "-ApiPassphraseEnv OKX_TRADE_PASSPHRASE"
 )
 if ($EnableRealOrders) {
     $botSchedulerCommand += "-EnableRealOrders"
+}
+if ($DisableCoinglassOverlay) {
+    $botSchedulerCommand += "-DisableCoinglassOverlay"
 }
 $botSchedulerCommand = $botSchedulerCommand -join " "
 

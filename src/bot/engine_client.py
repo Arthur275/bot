@@ -49,9 +49,12 @@ class EngineClient:
             timeframe=self._config.timeframe,
             mode=self._config.engine_mode.value,
             timeout_sec=self._config.timeout_sec,
-            include_coinglass_overlay=self._config.include_coinglass_overlay,
+            include_coinglass_overlay=self._config.resolved_include_coinglass_overlay,
             include_okx_overlay=self._config.include_okx_overlay,
             proxy_url=self._config.proxy_url,
+            consensus_mode=self._config.consensus_mode,
+            consensus_min_sources=self._config.consensus_min_sources,
+            consensus_request_timeout_sec=self._config.consensus_request_timeout_sec,
             calibration_path=str(self._config.calibration_path) if self._config.calibration_path else None,
             sample_root=str(self._config.sample_root) if self._config.sample_root else None,
             research_sync_request_path=str(self._config.research_sync_request_path)

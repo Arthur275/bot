@@ -84,6 +84,7 @@ def _args(tmp_path: Path, handoff_file: Path) -> Namespace:
         proxy_url="http://127.0.0.1:7897",
         api_key_env="BINANCE_TRADE_API_KEY",
         api_secret_env="BINANCE_TRADE_API_SECRET",
+        api_passphrase_env="",
         kill_switch_path=str(tmp_path / "disable_real_execution.flag"),
         lock_path=str(tmp_path / "high_risk_action.lock"),
         json=False,

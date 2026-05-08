@@ -54,7 +54,10 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     }
     worker_audit = _tail_jsonl(bot_runtime / "real_order_worker" / "audit.jsonl", limit=8)
     bot_samples = _jsonl_count(bot_scheduler_root / "samples.jsonl")
-    performance = _performance_summary(bot_runtime / "reports" / "protective_stop_replace" / "latest_preview.json")
+    performance = _performance_summary(
+        bot_cycle=bot_cycle,
+        preview_path=bot_runtime / "reports" / "protective_stop_replace" / "latest_preview.json",
+    )
 
     quant_heartbeat = _read_json(quant_scheduler_root / "heartbeat.json")
     research_health = _read_json(quant_scheduler_root / "research_health.json")
@@ -279,8 +282,29 @@ def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _performance_summary(preview_path: Path) -> dict[str, Any]:
+def _performance_summary(*, bot_cycle: dict[str, Any], preview_path: Path) -> dict[str, Any]:
+    cycle_summary = _performance_from_bot_cycle(bot_cycle)
+    if cycle_summary["ignored_source"]:
+        return cycle_summary
+    if cycle_summary["account_equity"] is not None or cycle_summary["total_profit_usd"] is not None:
+        return cycle_summary
+
     preview = _read_json(preview_path)
+    if _preview_venue(preview) == "binance_usdt_perp":
+        return {
+            "account_equity": None,
+            "account_equity_source": "",
+            "total_profit_usd": None,
+            "total_profit_pct": None,
+            "price_vs_entry_pct": None,
+            "position_state": "",
+            "mark_price": None,
+            "fetched_at": "",
+            "snapshot_valid": False,
+            "source": "unavailable",
+            "ignored_source": "binance_usdt_perp",
+        }
+
     snapshot = preview.get("snapshot") if isinstance(preview, dict) else {}
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     pnl_state = preview.get("pnl_state") if isinstance(preview, dict) else {}
@@ -297,7 +321,108 @@ def _performance_summary(preview_path: Path) -> dict[str, Any]:
         "mark_price": position.get("mark_price"),
         "fetched_at": snapshot.get("fetched_at") or preview.get("created_at", ""),
         "snapshot_valid": bool(snapshot.get("snapshot_valid", False)),
+        "source": "protective_stop_preview",
+        "ignored_source": "",
     }
+
+
+def _performance_from_bot_cycle(bot_cycle: dict[str, Any]) -> dict[str, Any]:
+    runtime_snapshot = bot_cycle.get("runtime_snapshot") if isinstance(bot_cycle, dict) else {}
+    runtime_snapshot = runtime_snapshot if isinstance(runtime_snapshot, dict) else {}
+    position = runtime_snapshot.get("position") if isinstance(runtime_snapshot, dict) else {}
+    position = position if isinstance(position, dict) else {}
+    venue = _cycle_venue(bot_cycle, runtime_snapshot)
+    if venue == "binance_usdt_perp":
+        return {
+            "account_equity": None,
+            "account_equity_source": "",
+            "total_profit_usd": None,
+            "total_profit_pct": None,
+            "price_vs_entry_pct": None,
+            "position_state": "",
+            "mark_price": None,
+            "fetched_at": runtime_snapshot.get("fetched_at") or bot_cycle.get("finished_at") or "",
+            "snapshot_valid": False,
+            "source": "unavailable",
+            "ignored_source": "binance_usdt_perp",
+        }
+    return {
+        "account_equity": _first_present(
+            bot_cycle.get("runtime_account_equity"),
+            runtime_snapshot.get("account_equity"),
+        ),
+        "account_equity_source": _first_present(
+            bot_cycle.get("runtime_account_equity_source"),
+            runtime_snapshot.get("account_equity_source"),
+        ) or "",
+        "total_profit_usd": _first_present(
+            bot_cycle.get("runtime_unrealized_pnl_usd"),
+            bot_cycle.get("unrealized_pnl_usd"),
+            position.get("unrealized_pnl_usd"),
+            position.get("unrealized_profit"),
+        ),
+        "total_profit_pct": _first_present(
+            bot_cycle.get("runtime_unrealized_pnl_pct"),
+            bot_cycle.get("unrealized_pnl_pct_on_margin"),
+            position.get("unrealized_pnl_pct_on_margin"),
+        ),
+        "price_vs_entry_pct": _first_present(bot_cycle.get("price_vs_entry_pct"), position.get("price_vs_entry_pct")),
+        "position_state": position.get("position_state") or bot_cycle.get("runtime_position_state") or "",
+        "mark_price": _first_present(bot_cycle.get("runtime_mark_price"), position.get("mark_price")),
+        "fetched_at": runtime_snapshot.get("fetched_at") or bot_cycle.get("finished_at") or "",
+        "snapshot_valid": bool(runtime_snapshot.get("snapshot_valid", False)),
+        "source": "bot_latest_cycle",
+        "ignored_source": "",
+    }
+
+
+def _cycle_venue(bot_cycle: dict[str, Any], runtime_snapshot: dict[str, Any]) -> str:
+    venue = str(
+        _first_present(
+            bot_cycle.get("exchange_venue"),
+            runtime_snapshot.get("exchange_venue"),
+            runtime_snapshot.get("venue"),
+        )
+        or ""
+    )
+    if venue:
+        return venue
+    symbol = str(
+        _first_present(
+            bot_cycle.get("exchange_symbol"),
+            runtime_snapshot.get("exchange_symbol"),
+            runtime_snapshot.get("symbol"),
+            _nested(runtime_snapshot, "position", "symbol"),
+        )
+        or ""
+    )
+    if symbol == "ETHUSDT":
+        return "binance_usdt_perp"
+    if symbol == "ETH-USDT-SWAP":
+        return "okx_usdt_swap"
+    return ""
+
+
+def _preview_venue(preview: Any) -> str:
+    if not isinstance(preview, dict):
+        return ""
+    candidates = [
+        preview.get("venue"),
+        preview.get("exchange_venue"),
+        _nested(preview, "recorded_protective_stop", "venue"),
+        _nested(preview, "existing_record", "venue"),
+        _nested(preview, "new_protective_stop_record", "venue"),
+    ]
+    symbol = _nested(preview, "snapshot", "position", "symbol") or _nested(preview, "recorded_protective_stop", "symbol")
+    for value in candidates:
+        venue = str(value or "")
+        if venue:
+            return venue
+    if str(symbol or "") == "ETHUSDT":
+        return "binance_usdt_perp"
+    if str(symbol or "") == "ETH-USDT-SWAP":
+        return "okx_usdt_swap"
+    return ""
 
 
 def _read_latest_lookup(quant_root: Path) -> dict[str, Any]:

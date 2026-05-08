@@ -25,15 +25,19 @@ def _build_cycle_args(args: argparse.Namespace, output_root: Path) -> ParsedArgs
     cycle_args.output_root = str(output_root)
     cycle_args.proxy_url = args.proxy_url
     cycle_args.include_okx_overlay = bool(args.include_okx_overlay)
-    cycle_args.include_coinglass_overlay = bool(args.include_coinglass_overlay)
+    cycle_args.include_coinglass_overlay = args.include_coinglass_overlay
     cycle_args.api_key_env = args.api_key_env
     cycle_args.api_secret_env = args.api_secret_env
+    cycle_args.api_passphrase_env = getattr(args, "api_passphrase_env", None)
     return cycle_args
 
 
 def _summarize_sample(*, sample_id: int, payload: dict[str, Any], started_at: datetime, status: str, error: str = "") -> dict[str, Any]:
     handoff = payload.get("handoff") or {}
     execution_plan = payload.get("execution_plan") or {}
+    runtime_snapshot = payload.get("runtime_snapshot") or {}
+    runtime_position = runtime_snapshot.get("position") if isinstance(runtime_snapshot, dict) else {}
+    runtime_position = runtime_position if isinstance(runtime_position, dict) else {}
     summary = {
         "sample_id": sample_id,
         "started_at": started_at.isoformat(timespec="seconds"),
@@ -60,6 +64,14 @@ def _summarize_sample(*, sample_id: int, payload: dict[str, Any], started_at: da
         "preflight_error": payload.get("preflight_error") or "",
         "reason_codes": payload.get("reason_codes") or [],
         "judgement": payload.get("judgement") or {},
+        "exchange_venue": payload.get("exchange_venue") or "",
+        "exchange_symbol": payload.get("exchange_symbol") or "",
+        "runtime_snapshot": runtime_snapshot,
+        "runtime_account_equity": runtime_snapshot.get("account_equity") if isinstance(runtime_snapshot, dict) else None,
+        "runtime_account_equity_source": runtime_snapshot.get("account_equity_source") if isinstance(runtime_snapshot, dict) else "",
+        "runtime_unrealized_pnl_usd": runtime_position.get("unrealized_pnl_usd"),
+        "runtime_unrealized_pnl_pct": runtime_position.get("unrealized_pnl_pct_on_margin"),
+        "price_vs_entry_pct": runtime_position.get("price_vs_entry_pct"),
         "audit_log_path": payload.get("audit_log_path"),
         "state_path": payload.get("state_path"),
     }
@@ -70,15 +82,16 @@ def _summarize_sample(*, sample_id: int, payload: dict[str, Any], started_at: da
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sample quant strict-live -> bot shadow -> Binance preflight repeatedly.")
+    parser = argparse.ArgumentParser(description="Sample quant strict-live -> bot shadow -> OKX preflight repeatedly.")
     parser.add_argument("--quant-root", default=DEFAULT_QUANT_ROOT)
     parser.add_argument("--sample-root", default=_default_sample_root())
     parser.add_argument("--cycle-output-root", default=default_output_root())
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
     parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--api-key-env", default=None)
     parser.add_argument("--api-secret-env", default=None)
+    parser.add_argument("--api-passphrase-env", default=None)
     parser.add_argument("--interval-sec", type=int, default=900)
     parser.add_argument("--samples", type=int, default=96)
     args = parser.parse_args()

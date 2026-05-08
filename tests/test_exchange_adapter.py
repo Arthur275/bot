@@ -18,8 +18,10 @@ from bot.exchange_adapter import (
     RecentFillsPayload,
     ReconciliationPayload,
     ReduceOrderPayload,
+    OkxUsdtSwapAdapter,
     TrailingStopPayload,
 )
+from bot.okx_transport import OkxRequestConfigError, OkxRequestSigner, OkxTransportError
 from bot.position_manager import ExecutionPlan
 
 
@@ -68,6 +70,19 @@ def _credentials() -> AdapterCredentials:
         timeout_sec=15.0,
         proxy_url="http://127.0.0.1:7897",
         api_base_url="https://fapi.binance.com",
+    )
+
+
+def _okx_credentials() -> AdapterCredentials:
+    return AdapterCredentials(
+        venue="okx_usdt_swap",
+        api_key_env="OKX_API_KEY",
+        api_secret_env="OKX_API_SECRET",
+        api_passphrase_env="OKX_API_PASSPHRASE",
+        recv_window_ms=5000,
+        timeout_sec=15.0,
+        proxy_url="http://127.0.0.1:7897",
+        api_base_url="https://www.okx.com",
     )
 
 
@@ -2930,6 +2945,278 @@ def test_binance_perp_adapter_float_helpers_preserve_zero_only_for_diagnostics()
     assert BinancePerpAdapter._to_optional_positive_float("0") is None
     assert BinancePerpAdapter._to_optional_positive_float("-1.25") is None
     assert BinancePerpAdapter._to_optional_positive_float("3120.5") == 3120.5
+
+
+def test_okx_usdt_swap_adapter_fetches_runtime_snapshot() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "code": "0",
+                    "data": [
+                        {
+                            "instId": "ETH-USDT-SWAP",
+                            "pos": "2",
+                            "posSide": "net",
+                            "avgPx": "3100.0",
+                            "markPx": "3120.5",
+                            "lever": "10",
+                            "notionalUsd": "62.41",
+                            "upl": "1.23",
+                            "uplRatio": "0.041",
+                        }
+                    ],
+                },
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0", "details": [{"ccy": "USDT", "eq": "100.0"}]}]}),
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "code": "0",
+                    "data": [
+                        {
+                            "instId": "ETH-USDT-SWAP",
+                            "algoId": "algo-1",
+                            "algoClOrdId": "ethbot-ps-existing",
+                            "ordType": "conditional",
+                            "state": "live",
+                            "side": "sell",
+                            "triggerPx": "3007.0",
+                            "orderPx": "-1",
+                            "closeFraction": "1",
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret", "OKX_API_PASSPHRASE": "pass"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+
+    snapshot = adapter.fetch_runtime_snapshot()
+
+    assert snapshot.position.position_state == "ENTERED"
+    assert snapshot.position.direction == "long"
+    assert snapshot.position.position_amt == 2.0
+    assert snapshot.position.entry_price == 3100.0
+    assert snapshot.position.mark_price == 3120.5
+    assert snapshot.position.leverage == 10
+    assert snapshot.position.unrealized_pnl_usd == 1.23
+    assert snapshot.position.unrealized_pnl_pct_on_margin == 0.041
+    assert snapshot.position.price_vs_entry_pct == pytest.approx((3120.5 - 3100.0) / 3100.0)
+    assert snapshot.account_equity == 100.0
+    assert snapshot.account_equity_source == "totalEq"
+    assert snapshot.protective_stop_present is True
+    assert snapshot.open_orders[0].order_id == "algo:algo-1"
+    assert snapshot.open_orders[0].order_type == "CONDITIONAL"
+    assert snapshot.open_orders[0].trigger_price == 3007.0
+    assert [request.path for request in transport.requests] == [
+        "/api/v5/account/positions",
+        "/api/v5/trade/orders-pending",
+        "/api/v5/account/balance",
+        "/api/v5/trade/orders-algo-pending",
+    ]
+
+
+def test_okx_usdt_swap_adapter_marks_snapshot_invalid_when_algo_orders_unreadable() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "pos": "0", "avgPx": "0", "markPx": "3120.5"}]},
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0"}]}),
+            OkxTransportError(kind="timeout", message="timed out"),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret", "OKX_API_PASSPHRASE": "pass"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+
+    snapshot = adapter.fetch_runtime_snapshot()
+
+    assert snapshot.snapshot_valid is False
+    assert snapshot.error_endpoint == "/api/v5/trade/orders-algo-pending"
+    assert snapshot.error_kind == "timeout"
+    assert snapshot.protective_stop_present is False
+
+
+def test_okx_usdt_swap_adapter_preflight_entry_order_resolves_body_without_dispatch() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "pos": "0", "avgPx": "0", "markPx": "3120.5", "lever": "10"}]},
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0", "details": [{"ccy": "USDT", "eq": "100.0"}]}]}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(
+                http_status=200,
+                payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "lotSz": "1", "minSz": "1", "ctVal": "0.01"}]},
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "last": "3120.5"}]}),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret", "OKX_API_PASSPHRASE": "pass"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:00:00",
+            "action": "entry_long",
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+            "position_size_pct": 0.1,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].status == "preflight_ready"
+    body = results[0].details["prepared_request"]["body"]
+    signed_body = results[0].details["signed_request"]["body"]
+    assert results[0].details["prepared_request"]["path"] == "/api/v5/trade/order"
+    assert body["instId"] == "ETH-USDT-SWAP"
+    assert body["tdMode"] == "cross"
+    assert body["side"] == "buy"
+    assert body["ordType"] == "market"
+    assert body["sz"] == "3"
+    assert body["resolved_account_equity"] == "100.0"
+    assert body["resolved_contract_value"] == "0.01"
+    assert results[0].client_order_id.startswith("ethbot-eo-")
+    assert signed_body["sz"] == "3"
+    assert "OK-ACCESS-PASSPHRASE" in results[0].details["signed_request"]["headers"]
+    assert [request.path for request in transport.requests] == [
+        "/api/v5/account/positions",
+        "/api/v5/trade/orders-pending",
+        "/api/v5/account/balance",
+        "/api/v5/trade/orders-algo-pending",
+        "/api/v5/public/instruments",
+        "/api/v5/market/ticker",
+    ]
+
+
+def test_okx_usdt_swap_adapter_preflight_protective_stop_resolves_body() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "code": "0",
+                    "data": [
+                        {
+                            "instId": "ETH-USDT-SWAP",
+                            "pos": "2",
+                            "posSide": "net",
+                            "avgPx": "3100.0",
+                            "markPx": "3120.5",
+                            "lever": "10",
+                            "notionalUsd": "62.41",
+                        }
+                    ],
+                },
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0", "details": [{"ccy": "USDT", "eq": "100.0"}]}]}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret", "OKX_API_PASSPHRASE": "pass"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            maintain_protective_stop=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:01:00",
+            "action": "entry_long",
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+            "tp_ladder": [],
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].status == "preflight_ready"
+    body = results[0].details["prepared_request"]["body"]
+    assert results[0].details["prepared_request"]["path"] == "/api/v5/trade/order-algo"
+    assert body["instId"] == "ETH-USDT-SWAP"
+    assert body["tdMode"] == "cross"
+    assert body["ordType"] == "conditional"
+    assert body["side"] == "sell"
+    assert body["sz"] == "2"
+    assert float(body["triggerPx"]) == 3007.0
+    assert body["orderPx"] == "-1"
+    assert body["closeFraction"] == "1"
+    assert body["algoClOrdId"].startswith("ethbot-ps-")
+    assert results[0].client_order_id.startswith("ethbot-ps-")
+
+
+def test_okx_usdt_swap_adapter_missing_passphrase_yields_request_signing_failed() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "pos": "0", "avgPx": "0", "markPx": "3120.5", "lever": "10"}]},
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0"}]}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "lotSz": "1", "minSz": "1", "ctVal": "0.01"}]}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"instId": "ETH-USDT-SWAP", "last": "3120.5"}]}),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:02:00",
+            "action": "entry_long",
+            "direction": "long",
+            "position_size_pct": 0.1,
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].status == "error"
+    assert results[0].accepted is False
+    assert results[0].reason == "request_signing_failed"
+    assert results[0].error_kind == "request_config_error"
+    assert "OKX_API_PASSPHRASE" in results[0].details["error"]
 
 
 def test_binance_perp_adapter_returns_empty_runtime_snapshot_on_transport_error() -> None:

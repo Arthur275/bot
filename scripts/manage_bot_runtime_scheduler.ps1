@@ -4,7 +4,11 @@ param(
     [int]$IntervalSec = 300,
     [string]$RuntimeRoot = "",
     [string]$AnalysisDbPath = "",
-    [switch]$EnableRealOrders
+    [string]$ApiKeyEnv = "OKX_TRADE_API_KEY",
+    [string]$ApiSecretEnv = "OKX_TRADE_API_SECRET",
+    [string]$ApiPassphraseEnv = "OKX_TRADE_PASSPHRASE",
+    [switch]$EnableRealOrders,
+    [switch]$DisableCoinglassOverlay
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,8 +88,16 @@ $argsList = @(
     "scripts\bot_runtime_scheduler.py",
     "loop",
     "--interval-sec", ([string]$IntervalSec),
-    "--runtime-root", $RuntimeRoot
+    "--runtime-root", $RuntimeRoot,
+    "--api-key-env", $ApiKeyEnv,
+    "--api-secret-env", $ApiSecretEnv,
+    "--api-passphrase-env", $ApiPassphraseEnv,
+    "--include-coinglass-overlay"
 )
+if ($DisableCoinglassOverlay) {
+    $argsList = @($argsList | Where-Object { $_ -ne "--include-coinglass-overlay" })
+    $argsList += "--no-include-coinglass-overlay"
+}
 
 if (-not [string]::IsNullOrWhiteSpace($AnalysisDbPath)) {
     $argsList += @("--analysis-db-path", $AnalysisDbPath)

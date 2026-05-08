@@ -8,11 +8,12 @@ param(
     [int]$WorkerIntervalSec = 30,
     [int]$ReviewIntervalSec = 300,
     [int]$ResearchRefreshEvery = 12,
+    [double]$ConsensusRequestTimeoutSec = 10.0,
     [int]$DependencyWaitSec = 30,
     [string]$ProxyUrl = "http://127.0.0.1:7897",
     [switch]$EnableRealOrders,
     [switch]$EnableReviewWorker,
-    [switch]$IncludeCoinglassOverlay
+    [switch]$DisableCoinglassOverlay
 )
 
 $ErrorActionPreference = "Stop"
@@ -526,11 +527,16 @@ function Wait-ForCondition {
 
 function Show-Status {
     Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1" | Out-Null
+    Repair-PidFromCommandPattern -Name "real_worker" -Pattern "manage_real_order_worker.ps1" | Out-Null
+    Repair-PidFromCommandPattern -Name "real_worker" -Pattern "real_order_worker.py" | Out-Null
     $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
     $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
     $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
-    $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
-    $worker = Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+    $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
+    $worker = Get-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
+    if (-not $worker.Alive) {
+        $worker = Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+    }
     $review = Get-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
 
     $homeStatus = Get-HttpStatus -Uri ("http://{0}:{1}/" -f $HostName, $DashboardPort)
@@ -666,21 +672,40 @@ $QuantArgs = @(
     "15m",
     "--proxy-url",
     $ProxyUrl,
+    "--consensus-request-timeout-sec",
+    ([string]$ConsensusRequestTimeoutSec),
     "--refresh-research-aliases-every",
     ([string]$ResearchRefreshEvery),
-    "--include-okx-overlay"
+    "--include-okx-overlay",
+    "--include-coinglass-overlay"
 )
-if ($IncludeCoinglassOverlay) {
-    $QuantArgs += "--include-coinglass-overlay"
+if ($DisableCoinglassOverlay) {
+    $QuantArgs = @($QuantArgs | Where-Object { $_ -ne "--include-coinglass-overlay" })
+    $QuantArgs += "--no-include-coinglass-overlay"
 }
 $BotArgs = @(
     "scripts\bot_runtime_scheduler.py",
     "run-once",
     "--runtime-root",
     $BotRuntimeRoot,
+    "--consensus-request-timeout-sec",
+    ([string]$ConsensusRequestTimeoutSec),
+    "--research-dispatch-request",
+    (Join-Path $QuantRoot "runtime\fresh_research\dispatch_request.json"),
     "--analysis-db-path",
-    $BotAnalysisDb
+    $BotAnalysisDb,
+    "--api-key-env",
+    "OKX_TRADE_API_KEY",
+    "--api-secret-env",
+    "OKX_TRADE_API_SECRET",
+    "--api-passphrase-env",
+    "OKX_TRADE_PASSPHRASE",
+    "--include-coinglass-overlay"
 )
+if ($DisableCoinglassOverlay) {
+    $BotArgs = @($BotArgs | Where-Object { $_ -ne "--include-coinglass-overlay" })
+    $BotArgs += "--no-include-coinglass-overlay"
+}
 if ($EnableRealOrders) {
     $BotArgs += "--enable-real-orders"
 }
@@ -728,8 +753,9 @@ if ($Action -eq "status") {
 
 if ($Action -eq "stop") {
     Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
+    Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
     Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
-    Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
     Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
     Stop-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
     Stop-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
@@ -751,7 +777,7 @@ elseif (-not $botReady -and -not (Test-BotReady)) {
     Write-Output "real_worker: not started because candidate package and latest bot cycle are missing"
 }
 else {
-    Start-ManagedProcess -Name "real_worker" -FilePath "powershell.exe" -ArgumentList $WorkerArgs -WorkingDirectory $BotRoot -Pattern "real_order_worker.py"
+    Start-ManagedProcess -Name "real_worker" -FilePath "powershell.exe" -ArgumentList $WorkerArgs -WorkingDirectory $BotRoot -Pattern "manage_real_order_worker.ps1"
 }
 if ($EnableReviewWorker) {
     Start-ManagedProcess -Name "review_worker" -FilePath $Python -ArgumentList $ReviewArgs -WorkingDirectory $BotRoot -Pattern "review_runtime_decisions.py"

@@ -23,8 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-path", default=DEFAULT_STATE_PATH)
     parser.add_argument("--report-root", default=DEFAULT_REPORT_ROOT)
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
-    parser.add_argument("--api-key-env", default="BINANCE_TRADE_API_KEY")
-    parser.add_argument("--api-secret-env", default="BINANCE_TRADE_API_SECRET")
+    parser.add_argument("--api-key-env", default="OKX_TRADE_API_KEY")
+    parser.add_argument("--api-secret-env", default="OKX_TRADE_API_SECRET")
+    parser.add_argument("--api-passphrase-env", default="OKX_TRADE_PASSPHRASE")
     parser.add_argument("--kill-switch-path", default=str(BOT_ROOT / "runtime" / "disable_real_execution.flag"))
     parser.add_argument("--lock-path", default=str(BOT_ROOT / "runtime" / "reports" / "protective_stop_replace_watch" / "auto_replace.lock"))
     parser.add_argument("--json", action="store_true")
@@ -43,7 +44,8 @@ def main() -> int:
 
 def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: Any | None = None, network_decision: Any | None = None) -> dict[str, Any]:
     from bot.config import BotConfig
-    from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter
+    from bot import exchange_adapter
+    from bot.exchange_adapter import AdapterCredentials
     from bot.high_risk_gate import HighRiskGate
     from bot.network_guard import GuardDecision
     from bot.state_store import StateStore
@@ -58,18 +60,25 @@ def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: An
         audit_log_path=report_root / "high_risk_preview_audit.jsonl",
         artifacts_root=report_root / "artifacts",
         proxy_url=args.proxy_url or None,
+        exchange_venue="binance_usdt_perp" if str(args.api_key_env).startswith("BINANCE_") else "okx_usdt_swap",
+        exchange_symbol="ETHUSDT" if str(args.api_key_env).startswith("BINANCE_") else "ETH-USDT-SWAP",
+        exchange_api_base_url="https://fapi.binance.com" if str(args.api_key_env).startswith("BINANCE_") else "https://www.okx.com",
     )
     if adapter is None:
-        adapter = BinancePerpAdapter(
-            AdapterCredentials(
-                venue=config.exchange_venue,
-                api_key_env=args.api_key_env,
-                api_secret_env=args.api_secret_env,
-                recv_window_ms=config.recv_window_ms,
-                timeout_sec=config.timeout_sec,
-                proxy_url=config.proxy_url,
-                api_base_url=config.exchange_api_base_url,
-            )
+        credentials = AdapterCredentials(
+            venue=config.exchange_venue,
+            api_key_env=args.api_key_env,
+            api_secret_env=args.api_secret_env,
+            api_passphrase_env=getattr(args, "api_passphrase_env", None) or getattr(config, "exchange_api_passphrase_env", ""),
+            recv_window_ms=config.recv_window_ms,
+            timeout_sec=config.timeout_sec,
+            proxy_url=config.proxy_url,
+            api_base_url=config.exchange_api_base_url,
+        )
+        adapter = (
+            exchange_adapter.OkxUsdtSwapAdapter(credentials)
+            if config.exchange_venue == "okx_usdt_swap"
+            else exchange_adapter.BinancePerpAdapter(credentials)
         )
     store = state_store or StateStore(state_path)
     state = store.load()
@@ -142,8 +151,8 @@ def _extract_unique_exchange_protective_stop(*, raw_orders: list[dict[str, Any]]
         return {"exchange_protective_stop": None, "blocked_reasons": ["open_algo_orders_unavailable"]}
     candidates = []
     for item in raw_orders:
-        status = str(item.get("algoStatus") or item.get("status") or "").upper()
-        order_type = str(item.get("orderType") or item.get("type") or "").upper()
+        status = str(item.get("algoStatus") or item.get("state") or item.get("status") or "").upper()
+        order_type = str(item.get("ordType") or item.get("orderType") or item.get("type") or "").upper()
         if status not in ACTIVE_ALGO_STATUSES:
             continue
         if order_type not in PROTECTIVE_ORDER_TYPES:
@@ -158,7 +167,7 @@ def _extract_unique_exchange_protective_stop(*, raw_orders: list[dict[str, Any]]
             "candidate_count": len(candidates),
         }
     candidate = candidates[0]
-    trigger_price = _to_float(candidate.get("triggerPrice") or candidate.get("stopPrice"))
+    trigger_price = _to_float(candidate.get("triggerPx") or candidate.get("triggerPrice") or candidate.get("stopPrice"))
     if trigger_price is None:
         return {"exchange_protective_stop": None, "blocked_reasons": ["exchange_protective_stop_trigger_missing"]}
     side = str(candidate.get("side") or "").upper()
@@ -169,9 +178,9 @@ def _extract_unique_exchange_protective_stop(*, raw_orders: list[dict[str, Any]]
         "exchange_protective_stop": {
             "trigger_price": trigger_price,
             "side": side or expected_side,
-            "order_type": str(candidate.get("orderType") or candidate.get("type") or ""),
-            "algo_id": str(candidate.get("algoId") or ""),
-            "client_algo_id": str(candidate.get("clientAlgoId") or ""),
+            "order_type": str(candidate.get("ordType") or candidate.get("orderType") or candidate.get("type") or ""),
+            "algo_id": str(candidate.get("algoId") or candidate.get("ordId") or ""),
+            "client_algo_id": str(candidate.get("algoClOrdId") or candidate.get("clientAlgoId") or candidate.get("clOrdId") or ""),
         },
         "blocked_reasons": [],
         "candidate_count": 1,

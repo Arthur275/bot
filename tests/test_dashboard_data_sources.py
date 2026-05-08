@@ -74,6 +74,16 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "estimated_slippage_pct": 0.0004,
             "estimated_funding_pct": 0.0002,
             "edge_source": "consensus",
+            "runtime_account_equity": 88.25,
+            "runtime_account_equity_source": "totalEq",
+            "runtime_unrealized_pnl_usd": 1.75,
+            "exchange_venue": "okx_usdt_swap",
+            "exchange_symbol": "ETH-USDT-SWAP",
+            "runtime_snapshot": {
+                "fetched_at": generated_at,
+                "snapshot_valid": True,
+                "position": {"position_state": "FLAT", "mark_price": 3450.0},
+            },
             "automation_boundary": "real_order_submission_candidate",
         },
     )
@@ -235,6 +245,11 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["factor"]["governance"]["rows"][0]["net_expectancy_pct"] == 0.0
     assert snapshot["factor"]["db_available"] is False
     assert snapshot["factor"]["sample_growth"]["bot_scheduler_samples"] == 1
+    assert snapshot["performance"]["account_equity"] == 88.25
+    assert snapshot["performance"]["account_equity_source"] == "totalEq"
+    assert snapshot["performance"]["total_profit_usd"] == 1.75
+    assert snapshot["performance"]["source"] == "bot_latest_cycle"
+    assert snapshot["performance"]["ignored_source"] == ""
     assert snapshot["quant"]["action"] == "entry_long"
     assert snapshot["quant"]["supporting_factors"] == ["trend_aligned"]
     assert snapshot["quant"]["regime_bucket"] == "trend_long"
@@ -323,6 +338,73 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
 
 
+def test_dashboard_performance_reads_okx_runtime_snapshot_position_pnl(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json",
+        {
+            "finished_at": generated_at,
+            "exchange_venue": "okx_usdt_swap",
+            "exchange_symbol": "ETH-USDT-SWAP",
+            "runtime_snapshot": {
+                "fetched_at": generated_at,
+                "snapshot_valid": True,
+                "account_equity": 102.5,
+                "account_equity_source": "totalEq",
+                "position": {
+                    "position_state": "ENTERED",
+                    "mark_price": 3120.5,
+                    "unrealized_pnl_usd": 4.75,
+                    "unrealized_pnl_pct_on_margin": 0.052,
+                    "price_vs_entry_pct": 0.0066,
+                },
+            },
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["performance"]["account_equity"] == 102.5
+    assert snapshot["performance"]["account_equity_source"] == "totalEq"
+    assert snapshot["performance"]["total_profit_usd"] == 4.75
+    assert snapshot["performance"]["total_profit_pct"] == 0.052
+    assert snapshot["performance"]["price_vs_entry_pct"] == 0.0066
+    assert snapshot["performance"]["position_state"] == "ENTERED"
+    assert snapshot["performance"]["mark_price"] == 3120.5
+    assert snapshot["performance"]["source"] == "bot_latest_cycle"
+    assert snapshot["performance"]["ignored_source"] == ""
+
+
+def test_dashboard_performance_ignores_binance_runtime_snapshot(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json",
+        {
+            "finished_at": generated_at,
+            "exchange_venue": "binance_usdt_perp",
+            "exchange_symbol": "ETHUSDT",
+            "runtime_snapshot": {
+                "fetched_at": generated_at,
+                "snapshot_valid": True,
+                "account_equity": 13.69,
+                "account_equity_source": "totalWalletBalance",
+                "position": {"position_state": "FLAT", "mark_price": 2300.0, "unrealized_pnl_usd": 2.5},
+            },
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["performance"]["account_equity"] is None
+    assert snapshot["performance"]["total_profit_usd"] is None
+    assert snapshot["performance"]["source"] == "unavailable"
+    assert snapshot["performance"]["ignored_source"] == "binance_usdt_perp"
+
+
 def test_load_dashboard_snapshot_uses_latest_blocked_scheduler_status(tmp_path: Path) -> None:
     bot_root = tmp_path / "eth_trading_bot"
     quant_root = tmp_path / "quant_system_rebuild"
@@ -395,6 +477,35 @@ def test_load_dashboard_snapshot_marks_kill_switch(tmp_path: Path) -> None:
 
     assert snapshot["runtime"]["kill_switch"]["label"] == "ON"
     assert snapshot["runtime"]["kill_switch"]["enabled"] is True
+
+
+def test_dashboard_performance_ignores_binance_protective_stop_preview(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json", {"finished_at": generated_at})
+    _write_json(
+        bot_root / "runtime" / "reports" / "protective_stop_replace" / "latest_preview.json",
+        {
+            "created_at": generated_at,
+            "recorded_protective_stop": {"venue": "binance_usdt_perp", "symbol": "ETHUSDT"},
+            "snapshot": {
+                "fetched_at": generated_at,
+                "snapshot_valid": True,
+                "account_equity": 13.69,
+                "account_equity_source": "totalWalletBalance",
+                "position": {"position_state": "FLAT", "mark_price": 2300.0},
+            },
+            "pnl_state": {"unrealized_pnl_usd": 2.5},
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["performance"]["account_equity"] is None
+    assert snapshot["performance"]["total_profit_usd"] is None
+    assert snapshot["performance"]["source"] == "unavailable"
+    assert snapshot["performance"]["ignored_source"] == "binance_usdt_perp"
 
 
 def test_dashboard_static_dom_contract_is_complete() -> None:

@@ -32,7 +32,7 @@ class ExchangeProtectiveStop(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     trigger_price: float = Field(gt=0.0)
-    side: Literal["BUY", "SELL"]
+    side: Literal["BUY", "SELL", "buy", "sell"]
     order_type: str = "STOP_MARKET"
     algo_id: str = ""
     client_algo_id: str = ""
@@ -49,7 +49,7 @@ class HighRiskHandoff(BaseModel):
     runtime_mode: RuntimeMode = RuntimeMode.REAL
     engine_mode: EngineMode = EngineMode.STRICT_LIVE
     symbol: str = "ETH"
-    exchange_symbol: str = "ETHUSDT"
+    exchange_symbol: str = "ETH-USDT-SWAP"
     direction: Literal["long", "short"]
     position_state: str = "ENTERED"
     risk_filter_status: str = "pass"
@@ -150,7 +150,7 @@ class HighRiskGate:
             blocked.append("runtime_mode_not_real")
         if handoff.engine_mode != EngineMode.STRICT_LIVE:
             blocked.append("engine_mode_not_strict_live")
-        if handoff.symbol != "ETH" or handoff.exchange_symbol != "ETHUSDT":
+        if handoff.symbol != "ETH" or handoff.exchange_symbol not in {"ETH-USDT-SWAP", "ETHUSDT"}:
             blocked.append("symbol_scope_mismatch")
         if handoff.position_state != "ENTERED":
             blocked.append("position_state_not_entered")
@@ -271,7 +271,7 @@ class HighRiskGate:
             reasons.append("protective_stop_missing_for_trailing")
             return reasons
         expected_side = "SELL" if handoff.direction == "long" else "BUY"
-        if exchange_protective_stop.side != expected_side:
+        if exchange_protective_stop.side.upper() != expected_side:
             reasons.append("protective_stop_side_mismatch")
         activation = float(trailing_rule.activation_price)
         exchange_stop = float(exchange_protective_stop.trigger_price)

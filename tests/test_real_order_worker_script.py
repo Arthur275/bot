@@ -117,34 +117,34 @@ class FakeRealOrderAdapter:
             details = {}
             if command.target == "maintain_protective_stop":
                 direction = str(getattr(command.payload, "direction", "") or self._snapshot.position.direction or "long")
-                side = "SELL" if direction == "long" else "BUY"
+                side = "sell" if direction == "long" else "buy"
                 quantity = str(abs(float(self._snapshot.position.position_amt or 0.048)))
                 trigger_price = "2910.0"
                 details = {
                     "prepared_request": {
-                        "params": {
-                            "symbol": "ETHUSDT",
-                            "clientAlgoId": client_id,
+                        "body": {
+                            "instId": "ETH-USDT-SWAP",
+                            "algoClOrdId": client_id,
                             "side": side,
-                            "type": "STOP_MARKET",
-                            "reduceOnly": "true",
-                            "quantity": quantity,
-                            "triggerPrice": trigger_price,
+                            "ordType": "conditional",
+                            "closeFraction": "1",
+                            "sz": quantity,
+                            "triggerPx": trigger_price,
                         }
                     },
-                    "response_payload": {"algoId": exchange_id, "clientAlgoId": client_id, "status": "NEW"},
+                    "response_payload": {"data": [{"algoId": exchange_id, "algoClOrdId": client_id, "sCode": "0"}]},
                     "response_summary": {
                         "algoId": exchange_id,
-                        "clientAlgoId": client_id,
+                        "algoClOrdId": client_id,
                         "resolved_stop_price": trigger_price,
                         "resolved_position_amt": quantity,
                     },
                 }
-                if not any(str(order.get("clientAlgoId") or "") == client_id for order in self._open_algo_orders):
+                if not any(str(order.get("algoClOrdId") or order.get("clientAlgoId") or "") == client_id for order in self._open_algo_orders):
                     self._open_algo_orders.append(
                         _algo_order(
                             algoId=exchange_id,
-                            clientAlgoId=client_id,
+                            algoClOrdId=client_id,
                             side=side,
                             quantity=quantity,
                             triggerPrice=trigger_price,
@@ -172,12 +172,13 @@ class FakeRealOrderAdapter:
     def cancel_algo_order_raw(self, *, algo_id: str = "", client_algo_id: str = "") -> dict[str, object]:
         if self._cancel_raises:
             raise RuntimeError("cancel failed")
-        payload = {"algoId": algo_id, "clientAlgoId": client_algo_id, "status": "canceled"}
+        payload = {"algoId": algo_id, "algoClOrdId": client_algo_id, "status": "canceled"}
         self.canceled_algo_orders.append(payload)
         self._open_algo_orders = [
             order
             for order in self._open_algo_orders
-            if str(order.get("algoId") or "") != algo_id and str(order.get("clientAlgoId") or "") != client_algo_id
+            if str(order.get("algoId") or "") != algo_id
+            and str(order.get("algoClOrdId") or order.get("clientAlgoId") or "") != client_algo_id
         ]
         if not self._open_algo_orders:
             self._snapshot.protective_stop_present = False
@@ -189,7 +190,7 @@ class InvalidSnapshotAdapter(FakeRealOrderAdapter):
         super().__init__()
         self._snapshot = AdapterRuntimeSnapshot(
             snapshot_valid=False,
-            error_endpoint="/fapi/v2/positionRisk",
+            error_endpoint="/api/v5/account/positions",
             error_kind="timeout",
             error_message="timeout",
         )
@@ -222,16 +223,23 @@ class RejectingStopAdapter(FakeRealOrderAdapter):
 def _algo_order(
     *,
     algoId: object = "algo-1",
-    clientAlgoId: str = "ethbot-ps-existing",
-    side: str = "SELL",
+    clientAlgoId: str = "",
+    side: str = "sell",
     quantity: object = "0.048",
     triggerPrice: object = "2910.0",
     reduceOnly: object = True,
-    symbol: str = "ETHUSDT",
-    algoStatus: str = "NEW",
-    orderType: str = "STOP_MARKET",
+    symbol: str = "",
+    instId: str | None = "ETH-USDT-SWAP",
+    algoStatus: str = "",
+    state: str | None = "live",
+    orderType: str = "",
+    ordType: str | None = "conditional",
+    algoClOrdId: str | None = "ethbot-ps-existing",
+    closeFraction: object | None = None,
 ) -> dict[str, object]:
-    return {
+    if algoClOrdId == "ethbot-ps-existing" and clientAlgoId:
+        algoClOrdId = clientAlgoId
+    payload = {
         "symbol": symbol,
         "algoId": algoId,
         "clientAlgoId": clientAlgoId,
@@ -242,6 +250,17 @@ def _algo_order(
         "triggerPrice": triggerPrice,
         "reduceOnly": reduceOnly,
     }
+    if instId is not None:
+        payload["instId"] = instId
+    if state is not None:
+        payload["state"] = state
+    if ordType is not None:
+        payload["ordType"] = ordType
+    if algoClOrdId is not None:
+        payload["algoClOrdId"] = algoClOrdId
+    if closeFraction is not None:
+        payload["closeFraction"] = closeFraction
+    return payload
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -251,8 +270,9 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         audit_log_path=str(tmp_path / "real_order_audit.jsonl"),
         lock_path=str(tmp_path / "real_order_worker.lock"),
         kill_switch_path=str(tmp_path / "disable_real_execution.flag"),
-        api_key_env="BINANCE_API_KEY",
-        api_secret_env="BINANCE_API_SECRET",
+        api_key_env="OKX_API_KEY",
+        api_secret_env="OKX_API_SECRET",
+        api_passphrase_env="OKX_API_PASSPHRASE",
         proxy_url=None,
         submit_real_orders=False,
         stale_lock_after_sec=900,
@@ -273,8 +293,8 @@ def _write_package(path: Path, *, expires_at: datetime | None = None, action: st
         "expires_at": (expires_at or (real_order_worker._utcnow() + timedelta(minutes=3))).isoformat(),
         "runtime_mode": "real",
         "engine_mode": "strict-live",
-        "symbol": "ETHUSDT",
-        "exchange_symbol": "ETHUSDT",
+        "symbol": "ETH",
+        "exchange_symbol": "ETH-USDT-SWAP",
         "action": action,
         "direction": "long",
         "handoff": {"action": "entry_long", "direction": "long"},
@@ -409,7 +429,7 @@ def test_real_order_worker_cancels_ghost_stop_before_entry(tmp_path: Path) -> No
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
     assert result["status"] == "submitted_all_accepted"
-    assert adapter.canceled_algo_orders == [{"algoId": "123", "clientAlgoId": "ethbot-ps-ghost", "status": "canceled"}]
+    assert adapter.canceled_algo_orders == [{"algoId": "123", "algoClOrdId": "ethbot-ps-ghost", "status": "canceled"}]
 
 
 def test_real_order_worker_blocks_ghost_cleanup_when_external_algo_present(tmp_path: Path) -> None:
@@ -479,7 +499,7 @@ def test_real_order_worker_cleans_algo_orders_after_exit(tmp_path: Path) -> None
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
     assert result["status"] == "submitted_all_accepted"
-    assert adapter.canceled_algo_orders == [{"algoId": "456", "clientAlgoId": "ethbot-ps-exit", "status": "canceled"}]
+    assert adapter.canceled_algo_orders == [{"algoId": "456", "algoClOrdId": "ethbot-ps-exit", "status": "canceled"}]
 
 
 def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: Path) -> None:
@@ -512,7 +532,7 @@ def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: 
         "reduce_order",
         "maintain_protective_stop",
     ]
-    assert adapter.canceled_algo_orders == [{"algoId": "789", "clientAlgoId": "ethbot-ps-old", "status": "canceled"}]
+    assert adapter.canceled_algo_orders == [{"algoId": "789", "algoClOrdId": "ethbot-ps-old", "status": "canceled"}]
 
 
 def test_real_order_worker_reduce_cleanup_keeps_new_and_external_stops(tmp_path: Path) -> None:
@@ -544,8 +564,8 @@ def test_real_order_worker_reduce_cleanup_keeps_new_and_external_stops(tmp_path:
     result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
 
     assert result["status"] == "submitted_all_accepted"
-    assert adapter.canceled_algo_orders == [{"algoId": "old", "clientAlgoId": "ethbot-ps-old", "status": "canceled"}]
-    remaining_client_ids = {str(order.get("clientAlgoId") or "") for order in adapter.fetch_open_algo_orders_raw()}
+    assert adapter.canceled_algo_orders == [{"algoId": "old", "algoClOrdId": "ethbot-ps-old", "status": "canceled"}]
+    remaining_client_ids = {str(order.get("algoClOrdId") or order.get("clientAlgoId") or "") for order in adapter.fetch_open_algo_orders_raw()}
     assert "manual-stop" in remaining_client_ids
     assert "ethbot-ps-reduce-stop-key" in remaining_client_ids
 
@@ -601,7 +621,8 @@ def test_real_order_worker_rejects_unrelated_algo_as_stop_confirmation(tmp_path:
 
     assert result["status"] == "submitted_all_accepted"
     assert len(adapter.executed_commands) == 1
-    assert result["results"][0]["details"]["protective_stop_confirmation"]["matched_order"]["clientAlgoId"].startswith("ethbot-ps-")
+    matched_order = result["results"][0]["details"]["protective_stop_confirmation"]["matched_order"]
+    assert str(matched_order.get("algoClOrdId") or matched_order.get("clientAlgoId") or "").startswith("ethbot-ps-")
 
 
 def test_find_matching_protective_stop_rejects_wrong_direction_quantity_and_reduce_only() -> None:
@@ -656,6 +677,62 @@ def test_find_matching_protective_stop_rejects_wrong_direction_quantity_and_redu
         result=result,
         open_algo_orders=[_algo_order(algoId="algo-stop-key", clientAlgoId="ethbot-ps-stop-key")],
     ) is not None
+
+
+def test_find_matching_protective_stop_accepts_okx_algo_fields() -> None:
+    command = ExecutionCommand.model_validate(
+        {
+            "command_type": "order",
+            "operation": "upsert",
+            "target": "maintain_protective_stop",
+            "idempotency_key": "stop:key",
+            "reason": "protective_stop_required",
+            "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": []},
+        }
+    )
+    result = CommandExecutionResult(
+        target="maintain_protective_stop",
+        status="accepted",
+        accepted=True,
+        simulated=False,
+        reason="protective_stop_required",
+        idempotency_key="stop:key",
+        client_order_id="ethbot-ps-stop-key",
+        exchange_order_id="algo-stop-key",
+        details={
+            "prepared_request": {
+                "body": {
+                    "algoClOrdId": "ethbot-ps-stop-key",
+                    "side": "sell",
+                    "sz": "0.048",
+                    "triggerPx": "2910.0",
+                }
+            }
+        },
+    )
+
+    match = real_order_worker.find_matching_protective_stop(
+        command=command,
+        result=result,
+        open_algo_orders=[
+            _algo_order(
+                algoId="algo-stop-key",
+                algoClOrdId="ethbot-ps-stop-key",
+                clientAlgoId="",
+                instId="ETH-USDT-SWAP",
+                state="live",
+                ordType="conditional",
+                side="sell",
+                quantity="0.048",
+                triggerPrice="2910.0",
+                reduceOnly=False,
+                closeFraction="1",
+            )
+        ],
+    )
+
+    assert match is not None
+    assert match["algoClOrdId"] == "ethbot-ps-stop-key"
 
 
 def test_real_order_worker_blocks_repair_when_stop_already_present(tmp_path: Path) -> None:
@@ -781,6 +858,41 @@ def test_real_order_worker_blocks_replayed_idempotency_key(tmp_path: Path) -> No
     assert second["status"] == "blocked"
     assert second["reason_codes"] == ["idempotency_key_already_completed"]
     assert second_adapter.executed_commands == []
+
+
+def test_real_order_worker_blocks_replayed_okx_data_response_idempotency_key(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path), action="protective_stop_repair")
+    AuditLogger(args.audit_log_path).append(
+        event_type="real_order_worker_command_result",
+        payload={
+            "status": "submitted_all_accepted",
+            "package_id": "previous-package",
+            "commands": [{"target": "maintain_protective_stop", "idempotency_key": "protective_stop_repair:key"}],
+            "results": [
+                {
+                    "target": "maintain_protective_stop",
+                    "idempotency_key": "protective_stop_repair:key",
+                    "status": "accepted",
+                    "accepted": True,
+                    "details": {
+                        "response_payload": {
+                            "code": "0",
+                            "data": [{"algoId": "algo-123", "algoClOrdId": "ethbot-ps-123", "sCode": "0"}],
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    adapter = FakeRealOrderAdapter(position_state="ENTERED", direction="long", protective_stop_present=False)
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "blocked"
+    assert result["reason_codes"] == ["idempotency_key_already_completed"]
+    assert adapter.executed_commands == []
 
 
 def test_real_order_worker_does_not_complete_failed_idempotency_key(tmp_path: Path) -> None:

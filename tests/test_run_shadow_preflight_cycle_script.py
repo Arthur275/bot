@@ -62,10 +62,23 @@ def _args(*, quant_root: Path, output_root: Path) -> run_shadow_preflight_cycle.
     args.output_root = str(output_root)
     args.proxy_url = ""
     args.include_okx_overlay = False
-    args.include_coinglass_overlay = False
-    args.api_key_env = "BINANCE_API_KEY"
-    args.api_secret_env = "BINANCE_API_SECRET"
+    args.include_coinglass_overlay = None
+    args.consensus_request_timeout_sec = 10.0
+    args.research_sync_request_path = None
+    args.research_dispatch_request_path = str(quant_root / "runtime" / "fresh_research" / "dispatch_request.json")
+    args.api_key_env = "OKX_API_KEY"
+    args.api_secret_env = "OKX_API_SECRET"
+    args.api_passphrase_env = "OKX_API_PASSPHRASE"
     return args
+
+
+def test_bot_config_auto_enables_coinglass_when_api_key_is_available(monkeypatch) -> None:
+    from bot.config import BotConfig
+
+    monkeypatch.setenv("COINGLASS_API_KEY", "x" * 32)
+
+    assert BotConfig().resolved_include_coinglass_overlay is True
+    assert BotConfig(include_coinglass_overlay=False).resolved_include_coinglass_overlay is False
 
 
 def _clear_fake_quant_modules() -> None:
@@ -79,7 +92,7 @@ def _clear_fake_quant_modules() -> None:
             sys.modules.pop(module_name, None)
 
 
-class FakeBinancePerpAdapter:
+class FakeOkxUsdtSwapAdapter:
     def __init__(self, credentials) -> None:
         self.credentials = credentials
 
@@ -137,24 +150,21 @@ class FakeBinancePerpAdapter:
                 details={
                     "prepared_request": {
                         "method": "POST",
-                        "path": "/fapi/v1/order",
-                        "params": {
-                            "side": "SELL",
-                            "type": "MARKET",
-                            "quantity": "0.031",
-                            "newClientOrderId": "entry_order:2026-05-01T01:05:00:small_probe:short",
-                        },
+                        "path": "/api/v5/trade/order",
+                        "params": {},
                         "body": {
-                            "resolution_mode": "entry_quantity_from_size_pct",
+                            "side": "sell",
+                            "ordType": "market",
+                            "sz": "0.031",
+                            "clOrdId": "entry_order:2026-05-01T01:05:00:small_probe:short",
+                            "resolution_mode": "okx_entry_contracts_from_size_pct",
                             "resolved_account_equity": "11.0",
                             "resolved_leverage": 10,
                             "resolved_mark_price": "3150.0",
                         },
                     },
                     "signed_request": {
-                        "params": {
-                            "quantity": "0.031",
-                        },
+                        "body": {"sz": "0.031"},
                     },
                 },
             ),
@@ -192,7 +202,7 @@ def test_shadow_preflight_script_skips_preflight_when_shadow_cycle_has_no_comman
         "}",
     )
 
-    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_binance_perp_adapter", lambda: FakeBinancePerpAdapter)
+    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_real_adapter", lambda venue: FakeOkxUsdtSwapAdapter)
     _clear_fake_quant_modules()
     payload = run_shadow_preflight_cycle.run_cycle(
         args=_args(quant_root=quant_root, output_root=tmp_path / "out_wait"),
@@ -234,6 +244,7 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
         "'action': 'small_probe',"
         "'direction': 'short',"
         "'execution_allowed': True,"
+        "'risk_filter_status': 'pass',"
         "'position_size_pct': 0.2,"
         "'executable_size_pct': 0.02,"
         "'sizing_tier': 'probe',"
@@ -249,12 +260,12 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
     )
     calls: list[list[str]] = []
 
-    class RecordingFakeBinancePerpAdapter(FakeBinancePerpAdapter):
+    class RecordingFakeOkxUsdtSwapAdapter(FakeOkxUsdtSwapAdapter):
         def preflight_commands(self, *, commands):
             calls.append([command.target for command in commands])
             return super().preflight_commands(commands=commands)
 
-    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_binance_perp_adapter", lambda: RecordingFakeBinancePerpAdapter)
+    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_real_adapter", lambda venue: RecordingFakeOkxUsdtSwapAdapter)
 
     _clear_fake_quant_modules()
     payload = run_shadow_preflight_cycle.run_cycle(
@@ -277,6 +288,80 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
     assert payload["preflight_statuses"] == ["preflight_ready"]
     assert payload["preflight_error"] == ""
     assert payload["preflight"][0]["target"] == "entry_order"
-    assert payload["preflight"][0]["side"] == "SELL"
+    assert payload["preflight"][0]["side"] == "sell"
     assert payload["preflight"][0]["quantity"] == "0.031"
     assert payload["preflight"][0]["newClientOrderId"] == "entry_order:2026-05-01T01:05:00:small_probe:short"
+
+
+def test_shadow_preflight_script_blocks_entry_when_risk_filter_status_missing(monkeypatch, tmp_path: Path) -> None:
+    quant_root = tmp_path / "fake_quant_entry_missing_risk"
+    _write_fake_quant_modules(
+        quant_root / "src",
+        handoff_payload="{"
+        "'generated_at': '2026-05-01T01:05:00',"
+        "'action': 'small_probe',"
+        "'direction': 'short',"
+        "'execution_allowed': True,"
+        "'position_size_pct': 0.2,"
+        "'executable_size_pct': 0.02,"
+        "'sizing_tier': 'probe',"
+        "'sizing_bias': 'conservative',"
+        "'max_account_risk_pct_per_trade': 0.01,"
+        "'initial_stop_loss': 1.018,"
+        "'stop_distance_pct': 0.018,"
+        "'tp_ladder': [0.99, 0.98],"
+        "'reduce_conditions': ['crowding_warning'],"
+        "'invalidate_conditions': ['setup_invalidated'],"
+        "'trailing_rule': 'trail_with_trigger'"
+        "}",
+    )
+    calls: list[list[str]] = []
+
+    class RecordingFakeOkxUsdtSwapAdapter(FakeOkxUsdtSwapAdapter):
+        def preflight_commands(self, *, commands):
+            calls.append([command.target for command in commands])
+            return super().preflight_commands(commands=commands)
+
+    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_real_adapter", lambda venue: RecordingFakeOkxUsdtSwapAdapter)
+
+    _clear_fake_quant_modules()
+    payload = run_shadow_preflight_cycle.run_cycle(
+        args=_args(quant_root=quant_root, output_root=tmp_path / "out_missing_risk"),
+        bot_root=Path(__file__).resolve().parents[1],
+    )
+
+    assert payload["requested_action"] == "small_probe"
+    assert payload["effective_action"] == "wait"
+    assert payload["execution_plan"]["effective_action"] == "wait"
+    assert payload["execution_plan"]["plan_reason"] == "entry_disallowed_by_guard"
+    assert "risk_filter:unknown" in payload["execution_plan"]["notes"]
+    assert payload["command_targets"] == []
+    assert payload["preflight_statuses"] == []
+    assert payload["preflight"] == []
+    assert payload["preflight_error"] == ""
+    assert calls == []
+
+
+def test_shadow_preflight_records_missing_okx_passphrase_diagnostic(monkeypatch, tmp_path: Path) -> None:
+    quant_root = tmp_path / "fake_quant_missing_passphrase"
+    _write_fake_quant_modules(
+        quant_root / "src",
+        handoff_payload="{"
+        "'generated_at': '2026-05-01T01:05:00',"
+        "'action': 'wait',"
+        "'direction': 'neutral',"
+        "'execution_allowed': False"
+        "}",
+    )
+    monkeypatch.delenv("OKX_API_KEY", raising=False)
+    monkeypatch.delenv("OKX_API_SECRET", raising=False)
+    monkeypatch.delenv("OKX_API_PASSPHRASE", raising=False)
+    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_real_adapter", lambda venue: FakeOkxUsdtSwapAdapter)
+
+    _clear_fake_quant_modules()
+    payload = run_shadow_preflight_cycle.run_cycle(
+        args=_args(quant_root=quant_root, output_root=tmp_path / "out_missing_passphrase"),
+        bot_root=Path(__file__).resolve().parents[1],
+    )
+
+    assert "missing_api_env:OKX_API_PASSPHRASE" in payload["preflight_diagnostics"]

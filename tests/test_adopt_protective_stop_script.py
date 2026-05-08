@@ -56,6 +56,7 @@ def _args(tmp_path: Path, **overrides) -> Namespace:
         "proxy_url": "http://127.0.0.1:7897",
         "api_key_env": "BINANCE_TRADE_API_KEY",
         "api_secret_env": "BINANCE_TRADE_API_SECRET",
+        "api_passphrase_env": "",
         "confirm_token": "",
         "preview_file": "",
         "max_preview_age_sec": 180,

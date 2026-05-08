@@ -19,9 +19,13 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         cycle_output_root=str(tmp_path / "cycles"),
         proxy_url="",
         include_okx_overlay=False,
-        include_coinglass_overlay=False,
+        include_coinglass_overlay=None,
+        consensus_request_timeout_sec=10.0,
+        research_sync_request_path=None,
+        research_dispatch_request_path=str(tmp_path / "quant" / "runtime" / "fresh_research" / "dispatch_request.json"),
         api_key_env=None,
         api_secret_env=None,
+        api_passphrase_env=None,
         analysis_db_path=None,
         skip_analysis_ingest=True,
         enable_real_orders=False,
@@ -34,9 +38,15 @@ def _args(tmp_path: Path) -> argparse.Namespace:
 
 
 def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_path: Path) -> None:
+    captured = {}
+
     def fake_cycle_runner(*, args, bot_root):
         assert args.api_key_env is None
         assert args.api_secret_env is None
+        assert args.api_passphrase_env is None
+        assert args.consensus_request_timeout_sec == 10.0
+        assert args.research_dispatch_request_path.endswith("dispatch_request.json")
+        captured["include_coinglass_overlay"] = args.include_coinglass_overlay
         return {
             "requested_action": "small_probe",
             "effective_action": "small_probe",
@@ -57,6 +67,19 @@ def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_pa
                 "account_risk_pct": 0.001,
             },
             "command_targets": ["entry_order", "maintain_protective_stop"],
+            "exchange_venue": "okx_usdt_swap",
+            "exchange_symbol": "ETH-USDT-SWAP",
+            "runtime_snapshot": {
+                "snapshot_valid": True,
+                "account_equity": 101.25,
+                "account_equity_source": "totalEq",
+                "position": {
+                    "position_state": "ENTERED",
+                    "unrealized_pnl_usd": 2.25,
+                    "unrealized_pnl_pct_on_margin": 0.03,
+                    "price_vs_entry_pct": 0.004,
+                },
+            },
             "preflight_statuses": ["preflight_ready"],
             "preflight": [{"target": "entry_order", "status": "preflight_ready", "error": ""}],
             "reason_codes": [],
@@ -77,12 +100,21 @@ def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_pa
     samples = (runtime_root / "samples.jsonl").read_text(encoding="utf-8").splitlines()
 
     assert payload["status"] == "ok"
+    assert captured["include_coinglass_overlay"] is None
     assert payload["mode"] == "shadow_preflight_only"
     assert payload["automation_boundary"] == "no_order_submission"
     assert payload["candidate_execution_package"]["status"] == "skipped"
     assert payload["real_order_gate"]["enabled"] is False
     assert payload["real_order_gate"]["allowed"] is False
     assert latest["command_targets"] == ["entry_order", "maintain_protective_stop"]
+    assert latest["exchange_venue"] == "okx_usdt_swap"
+    assert latest["exchange_symbol"] == "ETH-USDT-SWAP"
+    assert latest["runtime_snapshot"]["account_equity"] == 101.25
+    assert latest["runtime_account_equity"] == 101.25
+    assert latest["runtime_account_equity_source"] == "totalEq"
+    assert latest["runtime_unrealized_pnl_usd"] == 2.25
+    assert latest["runtime_unrealized_pnl_pct"] == 0.03
+    assert latest["price_vs_entry_pct"] == 0.004
     assert latest["tp_ladder"] == [1.01]
     assert heartbeat["status"] == "ok"
     assert heartbeat["automation_boundary"] == "no_order_submission"
@@ -211,8 +243,8 @@ def test_bot_runtime_scheduler_writes_candidate_execution_package_when_gate_allo
         cycle_runner=lambda **_: {
             "runtime_mode": "real",
             "engine_mode": "strict-live",
-            "symbol": "ETHUSDT",
-            "exchange_symbol": "ETHUSDT",
+            "symbol": "ETH",
+            "exchange_symbol": "ETH-USDT-SWAP",
             "requested_action": "entry_long",
             "effective_action": "entry_long",
             "handoff": {
@@ -256,6 +288,42 @@ def test_bot_runtime_scheduler_writes_candidate_execution_package_when_gate_allo
     assert package["real_order_gate"]["allowed"] is True
     assert package["execution_commands"][0]["target"] == "entry_order"
     assert (expires_at - generated_at).total_seconds() == 180
+
+
+def test_bot_runtime_scheduler_blocks_candidate_when_runtime_snapshot_missing(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "requested_action": "entry_long",
+            "effective_action": "entry_long",
+            "handoff": {
+                "execution_allowed": True,
+                "risk_filter_status": "pass",
+                "direction": "long",
+                "initial_stop_loss": 0.97,
+            },
+            "execution_plan": {"place_entry_order": True, "maintain_protective_stop": True},
+            "execution_commands": [
+                {"target": "entry_order", "idempotency_key": "entry:key", "payload": {"direction": "long"}},
+                {"target": "maintain_protective_stop", "idempotency_key": "stop:key", "payload": {"direction": "long"}},
+            ],
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            ],
+        },
+    )
+
+    assert payload["real_order_gate"]["allowed"] is False
+    assert "runtime_snapshot_invalid" in payload["real_order_gate"]["reason_codes"]
+    assert payload["candidate_execution_package"]["status"] == "skipped"
+    assert not (Path(args.runtime_root) / "latest_candidate_execution_package.json").exists()
 
 
 def test_bot_runtime_scheduler_writes_repair_candidate_package_when_gate_allows(tmp_path: Path) -> None:

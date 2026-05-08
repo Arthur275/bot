@@ -25,12 +25,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", default=_default_output_root())
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
     parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--api-key-env", default="BINANCE_TRADE_API_KEY")
-    parser.add_argument("--api-secret-env", default="BINANCE_TRADE_API_SECRET")
+    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--api-key-env", default="OKX_TRADE_API_KEY")
+    parser.add_argument("--api-secret-env", default="OKX_TRADE_API_SECRET")
+    parser.add_argument("--api-passphrase-env", default="OKX_TRADE_PASSPHRASE")
     parser.add_argument("--confirm-token", default="")
     parser.add_argument("--json", action="store_true", help="Emit the full structured payload instead of the human confirmation panel.")
     return parser
+
+
+def _load_real_adapter(venue: str) -> Any:
+    from bot.exchange_adapter import BinancePerpAdapter, OkxUsdtSwapAdapter
+
+    if venue == "okx_usdt_swap":
+        return OkxUsdtSwapAdapter
+    if venue == "binance_usdt_perp":
+        return BinancePerpAdapter
+    raise ValueError(f"Unsupported real adapter venue: {venue}")
 
 
 def _load_binance_perp_adapter() -> Any:
@@ -75,18 +86,19 @@ def run_cycle(*, args: argparse.Namespace, bot_root: Path) -> dict[str, Any]:
         artifacts_root=output_root / "artifacts",
         proxy_url=args.proxy_url or None,
         include_okx_overlay=bool(args.include_okx_overlay),
-        include_coinglass_overlay=bool(args.include_coinglass_overlay),
+        include_coinglass_overlay=args.include_coinglass_overlay,
     )
     credentials = AdapterCredentials(
         venue=config.exchange_venue,
         api_key_env=args.api_key_env,
         api_secret_env=args.api_secret_env,
+        api_passphrase_env=getattr(args, "api_passphrase_env", None) or config.exchange_api_passphrase_env,
         recv_window_ms=config.recv_window_ms,
         timeout_sec=config.timeout_sec,
         proxy_url=config.proxy_url,
         api_base_url=config.exchange_api_base_url,
     )
-    real_adapter = _load_binance_perp_adapter()(credentials)
+    real_adapter = _load_real_adapter(config.exchange_venue)(credentials)
     client = EngineClient(
         config,
         run_live_judgement_fn=run_live_judgement,
@@ -259,9 +271,10 @@ def _build_confirm_command(*, args: argparse.Namespace, token: str) -> str:
         f"--output-root {_quote_arg(args.output_root)}",
         f"--proxy-url {_quote_arg(args.proxy_url)}",
         "--include-okx-overlay" if args.include_okx_overlay else "--no-include-okx-overlay",
-        "--include-coinglass-overlay" if args.include_coinglass_overlay else "--no-include-coinglass-overlay",
+        "--include-coinglass-overlay" if args.include_coinglass_overlay is not False else "--no-include-coinglass-overlay",
         f"--api-key-env {_quote_arg(args.api_key_env)}",
         f"--api-secret-env {_quote_arg(args.api_secret_env)}",
+        f"--api-passphrase-env {_quote_arg(getattr(args, 'api_passphrase_env', ''))}",
         f"--confirm-token {token}",
     ]
     return " `\n  ".join(parts)
@@ -301,14 +314,14 @@ def _summarize_execution_result(result: dict[str, Any]) -> dict[str, Any]:
         "reason": result.get("reason"),
         "method": prepared.get("method"),
         "path": prepared.get("path"),
-        "side": prepared_params.get("side"),
-        "type": prepared_params.get("type"),
-        "quantity": prepared_params.get("quantity"),
-        "stopPrice": prepared_params.get("stopPrice"),
+        "side": prepared_params.get("side") or body.get("side"),
+        "type": prepared_params.get("type") or body.get("ordType"),
+        "quantity": prepared_params.get("quantity") or body.get("sz"),
+        "stopPrice": prepared_params.get("stopPrice") or body.get("triggerPx"),
         "closePosition": prepared_params.get("closePosition"),
-        "newClientOrderId": prepared_params.get("newClientOrderId"),
-        "signed_quantity": signed_params.get("quantity"),
-        "signed_stopPrice": signed_params.get("stopPrice"),
+        "newClientOrderId": prepared_params.get("newClientOrderId") or body.get("clOrdId") or body.get("algoClOrdId"),
+        "signed_quantity": signed_params.get("quantity") or (signed.get("body") or {}).get("sz"),
+        "signed_stopPrice": signed_params.get("stopPrice") or (signed.get("body") or {}).get("triggerPx"),
         "resolution_mode": body.get("resolution_mode"),
         "resolved_account_equity": body.get("resolved_account_equity"),
         "resolved_leverage": body.get("resolved_leverage"),

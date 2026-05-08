@@ -122,7 +122,7 @@ def _write_cycle(audit_path: Path) -> None:
             "engine_mode": "strict-live",
             "handoff": {
                 "symbol": "ETH",
-                "exchange_symbol": "ETHUSDT",
+                "exchange_symbol": "ETH-USDT-SWAP",
                 "action": "entry_long",
             },
             "effective_action": "entry_long",

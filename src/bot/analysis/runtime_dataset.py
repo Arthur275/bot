@@ -49,7 +49,7 @@ def ingest_audit_log_with_connection(*, conn: Any, audit_log_path: str | Path) -
                 _string(payload.get("runtime_mode")),
                 _string(payload.get("engine_mode")),
                 _string((payload.get("handoff") or {}).get("symbol") or "ETH"),
-                _string((payload.get("handoff") or {}).get("exchange_symbol") or "ETHUSDT"),
+                _string((payload.get("handoff") or {}).get("exchange_symbol") or "ETH-USDT-SWAP"),
                 _string((payload.get("handoff") or {}).get("action")),
                 _string(payload.get("effective_action")),
                 _string((payload.get("state") or {}).get("execution_state")),

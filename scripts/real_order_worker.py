@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from bot.audit_logger import AuditLogger
 from bot.config import BotConfig, RuntimeMode
-from bot.exchange_adapter import AdapterCredentials, AdapterRuntimeSnapshot, BinancePerpAdapter, CommandExecutionResult, ExecutionCommand
+from bot.exchange_adapter import AdapterCredentials, AdapterRuntimeSnapshot, BinancePerpAdapter, CommandExecutionResult, ExecutionCommand, OkxUsdtSwapAdapter
 from bot.state_store import StateStore
 
 
@@ -25,7 +25,9 @@ ENTRY_ACTIONS = {"entry_long", "entry_short", "small_probe"}
 HIGH_RISK_ACTIONS = {"reduce", "exit"}
 PROTECT_ACTIONS = {"protect", "protective_stop_repair", "maintain_protective_stop"}
 ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED"}
-PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET"}
+OKX_ACTIVE_ALGO_STATUSES = {"LIVE", "EFFECTIVE"}
+PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET", "CONDITIONAL"}
+SUPPORTED_EXCHANGE_SYMBOLS = {"ETH-USDT-SWAP", "ETHUSDT"}
 BOT_PROTECTIVE_STOP_CLIENT_PREFIXES = ("ethbot-ps-", "ethbot-be-", "ethbot-ts-")
 STOP_PRICE_TOLERANCE = Decimal("0.00000001")
 WORKER_LOCK_OWNER = "real_order_worker"
@@ -66,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kill-switch-path", default=str(Path(default_runtime_root()) / "controls" / "disable_real_execution.flag"))
     parser.add_argument("--api-key-env", default=BotConfig().exchange_api_key_env)
     parser.add_argument("--api-secret-env", default=BotConfig().exchange_api_secret_env)
+    parser.add_argument("--api-passphrase-env", default=BotConfig().exchange_api_passphrase_env)
     parser.add_argument("--proxy-url", default=None)
     parser.add_argument("--submit-real-orders", action="store_true", default=False)
     parser.add_argument("--stale-lock-after-sec", type=int, default=900)
@@ -110,7 +113,7 @@ def run_once(*, args: argparse.Namespace, adapter_factory: AdapterFactory | None
                 event_type="real_order_worker_blocked",
                 payload=_blocked(reason_codes=["kill_switch_enabled"], package=package),
             )
-        adapter = (adapter_factory or _build_binance_adapter)(args)
+        adapter = (adapter_factory or _build_real_adapter)(args)
         first_snapshot = _fetch_runtime_snapshot_with_state(
             adapter=adapter,
             state_store=state_store,
@@ -374,8 +377,32 @@ def _windows_process_start_token(pid: int) -> str:
         kernel32.CloseHandle(handle)
 
 
-def _build_binance_adapter(args: argparse.Namespace) -> BinancePerpAdapter:
+def _build_real_adapter(args: argparse.Namespace) -> OkxUsdtSwapAdapter | BinancePerpAdapter:
     config = BotConfig(proxy_url=args.proxy_url)
+    credentials = AdapterCredentials(
+        venue=config.exchange_venue,
+        api_key_env=args.api_key_env,
+        api_secret_env=args.api_secret_env,
+        api_passphrase_env=getattr(args, "api_passphrase_env", config.exchange_api_passphrase_env),
+        recv_window_ms=config.recv_window_ms,
+        timeout_sec=config.timeout_sec,
+        proxy_url=args.proxy_url,
+        api_base_url=config.exchange_api_base_url,
+    )
+    if config.exchange_venue == "okx_usdt_swap":
+        return OkxUsdtSwapAdapter(credentials)
+    return BinancePerpAdapter(credentials)
+
+
+def _build_binance_adapter(args: argparse.Namespace) -> BinancePerpAdapter:
+    config = BotConfig(
+        proxy_url=args.proxy_url,
+        exchange_venue="binance_usdt_perp",
+        exchange_symbol="ETHUSDT",
+        exchange_api_base_url="https://fapi.binance.com",
+        exchange_api_key_env="BINANCE_TRADE_API_KEY",
+        exchange_api_secret_env="BINANCE_TRADE_API_SECRET",
+    )
     credentials = AdapterCredentials(
         venue=config.exchange_venue,
         api_key_env=args.api_key_env,
@@ -449,8 +476,9 @@ def _precheck_package(*, package: dict[str, Any], submit_real_orders: bool, kill
         reason_codes.append("runtime_mode_not_real")
     if str(package.get("engine_mode") or "") != "strict-live":
         reason_codes.append("engine_mode_not_strict_live")
-    if str(package.get("exchange_symbol") or "ETHUSDT") != "ETHUSDT":
-        reason_codes.append("exchange_symbol_not_ethusdt")
+    exchange_symbol = str(package.get("exchange_symbol") or BotConfig().exchange_symbol)
+    if exchange_symbol not in SUPPORTED_EXCHANGE_SYMBOLS:
+        reason_codes.append("exchange_symbol_not_supported")
     preflight = package.get("preflight") or []
     if not preflight or not all(item.get("status") == "preflight_ready" and not item.get("error") for item in preflight):
         reason_codes.append("preflight_not_ready")
@@ -531,6 +559,12 @@ def _result_has_submission_confirmation(result: dict[str, Any]) -> bool:
     response_payload = details.get("response_payload")
     if isinstance(response_payload, dict) and (response_payload.get("orderId") or response_payload.get("algoId") or response_payload.get("clientOrderId") or response_payload.get("clientAlgoId")):
         return True
+    if isinstance(response_payload, dict) and isinstance(response_payload.get("data"), list):
+        for item in response_payload["data"]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("ordId") or item.get("algoId") or item.get("clOrdId") or item.get("algoClOrdId"):
+                return True
     return False
 
 
@@ -915,8 +949,8 @@ def _cleanup_open_algo_orders(
 def _cancel_algo_orders(*, adapter: RealOrderAdapter, open_algo_orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     canceled: list[dict[str, Any]] = []
     for order in open_algo_orders:
-        algo_id = str(order.get("algoId") or "")
-        client_algo_id = str(order.get("clientAlgoId") or "")
+        algo_id = _algo_order_exchange_id(order)
+        client_algo_id = _algo_order_client_id(order)
         if not algo_id and not client_algo_id:
             continue
         canceled.append(adapter.cancel_algo_order_raw(algo_id=algo_id, client_algo_id=client_algo_id))
@@ -1025,64 +1059,115 @@ def _result_identity_candidates(result: CommandExecutionResult) -> set[tuple[str
         details.get("response_payload"),
         details.get("response_summary"),
         details.get("prepared_request", {}).get("params") if isinstance(details.get("prepared_request"), dict) else {},
+        details.get("prepared_request", {}).get("body") if isinstance(details.get("prepared_request"), dict) else {},
         details.get("signed_request", {}).get("params") if isinstance(details.get("signed_request"), dict) else {},
+        details.get("signed_request", {}).get("body") if isinstance(details.get("signed_request"), dict) else {},
     ):
         if isinstance(payload, dict):
-            identities.add((str(payload.get("algoId") or payload.get("orderId") or ""), str(payload.get("clientAlgoId") or payload.get("clientOrderId") or "")))
+            identities.add(
+                (
+                    str(payload.get("algoId") or payload.get("ordId") or payload.get("orderId") or ""),
+                    str(payload.get("algoClOrdId") or payload.get("clOrdId") or payload.get("clientAlgoId") or payload.get("clientOrderId") or ""),
+                )
+            )
+            data = payload.get("data")
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        identities.add(
+                            (
+                                str(item.get("algoId") or item.get("ordId") or item.get("orderId") or ""),
+                                str(item.get("algoClOrdId") or item.get("clOrdId") or item.get("clientAlgoId") or item.get("clientOrderId") or ""),
+                            )
+                        )
     identities.discard(("", ""))
     return identities
 
 
 def _algo_order_identity(order: dict[str, Any]) -> tuple[str, str]:
-    return (str(order.get("algoId") or order.get("orderId") or ""), str(order.get("clientAlgoId") or order.get("clientOrderId") or ""))
+    return (_algo_order_exchange_id(order), _algo_order_client_id(order))
+
+
+def _algo_order_exchange_id(order: dict[str, Any]) -> str:
+    return str(order.get("algoId") or order.get("ordId") or order.get("orderId") or "")
+
+
+def _algo_order_client_id(order: dict[str, Any]) -> str:
+    return str(order.get("algoClOrdId") or order.get("clOrdId") or order.get("clientAlgoId") or order.get("clientOrderId") or "")
 
 
 def _is_bot_owned_protective_algo_order(order: dict[str, Any]) -> bool:
-    client_algo_id = str(order.get("clientAlgoId") or "")
+    client_algo_id = _algo_order_client_id(order)
     return client_algo_id.startswith(BOT_PROTECTIVE_STOP_CLIENT_PREFIXES) and _is_active_protective_algo_order(order)
 
 
 def _is_active_protective_algo_order(order: dict[str, Any]) -> bool:
-    status = str(order.get("algoStatus") or order.get("status") or "").upper()
-    order_type = str(order.get("orderType") or order.get("type") or "").upper()
-    return status in ACTIVE_ALGO_STATUSES and order_type in PROTECTIVE_ORDER_TYPES
+    status = _algo_order_status(order)
+    order_type = _algo_order_type(order)
+    return status in (ACTIVE_ALGO_STATUSES | OKX_ACTIVE_ALGO_STATUSES) and order_type in PROTECTIVE_ORDER_TYPES
 
 
 def _protective_order_mismatch_reasons(*, order: dict[str, Any], direction: str, require_side_match: bool) -> list[str]:
     reason_codes: list[str] = []
-    symbol = str(order.get("symbol") or "ETHUSDT")
-    status = str(order.get("algoStatus") or order.get("status") or "").upper()
-    order_type = str(order.get("orderType") or order.get("type") or "").upper()
-    if symbol != "ETHUSDT":
+    symbol = _algo_order_symbol(order)
+    status = _algo_order_status(order)
+    order_type = _algo_order_type(order)
+    if symbol not in SUPPORTED_EXCHANGE_SYMBOLS:
         reason_codes.append("symbol_mismatch")
-    if status not in ACTIVE_ALGO_STATUSES:
+    if status not in (ACTIVE_ALGO_STATUSES | OKX_ACTIVE_ALGO_STATUSES):
         reason_codes.append("algo_status_not_active")
     if order_type not in PROTECTIVE_ORDER_TYPES:
         reason_codes.append("order_type_not_protective")
-    if not _to_bool(order.get("reduceOnly")) and not _to_bool(order.get("closePosition")):
+    if not _algo_order_is_reduce_only(order):
         reason_codes.append("reduce_only_missing")
     if require_side_match and direction in {"long", "short"}:
         expected_side = "SELL" if direction == "long" else "BUY"
         if str(order.get("side") or "").upper() != expected_side:
             reason_codes.append("side_mismatch")
-    if _to_decimal(order.get("triggerPrice") or order.get("stopPrice")) is None:
+    if _algo_order_trigger_price(order) is None:
         reason_codes.append("trigger_price_missing")
-    if not str(order.get("algoId") or order.get("clientAlgoId") or ""):
+    if not _algo_order_exchange_id(order) and not _algo_order_client_id(order):
         reason_codes.append("algo_identity_missing")
     return reason_codes
 
 
+def _algo_order_symbol(order: dict[str, Any]) -> str:
+    return str(order.get("instId") or order.get("symbol") or "ETH-USDT-SWAP")
+
+
+def _algo_order_status(order: dict[str, Any]) -> str:
+    return str(order.get("algoStatus") or order.get("state") or order.get("status") or "").upper()
+
+
+def _algo_order_type(order: dict[str, Any]) -> str:
+    return str(order.get("ordType") or order.get("orderType") or order.get("type") or "").upper()
+
+
+def _algo_order_is_reduce_only(order: dict[str, Any]) -> bool:
+    return (
+        _to_bool(order.get("reduceOnly"))
+        or _to_bool(order.get("closePosition"))
+        or str(order.get("closeFraction") or "") == "1"
+    )
+
+
+def _algo_order_trigger_price(order: dict[str, Any]) -> Decimal | None:
+    return _to_decimal(order.get("triggerPx") or order.get("triggerPrice") or order.get("stopPrice"))
+
+
 def _quantity_matches_command_or_result(*, order: dict[str, Any], command: ExecutionCommand, result: CommandExecutionResult) -> bool:
-    if _to_bool(order.get("closePosition")):
+    if _to_bool(order.get("closePosition")) or str(order.get("closeFraction") or "") == "1":
         return True
-    order_quantity = _to_decimal(order.get("quantity") or order.get("origQty"))
+    order_quantity = _to_decimal(order.get("sz") or order.get("quantity") or order.get("origQty"))
     if order_quantity is None:
         return True
     expected_values: list[Any] = []
     details = result.details if isinstance(result.details, dict) else {}
     expected_values.append(details.get("response_summary", {}).get("resolved_position_amt") if isinstance(details.get("response_summary"), dict) else None)
     expected_values.append(details.get("prepared_request", {}).get("params", {}).get("quantity") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("body", {}).get("sz") if isinstance(details.get("prepared_request"), dict) else None)
     expected_values.append(details.get("signed_request", {}).get("params", {}).get("quantity") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("body", {}).get("sz") if isinstance(details.get("signed_request"), dict) else None)
     expected_values.append(getattr(command.payload, "quantity", None))
     for value in expected_values:
         expected = _to_decimal(value)
@@ -1092,7 +1177,7 @@ def _quantity_matches_command_or_result(*, order: dict[str, Any], command: Execu
 
 
 def _trigger_price_matches_command_or_result(*, order: dict[str, Any], command: ExecutionCommand, result: CommandExecutionResult) -> bool:
-    order_trigger = _to_decimal(order.get("triggerPrice") or order.get("stopPrice"))
+    order_trigger = _algo_order_trigger_price(order)
     if order_trigger is None:
         return False
     expected_values: list[Any] = []
@@ -1100,8 +1185,10 @@ def _trigger_price_matches_command_or_result(*, order: dict[str, Any], command: 
     expected_values.append(details.get("response_summary", {}).get("resolved_stop_price") if isinstance(details.get("response_summary"), dict) else None)
     expected_values.append(details.get("prepared_request", {}).get("params", {}).get("triggerPrice") if isinstance(details.get("prepared_request"), dict) else None)
     expected_values.append(details.get("prepared_request", {}).get("params", {}).get("stopPrice") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("body", {}).get("triggerPx") if isinstance(details.get("prepared_request"), dict) else None)
     expected_values.append(details.get("signed_request", {}).get("params", {}).get("triggerPrice") if isinstance(details.get("signed_request"), dict) else None)
     expected_values.append(details.get("signed_request", {}).get("params", {}).get("stopPrice") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("body", {}).get("triggerPx") if isinstance(details.get("signed_request"), dict) else None)
     for value in expected_values:
         expected = _to_decimal(value)
         if expected is not None and abs(order_trigger - expected) <= STOP_PRICE_TOLERANCE:

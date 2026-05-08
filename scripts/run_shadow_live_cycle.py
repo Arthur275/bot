@@ -23,7 +23,7 @@ def main() -> int:
     )
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
     parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
 
     bot_root = Path(__file__).resolve().parents[1]
@@ -48,7 +48,7 @@ def main() -> int:
         artifacts_root=output_root / "artifacts",
         proxy_url=args.proxy_url or None,
         include_okx_overlay=bool(args.include_okx_overlay),
-        include_coinglass_overlay=bool(args.include_coinglass_overlay),
+        include_coinglass_overlay=args.include_coinglass_overlay,
     )
     client = EngineClient(
         config,

@@ -26,7 +26,7 @@ class PreparedRequestLike(Protocol):
     path: str
     requires_auth: bool
     params: dict[str, Any]
-    body: dict[str, Any]
+    body: Any
     idempotency_key: str
 
 
@@ -39,6 +39,7 @@ class SignedAdapterRequest(BaseModel):
     requires_auth: bool = True
     headers: dict[str, str] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)
+    body: Any = Field(default_factory=dict)
     idempotency_key: str = ""
 
 
@@ -104,6 +105,7 @@ class BinanceRequestSigner:
             requires_auth=prepared_request.requires_auth,
             headers=headers,
             params=params,
+            body={},
             idempotency_key=prepared_request.idempotency_key,
         )
 

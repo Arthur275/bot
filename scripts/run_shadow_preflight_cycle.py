@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +23,12 @@ class ParsedArgs(argparse.Namespace):
     proxy_url: str
     include_okx_overlay: bool
     include_coinglass_overlay: bool
+    consensus_request_timeout_sec: float
+    research_sync_request_path: str | None
+    research_dispatch_request_path: str | None
     api_key_env: str | None
     api_secret_env: str | None
+    api_passphrase_env: str | None
 
 
 def default_output_root() -> str:
@@ -61,13 +66,13 @@ def _summarize_preflight_result(result: Any) -> dict[str, Any]:
         "reason": result.reason,
         "method": prepared.get("method"),
         "path": prepared.get("path"),
-        "side": prepared_params.get("side"),
-        "type": prepared_params.get("type"),
-        "quantity": prepared_params.get("quantity"),
-        "stopPrice": prepared_params.get("stopPrice"),
+        "side": prepared_params.get("side") or body.get("side"),
+        "type": prepared_params.get("type") or body.get("ordType"),
+        "quantity": prepared_params.get("quantity") or body.get("sz"),
+        "stopPrice": prepared_params.get("stopPrice") or body.get("triggerPx"),
         "closePosition": prepared_params.get("closePosition"),
-        "newClientOrderId": prepared_params.get("newClientOrderId"),
-        "signed_quantity": signed_params.get("quantity"),
+        "newClientOrderId": prepared_params.get("newClientOrderId") or body.get("clOrdId") or body.get("algoClOrdId"),
+        "signed_quantity": signed_params.get("quantity") or (signed.get("body") or {}).get("sz"),
         "signed_stopPrice": signed_params.get("stopPrice"),
         "resolution_mode": body.get("resolution_mode"),
         "resolved_account_equity": body.get("resolved_account_equity"),
@@ -80,6 +85,16 @@ def _summarize_preflight_result(result: Any) -> dict[str, Any]:
     }
 
 
+def _load_real_adapter(venue: str) -> Any:
+    from bot.exchange_adapter import BinancePerpAdapter, OkxUsdtSwapAdapter
+
+    if venue == "okx_usdt_swap":
+        return OkxUsdtSwapAdapter
+    if venue == "binance_usdt_perp":
+        return BinancePerpAdapter
+    raise ValueError(f"Unsupported real adapter venue: {venue}")
+
+
 def _load_binance_perp_adapter() -> Any:
     from bot.exchange_adapter import BinancePerpAdapter
 
@@ -88,15 +103,19 @@ def _load_binance_perp_adapter() -> Any:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run one quant strict-live -> bot shadow -> Binance preflight cycle without submitting orders."
+        description="Run one quant strict-live -> bot shadow -> OKX preflight cycle without submitting orders."
     )
     parser.add_argument("--quant-root", default=DEFAULT_QUANT_ROOT)
     parser.add_argument("--output-root", default=default_output_root())
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
     parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--consensus-request-timeout-sec", type=float, default=10.0)
+    parser.add_argument("--research-sync-request", dest="research_sync_request_path", default=None)
+    parser.add_argument("--research-dispatch-request", dest="research_dispatch_request_path", default=None)
     parser.add_argument("--api-key-env", default=None)
     parser.add_argument("--api-secret-env", default=None)
+    parser.add_argument("--api-passphrase-env", default=None)
     return parser
 
 
@@ -131,21 +150,36 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         artifacts_root=output_root / "artifacts",
         proxy_url=args.proxy_url or None,
         include_okx_overlay=bool(args.include_okx_overlay),
-        include_coinglass_overlay=bool(args.include_coinglass_overlay),
+        include_coinglass_overlay=args.include_coinglass_overlay,
+        consensus_request_timeout_sec=float(getattr(args, "consensus_request_timeout_sec", 10.0) or 10.0),
+        research_sync_request_path=Path(sync_path) if (sync_path := getattr(args, "research_sync_request_path", None)) else None,
+        research_dispatch_request_path=Path(dispatch_path) if (dispatch_path := getattr(args, "research_dispatch_request_path", None)) else None,
     )
+    missing_api_envs: list[str] = []
     credentials = None
     real_adapter = None
     if args.api_key_env and args.api_secret_env:
+        requested_api_envs = [
+            args.api_key_env,
+            args.api_secret_env,
+            getattr(args, "api_passphrase_env", None) or getattr(config, "exchange_api_passphrase_env", ""),
+        ]
+        missing_api_envs = [
+            str(env_name)
+            for env_name in requested_api_envs
+            if env_name and not os.getenv(str(env_name))
+        ]
         credentials = AdapterCredentials(
             venue=config.exchange_venue,
             api_key_env=args.api_key_env,
             api_secret_env=args.api_secret_env,
+            api_passphrase_env=getattr(args, "api_passphrase_env", None) or getattr(config, "exchange_api_passphrase_env", ""),
             recv_window_ms=config.recv_window_ms,
             timeout_sec=config.timeout_sec,
             proxy_url=config.proxy_url,
             api_base_url=config.exchange_api_base_url,
         )
-        real_adapter = _load_binance_perp_adapter()(credentials)
+        real_adapter = _load_real_adapter(config.exchange_venue)(credentials)
     client = EngineClient(
         config,
         run_live_judgement_fn=run_live_judgement,
@@ -175,6 +209,8 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
 
     payload = {
         "runtime_mode": report.runtime_mode,
+        "exchange_venue": config.exchange_venue,
+        "exchange_symbol": config.exchange_symbol,
         "requested_action": report.requested_action,
         "effective_action": report.effective_action,
         "plan_reason": report.plan_reason,
@@ -199,7 +235,9 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         "execution_commands": [command.model_dump(mode="json") for command in commands],
         "preflight_statuses": [result.status for result in preflight_results],
         "preflight_error": preflight_error,
+        "preflight_diagnostics": [f"missing_api_env:{env_name}" for env_name in missing_api_envs],
         "preflight": [_summarize_preflight_result(result) for result in preflight_results],
+        "runtime_snapshot": audit_payload.get("runtime_snapshot") or {},
         "audit_log_path": str(config.audit_log_path),
         "state_path": str(config.state_store_path),
     }

@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 SCHEMA = "decision_review_v1"
 VERSION = 1
-DEFAULT_STALE_THRESHOLD_SEC = 180
+DEFAULT_STALE_THRESHOLD_SEC = 600
 REVIEW_BOUNDARY_SUMMARY = "审查报告仅供解释和复盘，不参与自动下单。"
 REVIEW_MODES = {
     "async_light",

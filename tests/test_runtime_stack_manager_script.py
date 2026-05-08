@@ -6,12 +6,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.ps1"
 CMD_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.cmd"
+BOT_SCHEDULER_MANAGER_PATH = REPO_ROOT / "scripts" / "manage_bot_runtime_scheduler.ps1"
+LAUNCH_STACK_PATH = REPO_ROOT / "scripts" / "launch_runtime_stack.ps1"
 PLAN_PATH = REPO_ROOT / "docs" / "runtime_stack_manager_plan.md"
 FINAL_PLAN_PATH = REPO_ROOT / "docs" / "automation_research_factor_dashboard_final_plan.md"
 
 
 def _script() -> str:
     return SCRIPT_PATH.read_text(encoding="utf-8")
+
+
+def _bot_scheduler_manager_script() -> str:
+    return BOT_SCHEDULER_MANAGER_PATH.read_text(encoding="utf-8")
+
+
+def _launch_stack_script() -> str:
+    return LAUNCH_STACK_PATH.read_text(encoding="utf-8")
 
 
 def test_runtime_stack_manager_entrypoints_exist() -> None:
@@ -23,8 +33,10 @@ def test_runtime_stack_manager_entrypoints_exist() -> None:
     assert '[ValidateSet("start", "stop", "status")]' in script
     assert "[switch]$EnableRealOrders" in script
     assert "[switch]$EnableReviewWorker" in script
+    assert "[switch]$DisableCoinglassOverlay" in script
     assert "[int]$ResearchRefreshEvery = 12" in script
     assert "[int]$ReviewIntervalSec = 300" in script
+    assert "[double]$ConsensusRequestTimeoutSec = 10.0" in script
     assert "manage_runtime_stack.ps1" in cmd
 
 
@@ -278,11 +290,77 @@ def test_gitignore_excludes_runtime_cache_temp_and_local_state_artifacts() -> No
 
 def test_runtime_stack_manager_refreshes_research_aliases_on_quant_schedule() -> None:
     script = _script()
-    quant_args = script[script.index("$QuantArgs = @(") : script.index("if ($IncludeCoinglassOverlay)")]
+    quant_args = script[script.index("$QuantArgs = @(") : script.index("if ($DisableCoinglassOverlay)")]
 
     assert '"--refresh-research-aliases"' not in quant_args
     assert '"--refresh-research-aliases-every"' in quant_args
     assert '([string]$ResearchRefreshEvery)' in quant_args
+    assert '"--consensus-request-timeout-sec"' in quant_args
+    assert '([string]$ConsensusRequestTimeoutSec)' in quant_args
+    assert '"--include-coinglass-overlay"' in quant_args
+
+    bot_args = script[script.index("$BotArgs = @(") : script.index("if ($EnableRealOrders)")]
+    assert '"--consensus-request-timeout-sec"' in bot_args
+    assert '([string]$ConsensusRequestTimeoutSec)' in bot_args
+    assert '"--research-dispatch-request"' in bot_args
+    assert "runtime\\fresh_research\\dispatch_request.json" in bot_args
+    assert '"--api-key-env"' in bot_args
+    assert '"OKX_TRADE_API_KEY"' in bot_args
+    assert '"--api-secret-env"' in bot_args
+    assert '"OKX_TRADE_API_SECRET"' in bot_args
+    assert '"--api-passphrase-env"' in bot_args
+    assert '"OKX_TRADE_PASSPHRASE"' in bot_args
+    assert '"--include-coinglass-overlay"' in bot_args
+
+
+def test_runtime_stack_manager_uses_wrapper_pattern_for_bot_scheduler_status_and_stop() -> None:
+    script = _script()
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    stop_block = script[script.index('if ($Action -eq "stop")') : script.index('Start-ManagedProcess -Name "dashboard"')]
+
+    assert 'Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"' in status_function
+    assert 'Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"' in stop_block
+
+
+def test_runtime_stack_manager_uses_wrapper_pattern_for_real_worker_status_start_and_stop() -> None:
+    script = _script()
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    stop_block = script[script.index('if ($Action -eq "stop")') : script.index('Start-ManagedProcess -Name "dashboard"')]
+    start_block = script[script.index('else {') : script.index('if ($EnableReviewWorker)')]
+
+    assert 'Repair-PidFromCommandPattern -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in status_function
+    assert 'Repair-PidFromCommandPattern -Name "real_worker" -Pattern "real_order_worker.py"' in status_function
+    assert 'Get-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in status_function
+    assert 'Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"' in status_function
+    assert 'Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in stop_block
+    assert 'Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"' in stop_block
+    assert 'Start-ManagedProcess -Name "real_worker" -FilePath "powershell.exe"' in start_block
+    assert '-Pattern "manage_real_order_worker.ps1"' in start_block
+
+
+def test_launch_and_bot_scheduler_manager_keep_coinglass_switch_explicit() -> None:
+    launch_script = _launch_stack_script()
+    manager_script = _bot_scheduler_manager_script()
+
+    assert "-DisableCoinglassOverlay" in launch_script
+    assert "[switch]$DisableCoinglassOverlay" in manager_script
+    assert '"--include-coinglass-overlay"' in manager_script
+    assert '"--no-include-coinglass-overlay"' in manager_script
+
+
+def test_launch_and_bot_scheduler_manager_pass_okx_runtime_snapshot_envs() -> None:
+    launch_script = _launch_stack_script()
+    manager_script = _bot_scheduler_manager_script()
+
+    assert "-ApiKeyEnv OKX_TRADE_API_KEY" in launch_script
+    assert "-ApiSecretEnv OKX_TRADE_API_SECRET" in launch_script
+    assert "-ApiPassphraseEnv OKX_TRADE_PASSPHRASE" in launch_script
+    assert '[string]$ApiKeyEnv = "OKX_TRADE_API_KEY"' in manager_script
+    assert '[string]$ApiSecretEnv = "OKX_TRADE_API_SECRET"' in manager_script
+    assert '[string]$ApiPassphraseEnv = "OKX_TRADE_PASSPHRASE"' in manager_script
+    assert '"--api-key-env", $ApiKeyEnv' in manager_script
+    assert '"--api-secret-env", $ApiSecretEnv' in manager_script
+    assert '"--api-passphrase-env", $ApiPassphraseEnv' in manager_script
 
 
 def test_final_plan_documents_research_health_boundaries() -> None:

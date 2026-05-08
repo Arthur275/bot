@@ -37,7 +37,7 @@ def _handoff(**overrides):
         "runtime_mode": "real",
         "engine_mode": "strict-live",
         "symbol": "ETH",
-        "exchange_symbol": "ETHUSDT",
+        "exchange_symbol": "ETH-USDT-SWAP",
         "direction": "long",
         "position_state": "ENTERED",
         "risk_filter_status": "pass",
@@ -66,6 +66,16 @@ def test_high_risk_gate_allows_valid_reduce(tmp_path) -> None:
     assert decision.allowed is True
     assert decision.blocked_reasons == []
     assert decision.reason_codes == ["high_risk_gate_pass"]
+
+
+def test_high_risk_gate_accepts_legacy_binance_symbol_scope(tmp_path) -> None:
+    decision = _gate(tmp_path).evaluate(
+        raw_handoff=_handoff(exchange_symbol="ETHUSDT"),
+        network_decision=_network(),
+        runtime_snapshot=_snapshot(),
+    )
+
+    assert decision.allowed is True
 
 
 def test_high_risk_gate_blocks_expired_handoff(tmp_path) -> None:
@@ -253,6 +263,22 @@ def test_high_risk_gate_allows_trailing_when_exchange_stop_and_stage_are_safe(tm
         runtime_snapshot=_snapshot(),
         state_metadata={"protective_stop": {"lock_stage": 2}},
         exchange_protective_stop={"trigger_price": 2314.1, "side": "SELL", "order_type": "STOP_MARKET", "algo_id": "100"},
+    )
+
+    assert decision.allowed is True
+
+
+def test_high_risk_gate_allows_trailing_with_okx_lowercase_stop_side(tmp_path) -> None:
+    decision = _gate(tmp_path).evaluate(
+        raw_handoff=_handoff(
+            action="trailing",
+            reduce_fraction=None,
+            trailing_rule={"activation_price": 2340.0, "callback_rate": 0.4},
+        ),
+        network_decision=_network(),
+        runtime_snapshot=_snapshot(),
+        state_metadata={"protective_stop": {"lock_stage": 2}},
+        exchange_protective_stop={"trigger_price": 2314.1, "side": "sell", "order_type": "conditional", "algo_id": "100"},
     )
 
     assert decision.allowed is True

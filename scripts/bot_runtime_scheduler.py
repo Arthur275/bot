@@ -32,7 +32,7 @@ def default_runtime_root() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Bot runtime scheduler: consume quant strict-live, run bot shadow planning, and Binance preflight without submitting orders."
+        description="Bot runtime scheduler: consume quant strict-live, run bot shadow planning, and OKX preflight without submitting orders."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -42,9 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--cycle-output-root", default=default_output_root())
         subparser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
         subparser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
-        subparser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=False)
+        subparser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
+        subparser.add_argument("--consensus-request-timeout-sec", type=float, default=10.0)
+        subparser.add_argument("--research-sync-request", dest="research_sync_request_path", default=None)
+        subparser.add_argument("--research-dispatch-request", dest="research_dispatch_request_path", default=None)
         subparser.add_argument("--api-key-env", default=None)
         subparser.add_argument("--api-secret-env", default=None)
+        subparser.add_argument("--api-passphrase-env", default=None)
         subparser.add_argument("--analysis-db-path", default=None)
         subparser.add_argument("--skip-analysis-ingest", action="store_true", default=False)
         subparser.add_argument("--enable-real-orders", action="store_true", default=False)
@@ -270,9 +274,13 @@ def _build_cycle_args(args: argparse.Namespace, output_root: Path) -> ParsedArgs
     cycle_args.output_root = str(output_root)
     cycle_args.proxy_url = args.proxy_url
     cycle_args.include_okx_overlay = bool(args.include_okx_overlay)
-    cycle_args.include_coinglass_overlay = bool(args.include_coinglass_overlay)
+    cycle_args.include_coinglass_overlay = args.include_coinglass_overlay
+    cycle_args.consensus_request_timeout_sec = float(getattr(args, "consensus_request_timeout_sec", 10.0) or 10.0)
+    cycle_args.research_sync_request_path = getattr(args, "research_sync_request_path", None)
+    cycle_args.research_dispatch_request_path = getattr(args, "research_dispatch_request_path", None)
     cycle_args.api_key_env = args.api_key_env
     cycle_args.api_secret_env = args.api_secret_env
+    cycle_args.api_passphrase_env = getattr(args, "api_passphrase_env", None)
     return cycle_args
 
 
@@ -337,8 +345,8 @@ def _write_candidate_execution_package(
         "expires_at": (generated_at + timedelta(seconds=180)).isoformat(),
         "runtime_mode": payload.get("runtime_mode") or "",
         "engine_mode": payload.get("engine_mode") or (payload.get("handoff") or {}).get("engine_mode") or "strict-live",
-        "symbol": payload.get("symbol") or "ETHUSDT",
-        "exchange_symbol": payload.get("exchange_symbol") or "ETHUSDT",
+        "symbol": payload.get("symbol") or "ETH",
+        "exchange_symbol": payload.get("exchange_symbol") or "ETH-USDT-SWAP",
         "action": action,
         "direction": (payload.get("handoff") or {}).get("direction") or "",
         "handoff": payload.get("handoff") or {},

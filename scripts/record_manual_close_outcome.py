@@ -19,14 +19,14 @@ for candidate in (SRC_ROOT, DEFAULT_QUANT_ROOT / "src"):
         sys.path.insert(0, normalized)
 
 from bot.config import BotConfig
-from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter
+from bot.exchange_adapter import AdapterCredentials, BinancePerpAdapter, OkxUsdtSwapAdapter
 
 
 class TradeHistoryAdapter(Protocol):
     def fetch_user_trades_raw(
         self,
         *,
-        symbol: str = "ETHUSDT",
+        symbol: str = "ETH-USDT-SWAP",
         limit: int = 100,
         start_time_ms: int | None = None,
         end_time_ms: int | None = None,
@@ -49,15 +49,16 @@ class ManualCloseMatch:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch read-only Binance futures trade history and record a manually closed ETH position outcome."
+        description="Fetch read-only exchange trade history and record a manually closed ETH position outcome."
     )
-    parser.add_argument("--symbol", default="ETHUSDT")
+    parser.add_argument("--symbol", default=BotConfig().exchange_symbol)
     parser.add_argument("--timeframe", default="15m")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--start-time", default="", help="UTC/ISO start time, optional")
     parser.add_argument("--end-time", default="", help="UTC/ISO end time, optional")
     parser.add_argument("--api-key-env", default=BotConfig().exchange_api_key_env)
     parser.add_argument("--api-secret-env", default=BotConfig().exchange_api_secret_env)
+    parser.add_argument("--api-passphrase-env", default=BotConfig().exchange_api_passphrase_env)
     parser.add_argument("--proxy-url", default=None)
     parser.add_argument("--quant-root", default=str(DEFAULT_QUANT_ROOT))
     parser.add_argument("--db-path", default="")
@@ -79,18 +80,16 @@ def main() -> int:
 
 def run(*, args: argparse.Namespace, adapter: TradeHistoryAdapter | None = None) -> dict[str, Any]:
     quant_root = Path(args.quant_root)
-    quant_src = quant_root / "src"
-    if str(quant_src) not in sys.path:
-        sys.path.insert(0, str(quant_src))
+    _prioritize_quant_src(quant_root)
 
     adapter = adapter or _build_adapter(args)
     trades = sorted(
-        adapter.fetch_user_trades_raw(
+        [_normalize_trade(item) for item in adapter.fetch_user_trades_raw(
             symbol=args.symbol,
             limit=int(args.limit),
             start_time_ms=_parse_optional_time_ms(args.start_time),
             end_time_ms=_parse_optional_time_ms(args.end_time),
-        ),
+        )],
         key=lambda item: int(item.get("time") or 0),
     )
     close_order_id = str(args.close_order_id or "")
@@ -104,7 +103,7 @@ def run(*, args: argparse.Namespace, adapter: TradeHistoryAdapter | None = None)
         "generated_at": generated_at.isoformat(),
         "symbol": args.symbol,
         "timeframe": args.timeframe,
-        "source": "binance_user_trades_read_only",
+        "source": "exchange_user_trades_read_only",
         "manual_close": True,
         "close_order_id_filter": close_order_id,
         "trade_count": len(trades),
@@ -125,6 +124,7 @@ def run(*, args: argparse.Namespace, adapter: TradeHistoryAdapter | None = None)
     if args.dry_run:
         return {"status": "dry_run", "artifact_path": str(artifact_path), "outcome": payload["outcome"]}
 
+    _clear_quant_module_cache()
     from analysis import write_decision_outcomes_summary
     from analysis.decision_outcomes import upsert_decision_outcome
 
@@ -141,18 +141,35 @@ def run(*, args: argparse.Namespace, adapter: TradeHistoryAdapter | None = None)
     }
 
 
-def _build_adapter(args: argparse.Namespace) -> BinancePerpAdapter:
-    config = BotConfig(proxy_url=args.proxy_url)
+def _build_adapter(args: argparse.Namespace) -> BinancePerpAdapter | OkxUsdtSwapAdapter:
+    if str(args.symbol or "") == "ETHUSDT":
+        api_key_env = args.api_key_env
+        api_secret_env = args.api_secret_env
+        if api_key_env == BotConfig().exchange_api_key_env:
+            api_key_env = "BINANCE_TRADE_API_KEY"
+        if api_secret_env == BotConfig().exchange_api_secret_env:
+            api_secret_env = "BINANCE_TRADE_API_SECRET"
+        config = BotConfig(
+            proxy_url=args.proxy_url,
+            exchange_venue="binance_usdt_perp",
+            exchange_symbol="ETHUSDT",
+            exchange_api_base_url="https://fapi.binance.com",
+            exchange_api_key_env=api_key_env,
+            exchange_api_secret_env=api_secret_env,
+        )
+    else:
+        config = BotConfig(proxy_url=args.proxy_url)
     credentials = AdapterCredentials(
         venue=config.exchange_venue,
-        api_key_env=args.api_key_env,
-        api_secret_env=args.api_secret_env,
+        api_key_env=config.exchange_api_key_env,
+        api_secret_env=config.exchange_api_secret_env,
+        api_passphrase_env="" if config.exchange_venue == "binance_usdt_perp" else (getattr(args, "api_passphrase_env", None) or getattr(config, "exchange_api_passphrase_env", "")),
         recv_window_ms=config.recv_window_ms,
         timeout_sec=config.timeout_sec,
         proxy_url=args.proxy_url,
         api_base_url=config.exchange_api_base_url,
     )
-    return BinancePerpAdapter(credentials)
+    return OkxUsdtSwapAdapter(credentials) if config.exchange_venue == "okx_usdt_swap" else BinancePerpAdapter(credentials)
 
 
 def infer_manual_long_close(trades: list[dict[str, Any]], *, close_order_id: str = "") -> ManualCloseMatch | None:
@@ -192,6 +209,8 @@ def infer_manual_long_close(trades: list[dict[str, Any]], *, close_order_id: str
 
 
 def build_outcome(*, match: ManualCloseMatch, args: argparse.Namespace, generated_at: datetime) -> Any:
+    _prioritize_quant_src(Path(args.quant_root))
+    _clear_quant_module_cache()
     from analysis import DecisionOutcome
 
     raw_return_pct = (match.exit_price / match.entry_price - 1.0) * 100.0
@@ -277,6 +296,19 @@ def _side(trade: dict[str, Any]) -> str:
     return str(trade.get("side") or "").upper()
 
 
+def _normalize_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    if "ordId" not in trade and "fillSz" not in trade:
+        return trade
+    normalized = dict(trade)
+    normalized.setdefault("orderId", trade.get("ordId"))
+    normalized.setdefault("qty", trade.get("fillSz"))
+    normalized.setdefault("price", trade.get("fillPx"))
+    normalized.setdefault("time", trade.get("ts"))
+    normalized.setdefault("realizedPnl", trade.get("pnl"))
+    normalized.setdefault("commission", trade.get("fee"))
+    return normalized
+
+
 def _decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value or "0"))
@@ -287,6 +319,26 @@ def _decimal(value: Any) -> Decimal:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _prioritize_quant_src(quant_root: Path) -> None:
+    requested_src = quant_root / "src"
+    quant_src = str(requested_src if (requested_src / "analysis" / "decision_outcomes.py").exists() else DEFAULT_QUANT_ROOT / "src")
+    sys.path[:] = [item for item in sys.path if item != quant_src]
+    sys.path.insert(0, quant_src)
+
+
+def _clear_quant_module_cache() -> None:
+    for module_name in list(sys.modules):
+        if (
+            module_name == "analysis"
+            or module_name.startswith("analysis.")
+            or module_name == "contracts"
+            or module_name.startswith("contracts.")
+            or module_name == "interfaces"
+            or module_name.startswith("interfaces.")
+        ):
+            sys.modules.pop(module_name, None)
 
 
 if __name__ == "__main__":

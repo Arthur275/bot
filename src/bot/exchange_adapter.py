@@ -15,6 +15,7 @@ from .binance_transport import (
     TransportResponse,
 )
 from .config import RuntimeMode
+from .okx_transport import OkxRequestConfigError, OkxRequestSigner, OkxTransport, OkxTransportError
 from .position_manager import ExecutionPlan
 
 
@@ -28,6 +29,9 @@ class PositionSnapshot(BaseModel):
     entry_price: float | None = None
     mark_price: float | None = None
     leverage: int | None = None
+    unrealized_pnl_usd: float | None = None
+    unrealized_pnl_pct_on_margin: float | None = None
+    price_vs_entry_pct: float | None = None
 
 
 class OrderSnapshot(BaseModel):
@@ -197,6 +201,7 @@ class AdapterCredentials(BaseModel):
     venue: str
     api_key_env: str
     api_secret_env: str
+    api_passphrase_env: str = ""
     recv_window_ms: int = Field(default=60000, gt=0)
     timeout_sec: float = Field(default=15.0, gt=0.0)
     proxy_url: str | None = None
@@ -216,6 +221,10 @@ class BinanceRequestMappingError(RuntimeError):
     pass
 
 
+ExchangeRequestConfigError = BinanceRequestConfigError | OkxRequestConfigError
+ExchangeTransportError = BinanceTransportError | OkxTransportError
+
+
 class PreparedAdapterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,7 +232,7 @@ class PreparedAdapterRequest(BaseModel):
     path: str
     requires_auth: bool = True
     params: dict[str, Any] = Field(default_factory=dict)
-    body: dict[str, Any] = Field(default_factory=dict)
+    body: Any = Field(default_factory=dict)
     idempotency_key: str = ""
 
 
@@ -519,8 +528,8 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         self,
         credentials: AdapterCredentials,
         *,
-        signer: BinanceRequestSigner | None = None,
-        transport: BinanceTransport | None = None,
+        signer: Any | None = None,
+        transport: Any | None = None,
     ) -> None:
         self._credentials = credentials
         self._signer = signer or BinanceRequestSigner(credentials)
@@ -581,7 +590,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 if current_runtime_snapshot is None:
                     try:
                         current_runtime_snapshot = self.fetch_runtime_snapshot()
-                    except BinanceRequestConfigError as exc:
+                    except (BinanceRequestConfigError, OkxRequestConfigError) as exc:
                         results.append(
                             self._build_execution_result(
                                 command=command,
@@ -595,7 +604,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                             )
                         )
                         continue
-                    except BinanceTransportError as exc:
+                    except (BinanceTransportError, OkxTransportError) as exc:
                         status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
                         reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
                         results.append(
@@ -641,7 +650,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                     )
                 )
                 continue
-            except BinanceRequestConfigError as exc:
+            except (BinanceRequestConfigError, OkxRequestConfigError) as exc:
                 results.append(
                     self._build_execution_result(
                         command=command,
@@ -655,7 +664,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                     )
                 )
                 continue
-            except BinanceTransportError as exc:
+            except (BinanceTransportError, OkxTransportError) as exc:
                 status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
                 reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
                 results.append(
@@ -695,14 +704,14 @@ class RealExchangeAdapter(BaseExchangeAdapter):
 
             try:
                 response = self._transport.send(signed_request)
-            except BinanceTransportError as exc:
+            except (BinanceTransportError, OkxTransportError) as exc:
                 if self._is_timestamp_outside_recv_window(exc):
                     try:
                         self._signer.refresh_timestamp_offset()
                         signed_request = self._signer.sign(prepared)
                         response = self._transport.send(signed_request)
-                    except (BinanceRequestConfigError, BinanceTransportError) as retry_exc:
-                        exc = retry_exc if isinstance(retry_exc, BinanceTransportError) else exc
+                    except (BinanceRequestConfigError, OkxRequestConfigError, BinanceTransportError, OkxTransportError) as retry_exc:
+                        exc = retry_exc if isinstance(retry_exc, (BinanceTransportError, OkxTransportError)) else exc
                     else:
                         exc = None
                 if exc is not None:
@@ -728,7 +737,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                     continue
 
             account_payload: Any = None
-            if command.target == "reconcile_position_and_orders":
+            if command.target == "reconcile_position_and_orders" and isinstance(self, BinancePerpAdapter):
                 current = response.payload[0] if isinstance(response.payload, list) and response.payload else response.payload
                 if BinancePerpAdapter._has_entered_position(current):
                     try:
@@ -741,7 +750,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                             )
                         )
                         account_payload = account_response.payload
-                    except (BinanceRequestConfigError, BinanceTransportError):
+                    except (BinanceRequestConfigError, OkxRequestConfigError, BinanceTransportError, OkxTransportError):
                         account_payload = None
 
             results.append(
@@ -777,7 +786,43 @@ class RealExchangeAdapter(BaseExchangeAdapter):
             current_runtime_snapshot = runtime_snapshot
             if self._requires_runtime_snapshot(command):
                 if current_runtime_snapshot is None:
-                    current_runtime_snapshot = self.fetch_runtime_snapshot()
+                    try:
+                        current_runtime_snapshot = self.fetch_runtime_snapshot()
+                    except (BinanceRequestConfigError, OkxRequestConfigError) as exc:
+                        results.append(
+                            self._build_execution_result(
+                                command=command,
+                                runtime_mode=RuntimeMode.REAL,
+                                prepared=prepared,
+                                status="error",
+                                accepted=False,
+                                simulated=True,
+                                reason="request_signing_failed",
+                                extra_details={"error": str(exc), "preflight": True},
+                            )
+                        )
+                        continue
+                    except (BinanceTransportError, OkxTransportError) as exc:
+                        status = "timeout" if exc.kind == "timeout" else "rejected" if exc.kind == "http_error" else "error"
+                        reason = "transport_timeout" if exc.kind == "timeout" else "exchange_rejected" if exc.kind == "http_error" else "transport_error"
+                        results.append(
+                            self._build_execution_result(
+                                command=command,
+                                runtime_mode=RuntimeMode.REAL,
+                                prepared=prepared,
+                                status=status,
+                                accepted=False,
+                                simulated=True,
+                                reason=reason,
+                                extra_details={
+                                    "http_status": exc.http_status,
+                                    "response_payload": exc.payload,
+                                    "error": str(exc),
+                                    "preflight": True,
+                                },
+                            )
+                        )
+                        continue
                     runtime_snapshot = current_runtime_snapshot
             try:
                 prepared = self.validate_prepared_request(
@@ -805,7 +850,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                     )
                 )
                 continue
-            except BinanceRequestConfigError as exc:
+            except (BinanceRequestConfigError, OkxRequestConfigError) as exc:
                 results.append(
                     self._build_execution_result(
                         command=command,
@@ -819,7 +864,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                     )
                 )
                 continue
-            except BinanceTransportError as exc:
+            except (BinanceTransportError, OkxTransportError) as exc:
                 if self._is_timestamp_outside_recv_window(exc):
                     try:
                         self._signer.refresh_timestamp_offset()
@@ -830,8 +875,8 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                             runtime_snapshot=current_runtime_snapshot,
                         )
                         signed_request = self._signer.sign(prepared)
-                    except (BinanceRequestConfigError, BinanceTransportError) as retry_exc:
-                        exc = retry_exc if isinstance(retry_exc, BinanceTransportError) else exc
+                    except (BinanceRequestConfigError, OkxRequestConfigError, BinanceTransportError, OkxTransportError) as retry_exc:
+                        exc = retry_exc if isinstance(retry_exc, (BinanceTransportError, OkxTransportError)) else exc
                     else:
                         results.append(
                             self._build_execution_result(
@@ -914,7 +959,9 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         return any(str(warning).strip() == "route_c_missing" for warning in warnings)
 
     @staticmethod
-    def _is_timestamp_outside_recv_window(exc: BinanceTransportError) -> bool:
+    def _is_timestamp_outside_recv_window(exc: ExchangeTransportError) -> bool:
+        if not isinstance(exc, BinanceTransportError):
+            return False
         if exc.kind != "http_error" or not isinstance(exc.payload, dict):
             return False
         return exc.payload.get("code") == -1021
@@ -961,13 +1008,26 @@ class RealExchangeAdapter(BaseExchangeAdapter):
     @staticmethod
     def _extract_client_order_id(*, prepared: PreparedAdapterRequest) -> str:
         params = prepared.params or {}
-        return str(params.get("newClientOrderId") or params.get("clientAlgoId") or "")
+        body = prepared.body if isinstance(prepared.body, dict) else {}
+        return str(
+            params.get("newClientOrderId")
+            or params.get("clientAlgoId")
+            or params.get("clOrdId")
+            or params.get("algoClOrdId")
+            or body.get("clOrdId")
+            or body.get("algoClOrdId")
+            or ""
+        )
 
     @staticmethod
     def _extract_exchange_order_id(payload: Any) -> str:
         if not isinstance(payload, dict):
             return ""
-        return str(payload.get("orderId") or payload.get("algoId") or "")
+        if isinstance(payload.get("data"), list) and payload["data"]:
+            first = payload["data"][0]
+            if isinstance(first, dict):
+                return str(first.get("ordId") or first.get("algoId") or "")
+        return str(payload.get("orderId") or payload.get("algoId") or payload.get("ordId") or "")
 
     @staticmethod
     def _resolve_error_kind(*, reason: str, extra_details: dict[str, Any] | None) -> str:
@@ -1010,6 +1070,26 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 "latest_time": (latest or {}).get("time"),
                 "latest_realized_pnl": str((latest or {}).get("realizedPnl") or ""),
             }
+        if command.target == "sync_recent_fills" and isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            latest = payload["data"][0] if payload["data"] else {}
+            distinct_order_count = len(
+                {
+                    str(item.get("ordId") or "")
+                    for item in payload["data"]
+                    if isinstance(item, dict) and str(item.get("ordId") or "")
+                }
+            )
+            return {
+                "fill_count": len(payload["data"]),
+                "distinct_order_count": distinct_order_count,
+                "latest_trade_id": str((latest or {}).get("tradeId") or ""),
+                "latest_order_id": str((latest or {}).get("ordId") or ""),
+                "latest_side": str((latest or {}).get("side") or ""),
+                "latest_price": str((latest or {}).get("fillPx") or ""),
+                "latest_qty": str((latest or {}).get("fillSz") or ""),
+                "latest_time": (latest or {}).get("ts"),
+                "latest_realized_pnl": str((latest or {}).get("pnl") or ""),
+            }
         if command.target == "reconcile_position_and_orders" and isinstance(payload, list):
             current = payload[0] if payload else {}
             amt_raw = (current or {}).get("positionAmt")
@@ -1034,6 +1114,14 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 "account_equity_source": account_equity_source,
             }
         if isinstance(payload, dict):
+            if isinstance(payload.get("data"), list) and payload["data"]:
+                first = payload["data"][0]
+                if isinstance(first, dict):
+                    summary = {}
+                    for key in ("ordId", "algoId", "sCode", "sMsg", "clOrdId", "algoClOrdId", "side", "ordType", "sz", "triggerPx"):
+                        if key in first:
+                            summary[key] = first.get(key)
+                    return summary
             summary: dict[str, Any] = {}
             for key in ("orderId", "status", "symbol", "side", "type", "clientOrderId"):
                 if key in payload:
@@ -1266,6 +1354,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
         elif position_amt < 0:
             direction = "short"
         entry_price = BinancePerpAdapter._to_optional_positive_float((current or {}).get("entryPrice"))
+        mark_price = BinancePerpAdapter._to_optional_positive_float((current or {}).get("markPrice"))
         leverage = BinancePerpAdapter._to_optional_int((current or {}).get("leverage"))
         size_pct = BinancePerpAdapter._resolve_position_size_pct(current=current, account_payload=account_payload, leverage=leverage)
         return PositionSnapshot(
@@ -1274,8 +1363,14 @@ class BinancePerpAdapter(RealExchangeAdapter):
             size_pct=size_pct,
             position_amt=position_amt,
             entry_price=entry_price,
-            mark_price=BinancePerpAdapter._to_optional_positive_float((current or {}).get("markPrice")),
+            mark_price=mark_price,
             leverage=leverage,
+            unrealized_pnl_usd=BinancePerpAdapter._to_optional_float_preserve_zero((current or {}).get("unRealizedProfit")),
+            price_vs_entry_pct=BinancePerpAdapter._price_vs_entry_pct(
+                entry_price=entry_price,
+                mark_price=mark_price,
+                direction=direction,
+            ),
         )
 
     @staticmethod
@@ -1309,6 +1404,13 @@ class BinancePerpAdapter(RealExchangeAdapter):
     def _extract_account_equity(account_payload: Any) -> float | None:
         value, _ = BinancePerpAdapter._extract_account_equity_with_source(account_payload)
         return value
+
+    @staticmethod
+    def _price_vs_entry_pct(*, entry_price: float | None, mark_price: float | None, direction: str) -> float | None:
+        if entry_price is None or mark_price is None or entry_price <= 0.0:
+            return None
+        raw = (mark_price - entry_price) / entry_price
+        return -raw if direction == "short" else raw
 
     @staticmethod
     def _extract_account_equity_with_source(account_payload: Any) -> tuple[float | None, str]:
@@ -2096,3 +2198,754 @@ class BinancePerpAdapter(RealExchangeAdapter):
         alias = aliases.get(command.target, "cmd")
         digest = sha256(command.idempotency_key.encode("utf-8")).hexdigest()[:16]
         return f"ethbot-{alias}-{digest}"
+
+
+class OkxUsdtSwapAdapter(RealExchangeAdapter):
+    ENTRY_MARK_PRICE_MAX_AGE_SEC = 15.0
+    INST_ID = "ETH-USDT-SWAP"
+
+    def __init__(
+        self,
+        credentials: AdapterCredentials,
+        *,
+        signer: OkxRequestSigner | None = None,
+        transport: OkxTransport | None = None,
+    ) -> None:
+        self._credentials = credentials
+        self._signer = signer or OkxRequestSigner(credentials)
+        self._transport = transport or OkxTransport(credentials)
+
+    def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
+        fetched_at = datetime.now().replace(microsecond=0)
+        try:
+            positions_response = self._send_snapshot_request(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/account/positions",
+                    params={"instId": self.INST_ID},
+                )
+            )
+            orders_response = self._send_snapshot_request(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/trade/orders-pending",
+                    params={"instId": self.INST_ID},
+                )
+            )
+            balance_response = self._send_snapshot_request(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/account/balance",
+                    params={"ccy": "USDT"},
+                )
+            )
+        except OkxRequestConfigError:
+            raise
+        except OkxTransportError as exc:
+            return self._invalid_runtime_snapshot(
+                fetched_at=fetched_at,
+                endpoint=self._error_endpoint_from_payload(exc.payload),
+                exc=exc,
+            )
+        algo_payload: Any = []
+        try:
+            algo_response = self._send_snapshot_request(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/trade/orders-algo-pending",
+                    params={"instId": self.INST_ID, "ordType": "conditional"},
+                )
+            )
+            algo_payload = algo_response.payload
+        except OkxTransportError as exc:
+            return self._invalid_runtime_snapshot(
+                fetched_at=fetched_at,
+                endpoint="/api/v5/trade/orders-algo-pending",
+                exc=exc,
+            )
+        position_snapshot = self._build_position_snapshot(
+            positions_response.payload,
+            balance_payload=balance_response.payload,
+        )
+        open_orders = [
+            *self._build_open_orders_snapshot(orders_response.payload),
+            *self._build_open_algo_orders_snapshot(algo_payload),
+        ]
+        account_equity, account_equity_source = self._extract_account_equity_with_source(balance_response.payload)
+        return AdapterRuntimeSnapshot(
+            fetched_at=fetched_at,
+            mark_price_fetched_at=fetched_at if position_snapshot.mark_price is not None else None,
+            position=position_snapshot,
+            open_orders=open_orders,
+            protective_stop_present=self._has_protective_stop(open_orders),
+            account_equity=account_equity,
+            account_equity_source=account_equity_source,
+        )
+
+    def _send_snapshot_request(self, request: PreparedAdapterRequest) -> TransportResponse:
+        return self._transport.send(self._signer.sign(request))
+
+    @staticmethod
+    def _invalid_runtime_snapshot(
+        *,
+        fetched_at: datetime,
+        endpoint: str,
+        exc: OkxTransportError,
+    ) -> AdapterRuntimeSnapshot:
+        return AdapterRuntimeSnapshot(
+            fetched_at=fetched_at,
+            snapshot_valid=False,
+            error_endpoint=endpoint,
+            error_kind=exc.kind,
+            error_message=str(exc),
+            error_http_status=exc.http_status,
+            error_payload=exc.payload,
+        )
+
+    @staticmethod
+    def _error_endpoint_from_payload(payload: Any) -> str:
+        if isinstance(payload, dict):
+            return str(payload.get("endpoint") or payload.get("path") or "")
+        return ""
+
+    def prepare_requests(self, *, commands: list[ExecutionCommand]) -> list[PreparedAdapterRequest]:
+        return [self._map_command_to_request(command) for command in commands]
+
+    def validate_prepared_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_mode: RuntimeMode,
+        runtime_snapshot: AdapterRuntimeSnapshot | None = None,
+    ) -> PreparedAdapterRequest:
+        if runtime_mode != RuntimeMode.REAL:
+            return prepared
+        if command.target == "entry_order":
+            return self._resolve_entry_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "exit_order":
+            return self._resolve_exit_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "reduce_order":
+            raise BinanceRequestMappingError("Real OKX reduce order requires an explicit reduce size contract from quant handoff")
+        if command.target == "maintain_protective_stop":
+            return self._resolve_protective_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target in {"advance_breakeven_stop", "advance_trailing_stop"}:
+            raise BinanceRequestMappingError("Real OKX stop replace is not enabled until cancel/replace reconciliation is implemented")
+        return prepared
+
+    def _resolve_entry_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, EntryOrderPayload):
+            raise BinanceRequestMappingError("Entry order payload is required for real OKX entry execution")
+        runtime_snapshot = self._require_valid_runtime_snapshot(runtime_snapshot=runtime_snapshot, error_context="Entry order")
+        if runtime_snapshot.position.position_state == "ENTERED":
+            raise BinanceRequestMappingError("Real OKX entry order requires a flat live position")
+        position_size_pct = float(payload.position_size_pct or 0.0)
+        if position_size_pct <= 0.0:
+            raise BinanceRequestMappingError("Real OKX entry order requires a positive position_size_pct")
+        account_equity = self._resolve_account_equity_for_entry(runtime_snapshot)
+        contract = self._fetch_symbol_contract()
+        leverage = runtime_snapshot.position.leverage or 10
+        if leverage <= 0:
+            raise BinanceRequestMappingError("Real OKX entry order requires a positive leverage")
+        mark_price, mark_price_source, mark_price_age_sec = self._resolve_entry_mark_price(
+            contract=contract,
+            runtime_snapshot=runtime_snapshot,
+        )
+        size = self._derive_entry_contract_size(
+            position_size_pct=position_size_pct,
+            account_equity=account_equity,
+            leverage=leverage,
+            mark_price=mark_price,
+            contract_value=contract["contract_value"],
+            min_size=contract["min_size"],
+            lot_size=contract["lot_size"],
+        )
+        body = {
+            **prepared.body,
+            "sz": size,
+        }
+        return prepared.model_copy(
+            update={
+                "body": {
+                    **body,
+                    "resolved_size": size,
+                    "resolved_mark_price": format(mark_price, "f"),
+                    "mark_price_source": mark_price_source,
+                    "mark_price_age_sec": mark_price_age_sec,
+                    "resolved_account_equity": format(account_equity, "f"),
+                    "resolved_leverage": leverage,
+                    "resolved_lot_size": format(contract["lot_size"], "f"),
+                    "resolved_min_size": format(contract["min_size"], "f"),
+                    "resolved_contract_value": format(contract["contract_value"], "f"),
+                    "resolution_mode": "okx_entry_contracts_from_size_pct",
+                },
+            }
+        )
+
+    def _resolve_exit_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, ExitOrderPayload):
+            raise BinanceRequestMappingError("Exit order payload is required for real OKX exit execution")
+        position = self._resolve_live_position_for_exit(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+        )
+        size = self._format_position_contract_size(position.position_amt)
+        return prepared.model_copy(
+            update={
+                "body": {
+                    **prepared.body,
+                    "side": self._resolve_close_side(position.direction),
+                    "sz": size,
+                    "resolved_position_amt": size,
+                    "resolution_mode": "okx_exit_size_from_live_position",
+                },
+            }
+        )
+
+    def _resolve_protective_stop_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, ProtectiveStopPayload):
+            raise BinanceRequestMappingError("Protective stop payload is required for real OKX stop execution")
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Protective stop",
+        )
+        if payload.initial_stop_loss is None:
+            raise BinanceRequestMappingError("Real OKX protective stop requires initial_stop_loss")
+        trigger_price = self._derive_stop_price(
+            direction=position.direction,
+            reference_price=position.entry_price,
+            stop_ratio=payload.initial_stop_loss,
+        )
+        size = self._format_position_contract_size(position.position_amt)
+        return prepared.model_copy(
+            update={
+                "body": {
+                    **prepared.body,
+                    "side": self._resolve_close_side(position.direction),
+                    "sz": size,
+                    "triggerPx": trigger_price,
+                    "orderPx": "-1",
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_stop_price": trigger_price,
+                    "resolved_position_amt": size,
+                    "resolution_mode": "okx_initial_stop_from_live_entry",
+                },
+            }
+        )
+
+    def _map_command_to_request(self, command: ExecutionCommand) -> PreparedAdapterRequest:
+        if command.target == "entry_order":
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_entry_side(
+                    action=getattr(command.payload, "action", ""),
+                    direction=getattr(command.payload, "direction", ""),
+                ),
+                reduce_only=False,
+            )
+        if command.target == "exit_order":
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                reduce_only=True,
+            )
+        if command.target == "reduce_order":
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                reduce_only=True,
+            )
+        if command.target == "maintain_protective_stop":
+            return self._build_algo_order_request(command=command)
+        if command.target == "sync_recent_fills":
+            return PreparedAdapterRequest(
+                method="GET",
+                path="/api/v5/trade/fills",
+                params={"instId": self.INST_ID, "limit": 20},
+                idempotency_key=command.idempotency_key,
+            )
+        if command.target == "reconcile_position_and_orders":
+            return PreparedAdapterRequest(
+                method="GET",
+                path="/api/v5/account/positions",
+                params={"instId": self.INST_ID},
+                idempotency_key=command.idempotency_key,
+            )
+        return PreparedAdapterRequest(
+            method="GET",
+            path="/api/v5/public/time",
+            requires_auth=False,
+            idempotency_key=command.idempotency_key,
+        )
+
+    @staticmethod
+    def _build_order_request(*, command: ExecutionCommand, side: str, reduce_only: bool) -> PreparedAdapterRequest:
+        body = {
+            "instId": OkxUsdtSwapAdapter.INST_ID,
+            "tdMode": "cross",
+            "side": side,
+            "ordType": "market",
+            "clOrdId": OkxUsdtSwapAdapter._build_client_order_id(command),
+        }
+        if reduce_only:
+            body["reduceOnly"] = "true"
+        return PreparedAdapterRequest(
+            method="POST",
+            path="/api/v5/trade/order",
+            body=body,
+            idempotency_key=command.idempotency_key,
+        )
+
+    @staticmethod
+    def _build_algo_order_request(*, command: ExecutionCommand) -> PreparedAdapterRequest:
+        return PreparedAdapterRequest(
+            method="POST",
+            path="/api/v5/trade/order-algo",
+            body={
+                "instId": OkxUsdtSwapAdapter.INST_ID,
+                "tdMode": "cross",
+                "ordType": "conditional",
+                "algoClOrdId": OkxUsdtSwapAdapter._build_client_order_id(command),
+                "closeFraction": "1",
+            },
+            idempotency_key=command.idempotency_key,
+        )
+
+    def fetch_open_algo_orders_raw(self) -> list[dict[str, Any]]:
+        response = self._send_snapshot_request(
+            PreparedAdapterRequest(
+                method="GET",
+                path="/api/v5/trade/orders-algo-pending",
+                params={"instId": self.INST_ID, "ordType": "conditional"},
+            )
+        )
+        data = self._okx_data(response.payload)
+        return [item for item in data if isinstance(item, dict)]
+
+    def cancel_algo_order_raw(self, *, algo_id: str = "", client_algo_id: str = "") -> dict[str, Any]:
+        if not algo_id and not client_algo_id:
+            raise BinanceRequestMappingError("Cancel OKX algo order requires algo_id or client_algo_id")
+        body = {
+            "instId": self.INST_ID,
+            **({"algoId": algo_id} if algo_id else {}),
+            **({"algoClOrdId": client_algo_id} if client_algo_id else {}),
+        }
+        response = self._send_snapshot_request(
+            PreparedAdapterRequest(method="POST", path="/api/v5/trade/cancel-algos", body=[body])
+        )
+        return response.payload if isinstance(response.payload, dict) else {"payload": response.payload}
+
+    def place_algo_order_raw(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        body = dict(params)
+        if "symbol" in body and "instId" not in body:
+            body["instId"] = self.INST_ID
+            body.pop("symbol", None)
+        if "type" in body and "ordType" not in body:
+            order_type = str(body.pop("type") or "")
+            body["ordType"] = "conditional" if order_type.upper() == "STOP_MARKET" else order_type
+        if "quantity" in body and "sz" not in body:
+            body["sz"] = str(body.pop("quantity"))
+        if "triggerPrice" in body and "triggerPx" not in body:
+            body["triggerPx"] = str(body.pop("triggerPrice"))
+        if "clientAlgoId" in body and "algoClOrdId" not in body:
+            body["algoClOrdId"] = str(body.pop("clientAlgoId"))
+        body.pop("algoType", None)
+        body.pop("workingType", None)
+        if "tdMode" not in body:
+            body["tdMode"] = "cross"
+        if "ordType" not in body:
+            body["ordType"] = "conditional"
+        if str(body.get("ordType") or "").lower() == "conditional" and str(body.get("orderPx") or "") == "":
+            body["orderPx"] = "-1"
+        response = self._send_snapshot_request(
+            PreparedAdapterRequest(method="POST", path="/api/v5/trade/order-algo", body=body)
+        )
+        return response.payload if isinstance(response.payload, dict) else {"payload": response.payload}
+
+    def fetch_user_trades_raw(
+        self,
+        *,
+        symbol: str = "ETH-USDT-SWAP",
+        limit: int = 100,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"instId": symbol or self.INST_ID, "limit": limit}
+        if start_time_ms is not None:
+            params["begin"] = start_time_ms
+        if end_time_ms is not None:
+            params["end"] = end_time_ms
+        response = self._send_snapshot_request(
+            PreparedAdapterRequest(method="GET", path="/api/v5/trade/fills", params=params)
+        )
+        data = self._okx_data(response.payload)
+        return [item for item in data if isinstance(item, dict)]
+
+    @staticmethod
+    def _build_position_snapshot(payload: Any, *, balance_payload: Any = None) -> PositionSnapshot:
+        current = OkxUsdtSwapAdapter._first_okx_item(payload)
+        pos_raw = current.get("pos") if current else None
+        position_amt = BinancePerpAdapter._to_optional_float_preserve_zero(pos_raw)
+        position_amt = position_amt if position_amt is not None else 0.0
+        pos_side = str((current or {}).get("posSide") or "").lower()
+        direction = "neutral"
+        if position_amt > 0:
+            direction = "short" if pos_side == "short" else "long"
+        elif position_amt < 0:
+            direction = "short"
+        entry_price = BinancePerpAdapter._to_optional_positive_float((current or {}).get("avgPx"))
+        mark_price = BinancePerpAdapter._to_optional_positive_float((current or {}).get("markPx"))
+        leverage = BinancePerpAdapter._to_optional_int((current or {}).get("lever"))
+        size_pct = OkxUsdtSwapAdapter._resolve_position_size_pct(current=current, balance_payload=balance_payload, leverage=leverage)
+        return PositionSnapshot(
+            position_state="ENTERED" if position_amt != 0.0 else "FLAT",
+            direction=direction,
+            size_pct=size_pct,
+            position_amt=position_amt,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            leverage=leverage,
+            unrealized_pnl_usd=BinancePerpAdapter._to_optional_float_preserve_zero((current or {}).get("upl")),
+            unrealized_pnl_pct_on_margin=BinancePerpAdapter._to_optional_float_preserve_zero((current or {}).get("uplRatio")),
+            price_vs_entry_pct=BinancePerpAdapter._price_vs_entry_pct(
+                entry_price=entry_price,
+                mark_price=mark_price,
+                direction=direction,
+            ),
+        )
+
+    @staticmethod
+    def _resolve_position_size_pct(*, current: dict[str, Any], balance_payload: Any, leverage: int | None) -> float:
+        notional = BinancePerpAdapter._to_optional_float_preserve_zero(current.get("notionalUsd"))
+        if notional is None:
+            notional = BinancePerpAdapter._to_optional_float_preserve_zero(current.get("notionalUsdForBorrow"))
+        equity = OkxUsdtSwapAdapter._extract_account_equity(balance_payload)
+        if notional is None or notional <= 0.0 or equity is None or equity <= 0.0:
+            return 0.0
+        live_leverage = leverage or 10
+        denominator = equity * float(live_leverage)
+        if denominator <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, round(abs(notional) / denominator, 4)))
+
+    @staticmethod
+    def _extract_account_equity(balance_payload: Any) -> float | None:
+        value, _ = OkxUsdtSwapAdapter._extract_account_equity_with_source(balance_payload)
+        return value
+
+    @staticmethod
+    def _extract_account_equity_with_source(balance_payload: Any) -> tuple[float | None, str]:
+        current = OkxUsdtSwapAdapter._first_okx_item(balance_payload)
+        if not current:
+            return None, ""
+        for key in ("totalEq", "adjEq"):
+            value = BinancePerpAdapter._to_optional_positive_float(current.get(key))
+            if value is not None and value > 0.0:
+                return value, key
+        details = current.get("details")
+        if isinstance(details, list):
+            for item in details:
+                if not isinstance(item, dict) or str(item.get("ccy") or "") != "USDT":
+                    continue
+                for key in ("eq", "cashBal", "availEq"):
+                    value = BinancePerpAdapter._to_optional_positive_float(item.get(key))
+                    if value is not None and value > 0.0:
+                        return value, f"details.USDT.{key}"
+        return None, ""
+
+    @staticmethod
+    def _build_open_orders_snapshot(payload: Any) -> list[OrderSnapshot]:
+        orders: list[OrderSnapshot] = []
+        for item in OkxUsdtSwapAdapter._okx_data(payload):
+            if not isinstance(item, dict):
+                continue
+            orders.append(
+                OrderSnapshot(
+                    order_id=str(item.get("ordId") or item.get("clOrdId") or ""),
+                    order_type=str(item.get("ordType") or ""),
+                    status=str(item.get("state") or "open"),
+                    side=str(item.get("side") or "").upper(),
+                    reduce_only=BinancePerpAdapter._to_bool(item.get("reduceOnly")),
+                    price=BinancePerpAdapter._to_optional_positive_float(item.get("px")),
+                    trigger_price=None,
+                )
+            )
+        return orders
+
+    @staticmethod
+    def _build_open_algo_orders_snapshot(payload: Any) -> list[OrderSnapshot]:
+        orders: list[OrderSnapshot] = []
+        for item in OkxUsdtSwapAdapter._okx_data(payload):
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state") or "").lower()
+            if state and state not in {"live", "effective"}:
+                continue
+            close_fraction = str(item.get("closeFraction") or "")
+            reduce_only = close_fraction == "1" or BinancePerpAdapter._to_bool(item.get("reduceOnly"))
+            orders.append(
+                OrderSnapshot(
+                    order_id=f"algo:{item.get('algoId') or item.get('algoClOrdId') or ''}",
+                    order_type=str(item.get("ordType") or "conditional").upper(),
+                    status=state or "live",
+                    side=str(item.get("side") or "").upper(),
+                    reduce_only=reduce_only,
+                    price=BinancePerpAdapter._to_optional_positive_float(item.get("orderPx")),
+                    trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("triggerPx")),
+                )
+            )
+        return orders
+
+    @staticmethod
+    def _has_protective_stop(open_orders: list[OrderSnapshot]) -> bool:
+        return any(order.reduce_only and order.order_type.upper() in {"CONDITIONAL", "STOP", "STOP_MARKET"} for order in open_orders)
+
+    def _fetch_symbol_contract(self) -> dict[str, Decimal]:
+        instrument_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/public/instruments",
+                    requires_auth=False,
+                    params={"instType": "SWAP", "instId": self.INST_ID},
+                )
+            )
+        )
+        ticker_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/market/ticker",
+                    requires_auth=False,
+                    params={"instId": self.INST_ID},
+                )
+            )
+        )
+        return self._extract_symbol_contract(instrument_response.payload, ticker_response.payload)
+
+    @staticmethod
+    def _extract_symbol_contract(instrument_payload: Any, ticker_payload: Any) -> dict[str, Decimal]:
+        instrument = OkxUsdtSwapAdapter._first_okx_item(instrument_payload)
+        if not instrument:
+            raise BinanceRequestMappingError("Real OKX entry order requires instrument metadata")
+        lot_size = BinancePerpAdapter._to_positive_decimal(instrument.get("lotSz"), error_message="Real OKX entry order requires a positive lotSz")
+        min_size = BinancePerpAdapter._to_positive_decimal(instrument.get("minSz"), error_message="Real OKX entry order requires a positive minSz")
+        contract_value = BinancePerpAdapter._to_positive_decimal(instrument.get("ctVal"), error_message="Real OKX entry order requires a positive ctVal")
+        ticker = OkxUsdtSwapAdapter._first_okx_item(ticker_payload)
+        mark_price = BinancePerpAdapter._to_positive_decimal(
+            (ticker or {}).get("last"),
+            error_message="Real OKX entry order requires a positive mark price",
+        )
+        return {
+            "lot_size": lot_size,
+            "min_size": min_size,
+            "contract_value": contract_value,
+            "mark_price": mark_price,
+        }
+
+    @staticmethod
+    def _derive_entry_contract_size(
+        *,
+        position_size_pct: float,
+        account_equity: Decimal,
+        leverage: int,
+        mark_price: Decimal,
+        contract_value: Decimal,
+        min_size: Decimal,
+        lot_size: Decimal,
+    ) -> str:
+        try:
+            size_pct = Decimal(str(position_size_pct))
+            leverage_decimal = Decimal(str(leverage))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Real OKX entry order size inputs are not valid decimals") from exc
+        if size_pct <= 0 or size_pct > 1:
+            raise BinanceRequestMappingError("Real OKX entry order requires position_size_pct between 0 and 1")
+        raw_size = size_pct * account_equity * leverage_decimal / (mark_price * contract_value)
+        size = raw_size.quantize(lot_size, rounding=ROUND_DOWN)
+        if size < min_size:
+            raise BinanceRequestMappingError("Real OKX entry order resolved size is below minSz")
+        if size <= 0:
+            raise BinanceRequestMappingError("Real OKX entry order resolved size must be positive")
+        return format(size, "f")
+
+    @staticmethod
+    def _resolve_entry_mark_price(
+        *,
+        contract: dict[str, Decimal],
+        runtime_snapshot: AdapterRuntimeSnapshot,
+    ) -> tuple[Decimal, str, float | None]:
+        runtime_mark_price = runtime_snapshot.position.mark_price
+        mark_price_timestamp = runtime_snapshot.mark_price_fetched_at or runtime_snapshot.fetched_at
+        mark_price_age_sec = BinancePerpAdapter._mark_price_age_sec(mark_price_timestamp)
+        if (
+            runtime_mark_price is not None
+            and runtime_mark_price > 0.0
+            and mark_price_age_sec is not None
+            and mark_price_age_sec <= OkxUsdtSwapAdapter.ENTRY_MARK_PRICE_MAX_AGE_SEC
+        ):
+            return Decimal(str(runtime_mark_price)), "runtime_snapshot", mark_price_age_sec
+        mark_price = contract["mark_price"]
+        if mark_price <= 0:
+            raise BinanceRequestMappingError("Real OKX entry order requires a positive mark price")
+        return mark_price, "ticker", mark_price_age_sec
+
+    def _resolve_account_equity_for_entry(self, runtime_snapshot: AdapterRuntimeSnapshot) -> Decimal:
+        if runtime_snapshot.account_equity is not None and runtime_snapshot.account_equity > 0.0:
+            return Decimal(str(runtime_snapshot.account_equity))
+        balance_response = self._transport.send(
+            self._signer.sign(
+                PreparedAdapterRequest(
+                    method="GET",
+                    path="/api/v5/account/balance",
+                    params={"ccy": "USDT"},
+                )
+            )
+        )
+        equity = self._extract_account_equity(balance_response.payload)
+        if equity is None or equity <= 0.0:
+            raise BinanceRequestMappingError("Real OKX entry order requires a positive account equity")
+        return Decimal(str(equity))
+
+    @staticmethod
+    def _require_valid_runtime_snapshot(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        error_context: str,
+    ) -> AdapterRuntimeSnapshot:
+        if runtime_snapshot is None or not runtime_snapshot.snapshot_valid:
+            raise BinanceRequestMappingError(
+                f"A valid runtime snapshot is required before sending a real OKX {error_context.lower()}"
+            )
+        return runtime_snapshot
+
+    @staticmethod
+    def _resolve_live_position_for_stop(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        payload_direction: str,
+        error_context: str,
+    ) -> PositionSnapshot:
+        runtime_snapshot = OkxUsdtSwapAdapter._require_valid_runtime_snapshot(
+            runtime_snapshot=runtime_snapshot,
+            error_context=error_context,
+        )
+        position = runtime_snapshot.position
+        if position.position_state != "ENTERED":
+            raise BinanceRequestMappingError(f"Real OKX {error_context.lower()} requires an existing entered position")
+        if position.direction not in {"long", "short"}:
+            raise BinanceRequestMappingError(f"Real OKX {error_context.lower()} requires a known position direction")
+        if payload_direction and payload_direction != position.direction:
+            raise BinanceRequestMappingError(f"OKX {error_context} direction does not match live position direction")
+        if position.entry_price is None or position.entry_price <= 0.0:
+            raise BinanceRequestMappingError(f"Real OKX {error_context.lower()} requires a valid live entry price")
+        return position
+
+    @staticmethod
+    def _resolve_live_position_for_exit(
+        *,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+        payload_direction: str,
+    ) -> PositionSnapshot:
+        runtime_snapshot = OkxUsdtSwapAdapter._require_valid_runtime_snapshot(
+            runtime_snapshot=runtime_snapshot,
+            error_context="Exit order",
+        )
+        position = runtime_snapshot.position
+        if position.position_state != "ENTERED":
+            raise BinanceRequestMappingError("Real OKX exit order requires an existing entered position")
+        if position.direction not in {"long", "short"}:
+            raise BinanceRequestMappingError("Real OKX exit order requires a known position direction")
+        if payload_direction and payload_direction != position.direction:
+            raise BinanceRequestMappingError("OKX exit order direction does not match live position direction")
+        return position
+
+    @staticmethod
+    def _format_position_contract_size(position_amt: float | None) -> str:
+        try:
+            size = Decimal(str(abs(position_amt or 0.0)))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Real OKX position size is not a valid decimal") from exc
+        if size <= 0:
+            raise BinanceRequestMappingError("Real OKX order requires a positive live position amount")
+        return format(size.normalize(), "f")
+
+    @staticmethod
+    def _resolve_entry_side(*, action: str, direction: str = "") -> str:
+        normalized_action = action.strip().lower()
+        normalized_direction = direction.strip().lower()
+        if normalized_action == "entry_long" or normalized_direction == "long":
+            return "buy"
+        if normalized_action == "entry_short" or normalized_direction == "short":
+            return "sell"
+        raise BinanceRequestMappingError("OKX entry order direction must be long or short")
+
+    @staticmethod
+    def _resolve_close_side(direction: str) -> str:
+        if direction == "long":
+            return "sell"
+        if direction == "short":
+            return "buy"
+        raise BinanceRequestMappingError("OKX close order direction must be long or short")
+
+    @staticmethod
+    def _resolve_close_side_from_payload(payload: Any) -> str:
+        return "sell" if getattr(payload, "direction", "") == "long" else "buy"
+
+    @staticmethod
+    def _derive_stop_price(*, direction: str, reference_price: float, stop_ratio: float) -> str:
+        return BinancePerpAdapter._derive_stop_price(
+            direction=direction,
+            reference_price=reference_price,
+            stop_ratio=stop_ratio,
+        )
+
+    @staticmethod
+    def _build_client_order_id(command: ExecutionCommand) -> str:
+        aliases = {
+            "entry_order": "eo",
+            "reduce_order": "ro",
+            "exit_order": "xo",
+            "maintain_protective_stop": "ps",
+            "advance_breakeven_stop": "be",
+            "advance_trailing_stop": "ts",
+        }
+        alias = aliases.get(command.target, "cmd")
+        digest = sha256(command.idempotency_key.encode("utf-8")).hexdigest()[:16]
+        return f"ethbot-{alias}-{digest}"
+
+    @staticmethod
+    def _okx_data(payload: Any) -> list[Any]:
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            return payload["data"]
+        if isinstance(payload, list):
+            return payload
+        return []
+
+    @staticmethod
+    def _first_okx_item(payload: Any) -> dict[str, Any]:
+        data = OkxUsdtSwapAdapter._okx_data(payload)
+        first = data[0] if data else {}
+        return first if isinstance(first, dict) else {}
