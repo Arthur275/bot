@@ -126,6 +126,9 @@ function Get-LatestQuantCycle {
         ForEach-Object {
             $statusPath = Join-Path $_.FullName "scheduler_status.json"
             $status = Get-JsonFile $statusPath
+            if ($null -ne $status -and [string]$status.status -like "incomplete_*") {
+                return
+            }
             $timestamp = if ($null -ne $status -and $null -ne $status.generated_at) { [string]$status.generated_at } else { $null }
             $sortKey = [datetimeoffset]::MinValue
             if (-not [string]::IsNullOrWhiteSpace($timestamp)) {
@@ -643,7 +646,12 @@ function Show-Status {
     $reviewPayload = Get-JsonFile $reviewPath
     $reviewAge = Get-AgeSeconds ($reviewPayload.generated_at)
     $reviewStatus = if ($null -ne $reviewPayload -and $null -ne $reviewPayload.review_status) { [string]$reviewPayload.review_status } else { "unavailable" }
-    $reviewState = Format-ProcessHealth $review
+    if ([bool]$EnableReviewWorker) {
+        $reviewState = Format-ProcessHealth $review
+    }
+    else {
+        $reviewState = "optional_disabled"
+    }
     Write-Output ("review_worker: {0} pid={1} age={2} review_status={3} log={4}" -f $reviewState, $review.Pid, (Format-Age $reviewAge), $reviewStatus, (Get-LogErrorSummary "review_worker"))
     Write-Output ("kill_switch: {0} path={1}" -f $killSwitchState, $KillSwitchPath)
 }

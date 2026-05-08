@@ -3,7 +3,6 @@ const runtimeItems = [
   ["quant_scheduler", "量化判断"],
   ["bot_scheduler", "机器人调度"],
   ["real_worker", "执行器"],
-  ["decision_review", "决策审查"],
   ["kill_switch", "熔断开关"],
 ];
 
@@ -355,17 +354,8 @@ function appendText(parent, tag, value, className = "") {
 function renderRuntime(runtime, review) {
   const grid = $("runtimeGrid");
   clearElement(grid);
-  const extendedRuntime = {
-    ...runtime,
-    decision_review: {
-      label: review?.review_status || "unavailable",
-      level: levelForStatus(review?.review_status),
-      age_sec: review?.source_handoff_age_sec,
-      note: review?.summary || "审查报告未启用",
-    },
-  };
   for (const [key, label] of runtimeItems) {
-    const item = extendedRuntime[key] || {};
+    const item = runtime[key] || {};
     const card = document.createElement("div");
     card.className = `flow-card ${item.level || levelForStatus(item.label)}`;
     appendText(card, "span", label, "flow-title");
@@ -373,6 +363,17 @@ function renderRuntime(runtime, review) {
     appendText(card, "small", fmtAge(item.age_sec), "flow-age");
     grid.appendChild(card);
   }
+}
+
+function renderOptionalWorkers(optionalWorkers) {
+  const grid = $("runtimeGrid");
+  const review = optionalWorkers?.decision_review || {};
+  const card = document.createElement("div");
+  card.className = `flow-card ${review.level || levelForStatus(review.label)}`;
+  appendText(card, "span", "决策审查", "flow-title");
+  appendText(card, "strong", text(review.label || "OPTIONAL_DISABLED", "未知"), "flow-status");
+  appendText(card, "small", review.enabled ? fmtAge(review.age_sec) : "optional", "flow-age");
+  grid.appendChild(card);
 }
 
 function renderDetails(id, entries) {
@@ -647,6 +648,7 @@ function render(data) {
   renderTopbar(data);
   renderSummary(data);
   renderRuntime(data.runtime || {}, review);
+  renderOptionalWorkers(data.optional_workers || {});
 
   setBadge($("factorLookupBadge"), factor.lookup_status?.label, factor.lookup_status?.level);
   $("factorSamples").textContent = number(factor.total_samples);

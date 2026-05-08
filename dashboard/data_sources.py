@@ -14,6 +14,7 @@ from .status_rules import kill_switch_status, lookup_status, runtime_status
 
 BOT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_QUANT_ROOT = BOT_ROOT.parent / "quant_system_rebuild"
+INCOMPLETE_QUANT_STATUSES = {"incomplete_snapshot_only", "incomplete_missing_scheduler_status"}
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     quant_regime = quant_decision.get("regime_state", {}) if isinstance(quant_decision, dict) else {}
     quant_scheduler_status = _read_latest_quant_scheduler_status(paths.quant_root) or quant_cycle.get("scheduler_status", {})
     quant_db_counts = _read_quant_duckdb_counts(quant_analysis_root / "quant_analysis.duckdb")
+    decision_review_report_present = (bot_runtime / "reviews" / "latest_decision_review.json").exists()
     decision_review = load_decision_review(bot_root=paths.bot_root, quant_root=paths.quant_root)
 
     kill_switch_path = bot_runtime / "controls" / "disable_real_execution.flag"
@@ -114,6 +116,12 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             ),
             "real_worker": _worker_status(worker_audit=worker_audit, candidate=candidate),
             "kill_switch": kill_switch_status(enabled=kill_switch_path.exists()),
+        },
+        "optional_workers": {
+            "decision_review": _decision_review_worker_status(
+                decision_review,
+                report_present=decision_review_report_present,
+            ),
         },
         "factor": {
             "total_samples": _int(factor_summary.get("total_samples"), fallback=quant_db_counts.get("factor_samples", 0)),
@@ -267,6 +275,30 @@ def _worker_status(*, worker_audit: list[dict[str, Any]], candidate: dict[str, A
             else ""
         ),
     )
+
+
+def _decision_review_worker_status(review: dict[str, Any], *, report_present: bool) -> dict[str, Any]:
+    status = str(review.get("review_status") or "unavailable")
+    if not report_present:
+        return {
+            "label": "OPTIONAL_DISABLED",
+            "level": "gray",
+            "age_sec": review.get("source_handoff_age_sec"),
+            "optional": True,
+            "enabled": False,
+            "status": status,
+            "note": review.get("summary", ""),
+        }
+    level = {"clear": "green", "watch": "yellow", "needs_attention": "red"}.get(status, "gray")
+    return {
+        "label": status.upper(),
+        "level": level,
+        "age_sec": review.get("source_handoff_age_sec"),
+        "optional": True,
+        "enabled": True,
+        "status": status,
+        "note": review.get("summary", ""),
+    }
 
 
 def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -503,6 +535,8 @@ def _read_latest_quant_scheduler_status(quant_root: Path) -> dict[str, Any]:
         return {}
     for root in roots:
         payload = _read_json(root / "scheduler_status.json")
+        if _is_incomplete_quant_status(payload.get("status")):
+            continue
         if payload:
             return {**payload, "cycle_dir": str(root)}
     return {}
@@ -522,23 +556,30 @@ def _read_latest_incomplete_quant_cycle(quant_root: Path) -> dict[str, Any]:
         snapshot_registry = _read_json(root / "snapshot_registry.json")
         if not snapshot_registry:
             continue
-        if (root / "scheduler_status.json").exists():
+        scheduler_status = _read_json(root / "scheduler_status.json")
+        if scheduler_status and not _is_incomplete_quant_status(scheduler_status.get("status")):
             continue
         has_decision = _read_json(root / "decision.json") != {}
-        missing_parts = ["scheduler_status"]
+        has_scheduler_status = bool(scheduler_status)
+        missing_parts = [] if has_scheduler_status else ["scheduler_status"]
         if not has_decision:
             missing_parts.append("decision")
+        status = str(scheduler_status.get("status") or "") if scheduler_status else ""
         return {
             "present": True,
             "cycle_dir": str(root),
-            "generated_at": snapshot_registry.get("generated_at") or _mtime_iso(root / "snapshot_registry.json"),
-            "status": "incomplete_missing_scheduler_status" if has_decision else "incomplete_snapshot_only",
+            "generated_at": status and scheduler_status.get("generated_at") or snapshot_registry.get("generated_at") or _mtime_iso(root / "snapshot_registry.json"),
+            "status": status or ("incomplete_missing_scheduler_status" if has_decision else "incomplete_snapshot_only"),
             "has_snapshot_registry": True,
             "has_decision": has_decision,
-            "has_scheduler_status": False,
+            "has_scheduler_status": has_scheduler_status,
             "missing_parts": missing_parts,
         }
     return {"present": False}
+
+
+def _is_incomplete_quant_status(value: Any) -> bool:
+    return str(value or "") in INCOMPLETE_QUANT_STATUSES
 
 
 def _scheduler_status_sort_timestamp(root: Path) -> float:

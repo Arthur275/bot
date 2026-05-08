@@ -128,6 +128,9 @@ def test_runtime_stack_manager_keeps_review_worker_as_explicit_sidecar() -> None
     start_block = script[script.index("$ReviewArgs = @(") :]
 
     assert 'Get-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"' in status_block
+    assert 'if ([bool]$EnableReviewWorker) {' in status_block
+    assert '$reviewState = Format-ProcessHealth $review' in status_block
+    assert '$reviewState = "optional_disabled"' in status_block
     assert '"review_worker: {0} pid={1} age={2} review_status={3}' in status_block
     assert 'Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"' in script
     assert 'if ($EnableReviewWorker) {' in start_block
@@ -143,6 +146,7 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
         "CommandLineMatches",
         "Format-ProcessHealth",
         "command_mismatch",
+        'status.status -like "incomplete_*"',
         "Remove-StalePid",
         "Get-HttpStatus",
         "/api/overview",

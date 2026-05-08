@@ -236,6 +236,10 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["runtime"]["factor_collector"]["label"] == "RUNNING"
     assert snapshot["runtime"]["bot_scheduler"]["label"] == "RUNNING"
     assert snapshot["runtime"]["real_worker"]["label"] == "RUNNING"
+    assert "decision_review" not in snapshot["runtime"]
+    assert snapshot["optional_workers"]["decision_review"]["optional"] is True
+    assert snapshot["optional_workers"]["decision_review"]["enabled"] is False
+    assert snapshot["optional_workers"]["decision_review"]["label"] == "OPTIONAL_DISABLED"
     assert snapshot["factor"]["total_samples"] == 25
     assert snapshot["factor"]["lookup_version"] == "lookup-20260504"
     assert snapshot["factor"]["lookup_rows"] == 9
@@ -474,6 +478,40 @@ def test_load_dashboard_snapshot_prefers_complete_scheduler_cycle_over_newer_sna
     assert incomplete["has_scheduler_status"] is False
 
 
+def test_load_dashboard_snapshot_treats_incomplete_scheduler_status_as_incomplete_cycle(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    complete_at = datetime.now(timezone.utc).isoformat()
+    snapshot_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": complete_at, "status": "ok"})
+    _write_json(
+        quant_root / "runtime" / "cycles" / "complete" / "decision.json",
+        {"generated_at": complete_at, "decision": {"action": "wait", "direction": "long"}},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "complete" / "scheduler_status.json",
+        {"generated_at": complete_at, "status": "ok", "run_id": "complete"},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "snap" / "snapshot_registry.json",
+        {"generated_at": snapshot_at},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "snap" / "scheduler_status.json",
+        {"generated_at": snapshot_at, "status": "incomplete_snapshot_only", "run_id": "snap"},
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["runtime"]["quant_scheduler"]["label"] == "RUNNING"
+    assert snapshot["quant"]["action"] == "wait"
+    incomplete = snapshot["quant"]["latest_incomplete_cycle"]
+    assert incomplete["present"] is True
+    assert incomplete["status"] == "incomplete_snapshot_only"
+    assert incomplete["has_scheduler_status"] is True
+    assert incomplete["missing_parts"] == ["decision"]
+
+
 def test_load_dashboard_snapshot_marks_kill_switch(tmp_path: Path) -> None:
     bot_root = tmp_path / "eth_trading_bot"
     quant_root = tmp_path / "quant_system_rebuild"
@@ -552,6 +590,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "replaceChildren" not in app_js
     assert "function clearElement(el)" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
+    assert "renderOptionalWorkers(data.optional_workers || {})" in app_js
     assert "setPill($(" in app_js
     assert "latest_incomplete_cycle" in app_js
     assert "submitted_all_accepted" in app_js
@@ -609,6 +648,8 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         assert payload["paths"]["bot_root"] == str(bot_root)
         assert payload["runtime"]["bot_scheduler"]["label"] == "RUNNING"
         assert payload["runtime"]["quant_scheduler"]["label"] == "RUNNING"
+        assert "decision_review" not in payload["runtime"]
+        assert payload["optional_workers"]["decision_review"]["label"] == "OPTIONAL_DISABLED"
         assert payload["decision_review"]["review_status"] == "unavailable"
         assert payload["decision_review"]["summary"]
     finally:
