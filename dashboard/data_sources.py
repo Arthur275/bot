@@ -283,10 +283,10 @@ def _decision_review_worker_status(review: dict[str, Any], *, report_present: bo
         return {
             "label": "OPTIONAL_DISABLED",
             "level": "gray",
-            "age_sec": review.get("source_handoff_age_sec"),
+            "age_sec": None,
             "optional": True,
             "enabled": False,
-            "status": status,
+            "status": "disabled",
             "note": review.get("summary", ""),
         }
     level = {"clear": "green", "watch": "yellow", "needs_attention": "red"}.get(status, "gray")

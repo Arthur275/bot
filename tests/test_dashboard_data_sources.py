@@ -240,6 +240,8 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["optional_workers"]["decision_review"]["optional"] is True
     assert snapshot["optional_workers"]["decision_review"]["enabled"] is False
     assert snapshot["optional_workers"]["decision_review"]["label"] == "OPTIONAL_DISABLED"
+    assert snapshot["optional_workers"]["decision_review"]["status"] == "disabled"
+    assert snapshot["optional_workers"]["decision_review"]["age_sec"] is None
     assert snapshot["factor"]["total_samples"] == 25
     assert snapshot["factor"]["lookup_version"] == "lookup-20260504"
     assert snapshot["factor"]["lookup_rows"] == 9
