@@ -277,6 +277,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["estimated_slippage_pct"] == 0.0004
     assert snapshot["quant"]["estimated_funding_pct"] == 0.0002
     assert snapshot["quant"]["edge_source"] == "consensus"
+    assert {"cycle_status_timeline", "quant_metric_series", "reason_code_counts", "consensus_quality_series"} <= set(snapshot["charts"])
     assert snapshot["quant"]["research"]["status"] == "unavailable"
     assert snapshot["quant"]["research"]["freshness"] == "stale"
     assert snapshot["quant"]["research"]["refresh_every"] == 12
@@ -573,6 +574,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "量化市场判断" in html
     assert "机器人下单链路" in html
     assert "决策审查报告" in html
+    assert "运行状态时间线" in html
+    assert '<script src="/vendor/echarts.min.js"></script>' in html
+    assert (static_root / "vendor" / "echarts.min.js").exists()
     assert "审查报告仅供解释和复盘，不参与自动下单" in html
     assert "当前交易状态" in html
     assert "setInterval(refreshWithBanner, 5000)" in app_js
@@ -581,6 +585,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "buildNoTradeSummary" in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
+    assert {"cycleStatusChart", "quantMetricsChart", "reasonCodesChart", "consensusChart"} <= html_ids
     assert {"researchBadge", "researchDetails", "researchReasons", "quantReasons"} <= html_ids
     assert {"marketDataBadge", "marketDataDetails", "edgeCostBadge", "edgeCostDetails"} <= html_ids
     assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
@@ -593,6 +598,8 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "function clearElement(el)" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
     assert "renderOptionalWorkers(data.optional_workers || {})" in app_js
+    assert "renderCharts(data.charts || {})" in app_js
+    assert "echarts.init" in app_js
     assert "setPill($(" in app_js
     assert "latest_incomplete_cycle" in app_js
     assert "submitted_all_accepted" in app_js

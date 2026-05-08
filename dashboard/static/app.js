@@ -145,6 +145,18 @@ const sourceLabels = {
 
 const $ = (id) => document.getElementById(id);
 let refreshPaused = false;
+const chartInstances = {};
+const chartPalette = {
+  text: "#e5edf7",
+  muted: "#93a4b8",
+  grid: "rgba(148,163,184,0.18)",
+  panel: "#101722",
+  green: "#34d399",
+  red: "#fb7185",
+  yellow: "#fbbf24",
+  blue: "#60a5fa",
+  gray: "#94a3b8",
+};
 
 function fmtAge(seconds) {
   if (seconds === null || seconds === undefined) return "更新时间未知";
@@ -259,6 +271,52 @@ function scorePct(value) {
   if (!Number.isFinite(n)) return "缺失";
   const scaled = n <= 1 ? n * 100 : n;
   return `${scaled.toFixed(0)}%`;
+}
+
+function compactTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "");
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function chartBaseOption() {
+  return {
+    backgroundColor: "transparent",
+    textStyle: { color: chartPalette.text, fontFamily: '"Microsoft YaHei UI", "Segoe UI", Arial, sans-serif' },
+    grid: { left: 42, right: 18, top: 42, bottom: 38 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(15, 23, 42, 0.96)",
+      borderColor: "rgba(148, 163, 184, 0.28)",
+      textStyle: { color: chartPalette.text },
+    },
+    legend: { top: 4, right: 8, textStyle: { color: chartPalette.muted } },
+    xAxis: {
+      type: "category",
+      axisLine: { lineStyle: { color: chartPalette.grid } },
+      axisLabel: { color: chartPalette.muted },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { color: chartPalette.grid } },
+      axisLabel: { color: chartPalette.muted },
+    },
+  };
+}
+
+function getChart(id) {
+  const el = $(id);
+  if (!el || !window.echarts) return null;
+  if (!chartInstances[id]) chartInstances[id] = echarts.init(el, null, { renderer: "canvas" });
+  return chartInstances[id];
+}
+
+function setChart(id, option) {
+  const chart = getChart(id);
+  if (!chart) return false;
+  chart.setOption(option, true);
+  return true;
 }
 
 function listText(value) {
@@ -627,6 +685,123 @@ function renderSummary(data) {
   $("summaryBlockMeta").textContent = noTrade.meta;
 }
 
+function renderCharts(charts) {
+  if (!window.echarts) {
+    setBadge($("chartRuntimeBadge"), "charts_unavailable", "yellow");
+    return;
+  }
+  const cycleRows = charts?.cycle_status_timeline || [];
+  const statusColors = {
+    ok: chartPalette.green,
+    blocked: chartPalette.red,
+    degraded: chartPalette.yellow,
+    incomplete_snapshot_only: chartPalette.yellow,
+    incomplete_missing_scheduler_status: chartPalette.yellow,
+    missing: chartPalette.gray,
+  };
+  setBadge($("chartRuntimeBadge"), cycleRows.length ? "available" : "missing", cycleRows.length ? "green" : "gray");
+  setChart("cycleStatusChart", {
+    ...chartBaseOption(),
+    xAxis: { ...chartBaseOption().xAxis, data: cycleRows.map((row) => compactTime(row.generated_at)) },
+    yAxis: {
+      ...chartBaseOption().yAxis,
+      min: 0,
+      max: 3,
+      interval: 1,
+      axisLabel: { color: chartPalette.muted, formatter: (value) => ["缺失", "阻断", "降级/不完整", "正常"][value] || "" },
+    },
+    series: [{
+      name: "cycle status",
+      type: "bar",
+      barWidth: "58%",
+      data: cycleRows.map((row) => ({
+        value: row.status_value,
+        itemStyle: { color: statusColors[row.status] || chartPalette.gray },
+        status: row.status,
+        run_id: row.run_id,
+      })),
+    }],
+    tooltip: {
+      ...chartBaseOption().tooltip,
+      formatter: (items) => {
+        const item = items?.[0]?.data || {};
+        return `${text(item.status || "unknown")}<br/>${formatRunId(item.run_id || "")}`;
+      },
+    },
+  });
+
+  const metricRows = charts?.quant_metric_series || [];
+  const metricLabels = metricRows.map((row) => compactTime(row.generated_at));
+  setChart("quantMetricsChart", {
+    ...chartBaseOption(),
+    color: [chartPalette.green, chartPalette.blue, chartPalette.yellow, chartPalette.red],
+    xAxis: { ...chartBaseOption().xAxis, data: metricLabels },
+    yAxis: { ...chartBaseOption().yAxis, axisLabel: { color: chartPalette.muted, formatter: "{value}%" } },
+    series: [
+      ["data health", "data_health_score"],
+      ["confidence", "confidence"],
+      ["net edge", "net_edge_pct"],
+      ["cost", "estimated_cost_pct"],
+    ].map(([name, key]) => ({
+      name,
+      type: "line",
+      smooth: true,
+      showSymbol: false,
+      connectNulls: true,
+      data: metricRows.map((row) => row[key]),
+    })),
+  });
+
+  const reasonRows = charts?.reason_code_counts || [];
+  setChart("reasonCodesChart", {
+    ...chartBaseOption(),
+    grid: { left: 118, right: 18, top: 22, bottom: 28 },
+    xAxis: { type: "value", splitLine: { lineStyle: { color: chartPalette.grid } }, axisLabel: { color: chartPalette.muted } },
+    yAxis: {
+      type: "category",
+      inverse: true,
+      data: reasonRows.map((row) => text(row.code)),
+      axisLabel: { color: chartPalette.muted, width: 110, overflow: "truncate" },
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: chartPalette.grid } },
+    },
+    series: [{
+      name: "count",
+      type: "bar",
+      barWidth: 12,
+      data: reasonRows.map((row) => row.count),
+      itemStyle: { color: chartPalette.yellow, borderRadius: [0, 4, 4, 0] },
+    }],
+  });
+
+  const consensusRows = charts?.consensus_quality_series || [];
+  setChart("consensusChart", {
+    ...chartBaseOption(),
+    color: [chartPalette.blue, chartPalette.green],
+    xAxis: { ...chartBaseOption().xAxis, data: consensusRows.map((row) => compactTime(row.generated_at)) },
+    yAxis: [
+      { ...chartBaseOption().yAxis, min: 0, max: 3, interval: 1, axisLabel: { color: chartPalette.muted } },
+      { type: "value", min: 0, max: 4, splitLine: { show: false }, axisLabel: { color: chartPalette.muted } },
+    ],
+    series: [
+      {
+        name: "quality",
+        type: "line",
+        step: "middle",
+        showSymbol: false,
+        data: consensusRows.map((row) => row.quality_value),
+      },
+      {
+        name: "source count",
+        type: "bar",
+        yAxisIndex: 1,
+        barWidth: "42%",
+        data: consensusRows.map((row) => row.source_count),
+      },
+    ],
+  });
+}
+
 function renderTopbar(data) {
   const runtime = data.runtime || {};
   const workerMode = runtime.real_worker?.mode || "";
@@ -649,6 +824,7 @@ function render(data) {
   renderSummary(data);
   renderRuntime(data.runtime || {}, review);
   renderOptionalWorkers(data.optional_workers || {});
+  renderCharts(data.charts || {});
 
   setBadge($("factorLookupBadge"), factor.lookup_status?.label, factor.lookup_status?.level);
   $("factorSamples").textContent = number(factor.total_samples);
@@ -800,5 +976,8 @@ function togglePause() {
 
 $("pauseBtn").addEventListener("click", togglePause);
 $("refreshBtn").addEventListener("click", refreshWithBanner);
+window.addEventListener("resize", () => {
+  for (const chart of Object.values(chartInstances)) chart.resize();
+});
 refreshWithBanner();
 setInterval(refreshWithBanner, 5000);

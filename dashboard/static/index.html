@@ -59,6 +59,46 @@
         <div id="runtimeGrid" class="flow-grid"></div>
       </section>
 
+      <section class="chart-section" aria-label="运行趋势图表">
+        <article class="panel chart-panel wide-chart">
+          <div class="panel-head">
+            <div>
+              <h2>运行状态时间线</h2>
+              <p>最近 quant cycle 的完成、阻断和不完整状态</p>
+            </div>
+            <span id="chartRuntimeBadge" class="badge gray">等待数据</span>
+          </div>
+          <div id="cycleStatusChart" class="chart-box"></div>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>量化指标趋势</h2>
+              <p>数据健康、信心分、edge 和成本</p>
+            </div>
+          </div>
+          <div id="quantMetricsChart" class="chart-box"></div>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>原因代码 Top N</h2>
+              <p>最近 bot 样本中的风险和降级原因</p>
+            </div>
+          </div>
+          <div id="reasonCodesChart" class="chart-box"></div>
+        </article>
+        <article class="panel chart-panel wide-chart">
+          <div class="panel-head">
+            <div>
+              <h2>市场数据共识</h2>
+              <p>共识质量和可用源数量随时间变化</p>
+            </div>
+          </div>
+          <div id="consensusChart" class="chart-box compact-chart"></div>
+        </article>
+      </section>
+
       <section class="dashboard-grid">
         <article class="panel factor-panel">
           <div class="panel-head">
@@ -232,6 +272,7 @@
       </section>
     </main>
 
+    <script src="/vendor/echarts.min.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

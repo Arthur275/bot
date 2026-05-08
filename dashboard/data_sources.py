@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     quant_db_counts = _read_quant_duckdb_counts(quant_analysis_root / "quant_analysis.duckdb")
     decision_review_report_present = (bot_runtime / "reviews" / "latest_decision_review.json").exists()
     decision_review = load_decision_review(bot_root=paths.bot_root, quant_root=paths.quant_root)
+    charts = _charts_summary(bot_root=paths.bot_root, quant_root=paths.quant_root)
 
     kill_switch_path = bot_runtime / "controls" / "disable_real_execution.flag"
     return {
@@ -197,6 +199,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
         },
         "performance": performance,
         "decision_review": decision_review,
+        "charts": charts,
     }
 
 
@@ -576,6 +579,128 @@ def _read_latest_incomplete_quant_cycle(quant_root: Path) -> dict[str, Any]:
             "missing_parts": missing_parts,
         }
     return {"present": False}
+
+
+def _charts_summary(*, bot_root: Path, quant_root: Path) -> dict[str, Any]:
+    bot_samples = _tail_jsonl(bot_root / "runtime" / "bot_runtime_scheduler" / "samples.jsonl", limit=80)
+    return {
+        "cycle_status_timeline": _cycle_status_timeline(quant_root, limit=80),
+        "quant_metric_series": _quant_metric_series(bot_samples),
+        "reason_code_counts": _reason_code_counts(bot_samples, limit=10),
+        "consensus_quality_series": _consensus_quality_series(bot_samples),
+    }
+
+
+def _cycle_status_timeline(quant_root: Path, *, limit: int) -> list[dict[str, Any]]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir()],
+            key=lambda path: _cycle_sort_timestamp(path),
+            reverse=True,
+        )[:limit]
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for root in reversed(roots):
+        status_payload = _read_json(root / "scheduler_status.json")
+        decision_payload = _read_json(root / "decision.json")
+        status = str(status_payload.get("status") or ("ok" if decision_payload else "missing"))
+        generated_at = (
+            status_payload.get("generated_at")
+            or decision_payload.get("generated_at")
+            or _mtime_iso(root / "scheduler_status.json")
+            or _mtime_iso(root / "decision.json")
+            or _mtime_iso(root)
+        )
+        rows.append(
+            {
+                "run_id": root.name,
+                "generated_at": generated_at,
+                "status": status,
+                "status_value": _cycle_status_value(status),
+                "has_decision": bool(decision_payload),
+                "has_scheduler_status": bool(status_payload),
+            }
+        )
+    return rows
+
+
+def _quant_metric_series(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sample in samples[-80:]:
+        rows.append(
+            {
+                "generated_at": str(sample.get("finished_at") or sample.get("started_at") or ""),
+                "sample_id": sample.get("sample_id"),
+                "action": sample.get("effective_action") or sample.get("requested_action") or "",
+                "data_health_score": _chart_float(sample.get("data_health_score"), scale_unit=True),
+                "confidence": _chart_float(sample.get("confidence"), scale_unit=True),
+                "net_edge_pct": _chart_float(sample.get("net_edge_pct"), scale_pct=True),
+                "estimated_cost_pct": _chart_float(sample.get("estimated_cost_pct"), scale_pct=True),
+            }
+        )
+    return rows
+
+
+def _reason_code_counts(samples: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    counter: Counter[str] = Counter()
+    for sample in samples[-80:]:
+        for key in ("reason_codes", "risk_reason_codes", "degrade_flags"):
+            values = sample.get(key)
+            if isinstance(values, list):
+                counter.update(str(value) for value in values if str(value))
+    return [{"code": code, "count": count} for code, count in counter.most_common(limit)]
+
+
+def _consensus_quality_series(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sample in samples[-80:]:
+        quality = str(sample.get("consensus_quality") or "")
+        rows.append(
+            {
+                "generated_at": str(sample.get("finished_at") or sample.get("started_at") or ""),
+                "quality": quality,
+                "quality_value": _consensus_quality_value(quality),
+                "source_count": _chart_float(sample.get("consensus_source_count")),
+                "market_data_mode": str(sample.get("market_data_mode") or ""),
+            }
+        )
+    return rows
+
+
+def _cycle_status_value(status: str) -> int:
+    normalized = str(status or "").lower()
+    if normalized == "ok":
+        return 3
+    if normalized in {"degraded", "incomplete_snapshot_only", "incomplete_missing_scheduler_status"}:
+        return 2
+    if normalized == "blocked":
+        return 1
+    return 0
+
+
+def _consensus_quality_value(quality: str) -> int:
+    normalized = str(quality or "").lower()
+    if normalized in {"full", "acceptable"}:
+        return 3
+    if normalized in {"restricted_two_source", "degraded"}:
+        return 2
+    if normalized == "unreliable":
+        return 1
+    return 0
+
+
+def _chart_float(value: Any, *, scale_unit: bool = False, scale_pct: bool = False) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if scale_pct:
+        number = number * 100.0
+    elif scale_unit and abs(number) <= 1.0:
+        number = number * 100.0
+    return round(number, 6)
 
 
 def _is_incomplete_quant_status(value: Any) -> bool:
