@@ -59,6 +59,21 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "sizing_tier": "tier_2",
             "reasoning_summary": "trend aligned",
             "reason_codes": ["trend_aligned"],
+            "risk_reason_codes": ["market_data_restricted_two_source", "edge_estimate_missing"],
+            "execution_block_reason": "not_entry_action",
+            "data_health_score": 65.0,
+            "market_data_mode": "restricted_two_source",
+            "consensus_quality": "degraded",
+            "consensus_source_count": 2,
+            "consensus_sources": ["OKX", "Bitget"],
+            "binance_source_health": "unavailable",
+            "binance_source_failure_reason": "HTTP 451",
+            "net_edge_pct": None,
+            "estimated_cost_pct": 0.0012,
+            "estimated_fee_pct": 0.0006,
+            "estimated_slippage_pct": 0.0004,
+            "estimated_funding_pct": 0.0002,
+            "edge_source": "consensus",
             "automation_boundary": "real_order_submission_candidate",
         },
     )
@@ -226,6 +241,21 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["factor_lookup_version"] == "lookup-20260504"
     assert snapshot["quant"]["execution_warnings"] == ["route_c_missing"]
     assert snapshot["quant"]["automation_boundary"] == "real_order_submission_candidate"
+    assert snapshot["quant"]["execution_block_reason"] == "not_entry_action"
+    assert snapshot["quant"]["risk_reason_codes"] == ["market_data_restricted_two_source", "edge_estimate_missing"]
+    assert snapshot["quant"]["data_health_score"] == 65.0
+    assert snapshot["quant"]["market_data_mode"] == "restricted_two_source"
+    assert snapshot["quant"]["consensus_quality"] == "degraded"
+    assert snapshot["quant"]["consensus_source_count"] == 2
+    assert snapshot["quant"]["consensus_sources"] == ["OKX", "Bitget"]
+    assert snapshot["quant"]["binance_source_health"] == "unavailable"
+    assert snapshot["quant"]["binance_source_failure_reason"] == "HTTP 451"
+    assert snapshot["quant"]["net_edge_pct"] is None
+    assert snapshot["quant"]["estimated_cost_pct"] == 0.0012
+    assert snapshot["quant"]["estimated_fee_pct"] == 0.0006
+    assert snapshot["quant"]["estimated_slippage_pct"] == 0.0004
+    assert snapshot["quant"]["estimated_funding_pct"] == 0.0002
+    assert snapshot["quant"]["edge_source"] == "consensus"
     assert snapshot["quant"]["research"]["status"] == "unavailable"
     assert snapshot["quant"]["research"]["freshness"] == "stale"
     assert snapshot["quant"]["research"]["refresh_every"] == 12
@@ -257,6 +287,14 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
                 "sizing_decision": {"sizing_tier": "none"},
                 "regime_state": {"regime_type": "trend", "direction": "long"},
             },
+            "metadata": {
+                "market_data_mode": "restricted_two_source",
+                "consensus_quality": "degraded",
+                "consensus_source_count": 2,
+                "consensus_sources": ["OKX", "Bitget"],
+                "binance_source_health": "unavailable",
+                "binance_source_failure_reason": "HTTP 451",
+            },
         },
     )
     _write_json(
@@ -275,8 +313,46 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["quant"]["reasoning_summary"] == "latest quant cycle"
     assert snapshot["quant"]["degrade_flags"] == ["research_degraded"]
     assert snapshot["quant"]["regime_bucket"] == "trend_long"
+    assert snapshot["quant"]["market_data_mode"] == "restricted_two_source"
+    assert snapshot["quant"]["consensus_quality"] == "degraded"
+    assert snapshot["quant"]["consensus_source_count"] == 2
+    assert snapshot["quant"]["consensus_sources"] == ["OKX", "Bitget"]
+    assert snapshot["quant"]["binance_source_health"] == "unavailable"
+    assert snapshot["quant"]["binance_source_failure_reason"] == "HTTP 451"
     assert snapshot["decision_review"]["review_status"] == "unavailable"
     assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
+
+
+def test_load_dashboard_snapshot_uses_latest_blocked_scheduler_status(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    old_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    blocked_at = datetime.now(timezone.utc).isoformat()
+    _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": old_at, "status": "ok"})
+    _write_json(
+        quant_root / "runtime" / "cycles" / "old-ok" / "decision.json",
+        {"generated_at": old_at, "decision": {"action": "wait", "direction": "neutral"}},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "old-ok" / "scheduler_status.json",
+        {"generated_at": old_at, "status": "ok", "run_id": "old-ok"},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "new-blocked" / "scheduler_status.json",
+        {
+            "generated_at": blocked_at,
+            "status": "blocked",
+            "run_id": "new-blocked",
+            "issues": ["HTTP Error 451"],
+            "metadata": {"diagnostic": "request_diagnostic=retry_exhausted"},
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["runtime"]["quant_scheduler"]["label"] == "BLOCKED"
+    assert snapshot["runtime"]["quant_scheduler"]["age_sec"] is not None
+    assert snapshot["quant"]["action"] == "wait"
 
 
 def test_load_dashboard_snapshot_prefers_complete_scheduler_cycle_over_newer_snapshot_cycle(tmp_path: Path) -> None:
@@ -339,11 +415,17 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "机器人下单链路" in html
     assert "决策审查报告" in html
     assert "审查报告仅供解释和复盘，不参与自动下单" in html
+    assert "当前交易状态" in html
     assert "setInterval(refreshWithBanner, 5000)" in app_js
+    assert "refreshPaused" in app_js
+    assert "severityForReason" in app_js
+    assert "buildNoTradeSummary" in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
-    assert {"researchBadge", "researchDetails", "researchReasons"} <= html_ids
-    assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction"} <= html_ids
+    assert {"researchBadge", "researchDetails", "researchReasons", "quantReasons"} <= html_ids
+    assert {"marketDataBadge", "marketDataDetails", "edgeCostBadge", "edgeCostDetails"} <= html_ids
+    assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
+    assert {"pauseBtn", "modeNotice"} <= html_ids
     assert referenced_ids <= html_ids
     assert "�" not in html
     assert "�" not in app_js
@@ -363,6 +445,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "word-break: break-word" in styles_css
     assert "max-height: 260px" in styles_css
     assert "overflow-x: hidden" in styles_css
+    assert ".reason-chip.hard" in styles_css
+    assert ".audit-item.degraded" in styles_css
+    assert "min-height: 44px" in styles_css
     assert "@media (max-width: 480px)" in styles_css
     assert ".toolbar {\n    grid-template-columns: 1fr;" in styles_css
     assert "@media (max-width: 1280px)" in styles_css
@@ -443,11 +528,42 @@ def test_dashboard_overview_cache_reuses_snapshot_within_ttl(monkeypatch, tmp_pa
 
     first = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
     second = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
-    clock["now"] = 11.1
-    third = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
 
     assert first == second
-    assert third["call_count"] == 2
+    assert len(calls) == 1
+
+
+def test_dashboard_overview_cache_returns_stale_snapshot_while_refreshing(monkeypatch, tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    calls: list[DashboardPaths] = []
+    clock = {"now": 10.0}
+    cache = OverviewSnapshotCache(ttl_sec=1.0)
+
+    def fake_load_dashboard_snapshot(paths: DashboardPaths) -> dict:
+        calls.append(paths)
+        return {"call_count": len(calls), "paths": {"bot_root": str(paths.bot_root), "quant_root": str(paths.quant_root)}}
+
+    class InlineThread:
+        def __init__(self, *, target, args, daemon) -> None:
+            self._target = target
+            self._args = args
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self._target(*self._args)
+
+    monkeypatch.setattr(dashboard_app, "load_dashboard_snapshot", fake_load_dashboard_snapshot)
+    monkeypatch.setattr(dashboard_app.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(dashboard_app.threading, "Thread", InlineThread)
+
+    first = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+    clock["now"] = 11.1
+    stale = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+    refreshed = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert stale == first
+    assert refreshed["call_count"] == 2
     assert len(calls) == 2
 
 
@@ -478,6 +594,29 @@ def test_decision_review_marks_missing_sources_as_watch(tmp_path: Path) -> None:
     assert review["data_source_quality"]["handoff_available"] is True
     assert review["data_source_quality"]["factor_lookup_available"] is False
     assert any(item["code"] == "factor_lookup_missing" for item in review["risk_findings"])
+
+
+def test_decision_review_default_stale_threshold_covers_five_minute_cycle(tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    now = datetime.now(timezone.utc)
+    generated_at = (now - timedelta(seconds=420)).isoformat()
+    _write_json(
+        quant_root / "runtime" / "cycles" / "cycle-1" / "execution_handoff.json",
+        {
+            "generated_at": generated_at,
+            "handoff_id": "handoff-1",
+            "supporting_factor_codes": [],
+            "opposing_factor_codes": [],
+            "veto_factor_codes": [],
+        },
+    )
+
+    review = build_decision_review(bot_root=bot_root, quant_root=quant_root, now=now)
+
+    assert review["source_stale_threshold_sec"] == 600
+    assert review["source_handoff_age_sec"] == 420
+    assert review["source_stale"] is False
 
 
 def test_decision_review_prefers_handoff_source_run_id(tmp_path: Path) -> None:

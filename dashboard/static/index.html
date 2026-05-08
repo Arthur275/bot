@@ -17,14 +17,21 @@
         <span id="orderModePill" class="status-pill gray">真实提交：未知</span>
         <span id="killSwitchPill" class="status-pill gray">熔断：未知</span>
         <span id="updatedAt" class="updated-at">暂无更新时间</span>
+        <button id="pauseBtn" type="button">暂停</button>
         <button id="refreshBtn" type="button">刷新</button>
       </div>
     </header>
 
     <main class="shell">
       <div id="errorBanner" class="error-banner" hidden></div>
+      <div id="modeNotice" class="notice-box mode-notice">当前模式加载中；审查报告只读，不参与自动下单。</div>
 
       <section class="summary-bar" aria-label="当前链路摘要">
+        <div class="summary-reason">
+          <span>当前交易状态</span>
+          <strong id="summaryBlockReason">加载中</strong>
+          <small id="summaryBlockMeta">等待最新链路状态</small>
+        </div>
         <div class="summary-profit">
           <span>总收益</span>
           <strong id="summaryProfit">暂无</strong>
@@ -107,6 +114,20 @@
           </section>
           <dl id="quantDetails" class="kv-grid"></dl>
           <div class="section-head">
+            <h3>市场数据状态</h3>
+            <span id="marketDataBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="marketDataDetails" class="kv-grid compact"></dl>
+          <div class="section-head">
+            <h3>Edge / Cost</h3>
+            <span id="edgeCostBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="edgeCostDetails" class="kv-grid compact"></dl>
+          <div class="section-head">
+            <h3>当前原因代码</h3>
+          </div>
+          <div id="quantReasons" class="chip-grid reason-chips"></div>
+          <div class="section-head">
             <h3>研究健康</h3>
             <span id="researchBadge" class="badge gray">未知</span>
           </div>
@@ -172,7 +193,7 @@
           <div class="metric-grid five">
             <div><span>审查状态</span><strong id="reviewStatus">暂无</strong></div>
             <div><span>模式</span><strong id="reviewMode">暂无</strong></div>
-            <div><span>来源周期</span><strong id="reviewRunId">暂无</strong></div>
+            <div><span>来源周期</span><strong id="reviewRunId" class="source-cycle">暂无</strong></div>
             <div><span>交接包</span><strong id="reviewHandoffAge">暂无</strong></div>
             <div><span>耗时</span><strong id="reviewLatency">暂无</strong></div>
           </div>

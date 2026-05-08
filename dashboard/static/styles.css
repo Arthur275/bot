@@ -85,7 +85,7 @@ p { color: var(--muted); font-size: 13px; line-height: 1.55; }
 }
 
 button {
-  height: 34px;
+  min-height: 44px;
   border: 1px solid var(--line-strong);
   background: var(--panel-raised);
   color: var(--text);
@@ -120,7 +120,7 @@ button:focus {
 
 .summary-bar {
   display: grid;
-  grid-template-columns: 1.35fr repeat(4, minmax(0, 1fr));
+  grid-template-columns: 1.6fr 1.25fr repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -175,6 +175,26 @@ button:focus {
 .summary-profit strong.green { color: var(--green); }
 .summary-profit strong.red { color: var(--red); }
 .summary-profit strong.gray { color: var(--text); }
+
+.summary-reason {
+  align-items: start;
+  justify-items: start !important;
+  text-align: left !important;
+  border-color: rgba(251, 191, 36, 0.36) !important;
+  background:
+    linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(96, 165, 250, 0.08)),
+    var(--panel) !important;
+}
+
+.summary-reason strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.summary-reason small {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 .flow-section {
   margin-bottom: 14px;
@@ -253,8 +273,8 @@ button:focus {
   justify-content: center;
   border-radius: 999px;
   border: 1px solid currentColor;
-  min-height: 24px;
-  padding: 4px 9px;
+  min-height: 44px;
+  padding: 8px 11px;
   font-size: 11px;
   font-weight: 700;
   line-height: 1.2;
@@ -262,7 +282,7 @@ button:focus {
   max-width: 100%;
 }
 
-.status-pill { min-height: 28px; }
+.status-pill { min-height: 44px; }
 
 .green { color: var(--green); background: var(--green-bg); }
 .blue { color: var(--blue); background: var(--blue-bg); }
@@ -288,8 +308,8 @@ button:focus {
   align-content: center;
   justify-items: center;
   text-align: center;
-  background: var(--panel-soft);
-  border: 1px solid var(--line);
+  background: rgba(11, 17, 27, 0.62);
+  border: 1px solid rgba(148, 163, 184, 0.1);
   border-radius: 6px;
   min-width: 0;
 }
@@ -300,6 +320,13 @@ button:focus {
   line-height: 1.2;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.metric-grid strong.source-cycle {
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre-line;
+  word-break: normal;
 }
 
 .kv-grid {
@@ -361,6 +388,14 @@ dd {
   line-height: 1.55;
 }
 
+.mode-notice {
+  margin-bottom: 12px;
+  border-color: rgba(251, 191, 36, 0.36);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(37, 99, 235, 0.12));
+  color: var(--text);
+  font-weight: 700;
+}
+
 .two-column,
 .factor-evidence,
 .review-findings {
@@ -418,7 +453,8 @@ dd {
 
 .chip {
   max-width: 100%;
-  padding: 6px 8px;
+  min-height: 44px;
+  padding: 8px 10px;
   border: 1px solid currentColor;
   border-radius: 6px;
   font-size: 11px;
@@ -430,6 +466,34 @@ dd {
 .reason-chip {
   display: grid;
   gap: 3px;
+  border-left-width: 4px;
+}
+
+.reason-chip.hard {
+  color: var(--red);
+  background: rgba(244, 63, 94, 0.22);
+  border-color: rgba(251, 113, 133, 0.74);
+}
+
+.reason-chip.degraded {
+  color: var(--yellow);
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(251, 191, 36, 0.68);
+}
+
+.reason-chip.watch {
+  color: var(--gray);
+  background: rgba(148, 163, 184, 0.06);
+  border-color: rgba(148, 163, 184, 0.34);
+}
+
+.reason-severity {
+  width: max-content;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .reason-chip small {
@@ -506,6 +570,24 @@ dd {
   font-size: 12px;
 }
 
+.audit-item {
+  border-left-width: 4px;
+}
+
+.audit-item.hard {
+  border-left-color: var(--red);
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.audit-item.degraded {
+  border-left-color: var(--yellow);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.audit-item.watch {
+  border-left-color: var(--gray);
+}
+
 .audit-item strong,
 .finding-item strong {
   display: block;
@@ -554,6 +636,7 @@ dd {
     justify-content: flex-start;
   }
   .summary-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .summary-reason { grid-column: 1 / -1; }
   .flow-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid,
   .metric-grid.five {
@@ -605,7 +688,7 @@ dd {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 28px;
+    min-height: 44px;
   }
   .shell {
     padding: 14px;
@@ -702,13 +785,6 @@ dd {
   .summary-bar strong,
   .flow-status {
     font-size: 17px;
-  }
-
-  .badge,
-  .status-pill,
-  .inline-status,
-  button {
-    min-height: 32px;
   }
 
   .kv-grid,

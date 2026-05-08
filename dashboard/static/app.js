@@ -66,6 +66,12 @@ const valueLabels = {
   missing: "缺失",
   dry_run: "模拟执行",
   submit_enabled: "真实提交已启用",
+  restricted_two_source: "限制两源共识",
+  market_data_restricted_two_source: "市场数据限制两源",
+  not_entry_action: "未形成开仓动作",
+  no_order_submission: "不提交订单",
+  shadow_preflight_only: "影子预检",
+  candidate_execution_package_not_allowed: "候选执行包未放行",
   disabled_by_kill_switch: "熔断禁用",
   active: "活跃",
   submitted: "已提交",
@@ -99,6 +105,9 @@ const valueLabels = {
   governance_watch: "治理观察",
   high_regime_risk: "高市场状态风险",
   okx_taker_volume_experimental: "OKX 主动成交量实验因子",
+  market_data_consensus_unreliable: "市场数据共识不可靠",
+  market_data_source_unreliable: "市场数据源不足或不可用",
+  data_health_veto: "实时数据健康度过低",
   "overlay_bias:neutral": "叠加偏向中性",
   overlay_present: "叠加信号存在",
   "overlay_source:okx": "叠加来源 OKX",
@@ -108,10 +117,11 @@ const valueLabels = {
   research_degraded: "研究降级",
   research_freshness_degraded: "研究新鲜度降级",
   "risk_filter:veto": "风控否决",
+  "risk_filter:degraded": "风控降级",
   runtime_entry_veto: "运行时开仓否决",
   sample_count_low: "样本数偏低",
   "setup:short": "设置层偏空",
-  staleness_veto: "新鲜度否决",
+  staleness_veto: "数据新鲜度/可用性否决",
   "transition:direction_not_aligned": "状态转换：方向不一致",
   "transition:okx_taker_volume_experimental": "状态转换：OKX 主动成交量实验因子",
   "transition:overlay_bias:neutral": "状态转换：叠加偏向中性",
@@ -135,6 +145,7 @@ const sourceLabels = {
 };
 
 const $ = (id) => document.getElementById(id);
+let refreshPaused = false;
 
 function fmtAge(seconds) {
   if (seconds === null || seconds === undefined) return "更新时间未知";
@@ -222,6 +233,10 @@ function humanizeCode(value) {
     .trim();
 }
 
+function displayCode(value) {
+  return text(value).replace(/_/g, " ");
+}
+
 function number(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n.toLocaleString() : "0";
@@ -231,6 +246,26 @@ function pct(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "暂无";
   return `${(n * 100).toFixed(2)}%`;
+}
+
+function pctField(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "缺失";
+  const scaled = Math.abs(n) > 1 ? n : n * 100;
+  return `${scaled.toFixed(3)}%`;
+}
+
+function scorePct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "缺失";
+  const scaled = n <= 1 ? n * 100 : n;
+  return `${scaled.toFixed(0)}%`;
+}
+
+function listText(value) {
+  if (Array.isArray(value)) return value.length ? value.map((item) => text(item)).join(" + ") : "缺失";
+  if (value === null || value === undefined || value === "") return "缺失";
+  return text(value);
 }
 
 function money(value, currency = "$") {
@@ -267,9 +302,9 @@ function formatRunId(value) {
   const tf = timeframe.replace(/m$/i, "分钟").replace(/h$/i, "小时").replace(/d$/i, "天");
   const match = stamp.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i);
   const formattedTime = match
-    ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]} UTC`
+    ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]} UTC`
     : stamp;
-  return `${symbol.toUpperCase()} · ${tf} · ${formattedTime} · ${id}`;
+  return `${symbol.toUpperCase()} ${tf}\n${formattedTime}\n#${String(id).replace(/[_-]+/g, " ")}`;
 }
 
 function levelForStatus(value, fallback = "gray") {
@@ -376,15 +411,64 @@ function renderChips(id, rows, level = "") {
   }
 }
 
+function severityForReason(code, fallback = "watch") {
+  const raw = String(code || "").toLowerCase();
+  if (!raw || raw === "none") return "watch";
+  if (
+    raw.includes("data_health_veto") ||
+    raw.includes("conflict_veto") ||
+    raw.includes("net_edge_below_cost") ||
+    raw.includes("runtime_entry_veto") ||
+    raw.includes("risk_filter:veto") ||
+    raw.includes("risk_filter:blocked") ||
+    raw.includes("blocked") ||
+    raw.endsWith("_veto") ||
+    raw.includes(":veto")
+  ) {
+    return "hard";
+  }
+  if (
+    raw.includes("degraded") ||
+    raw.includes("degrade") ||
+    raw.includes("edge_estimate_missing") ||
+    raw.includes("market_data_restricted_two_source") ||
+    raw.includes("risk_filter:degraded") ||
+    raw.startsWith("degrade_flag:")
+  ) {
+    return "degraded";
+  }
+  return fallback || "watch";
+}
+
+function severityLabel(severity) {
+  if (severity === "hard") return "阻断";
+  if (severity === "degraded") return "降级";
+  return "观察";
+}
+
+function normalizeReasonRows(rows, fallbackCodes = []) {
+  const items = [];
+  for (const row of rows || []) {
+    if (typeof row === "string") items.push({ code: row, text: text(row) });
+    else if (row?.code || row?.text) items.push({ code: row.code || row.text, text: row.text || row.code });
+  }
+  for (const code of fallbackCodes || []) {
+    if (code && !items.some((item) => item.code === code)) items.push({ code, text: text(code) });
+  }
+  return items;
+}
+
 function renderReasonChips(id, rows, level = "") {
   const wrap = $(id);
   clearElement(wrap);
   const normalizedRows = rows && rows.length > 0 ? rows.slice(0, 8) : [{ code: "none", text: "暂无" }];
   for (const row of normalizedRows) {
+    const severity = row.code === "none" ? "watch" : severityForReason(row.code, level === "red" ? "hard" : level === "yellow" ? "degraded" : "watch");
     const chip = document.createElement("span");
-    chip.className = `chip reason-chip ${row.code === "none" ? "gray" : level}`;
+    chip.className = `chip reason-chip ${row.code === "none" ? "gray" : severity}`;
+    appendText(chip, "span", severityLabel(severity), "reason-severity");
     appendText(chip, "strong", text(row.text || row.code));
-    appendText(chip, "small", text(row.code));
+    appendText(chip, "small", displayCode(row.code));
     wrap.appendChild(chip);
   }
 }
@@ -432,10 +516,11 @@ function renderAudit(events) {
   }
   for (const event of normalizedEvents) {
     const payload = event.payload || {};
-    const item = document.createElement("div");
-    item.className = "audit-item";
-    appendText(item, "strong", `${text(event.event_type)} / ${text(payload.status)}`);
     const reasons = payload.reason_codes || [];
+    const severity = severityForReason(reasons[0] || payload.status || event.event_type, levelForStatus(payload.status) === "red" ? "hard" : "watch");
+    const item = document.createElement("div");
+    item.className = `audit-item ${severity}`;
+    appendText(item, "strong", `${text(event.event_type)} / ${text(payload.status)}`);
     appendText(item, "span", `${text(event.generated_at)} / ${reasons.length ? reasons.map((reason) => text(reason)).join("，") : "无原因代码"}`);
     wrap.appendChild(item);
   }
@@ -492,6 +577,31 @@ function renderFindings(id, rows) {
   }
 }
 
+function primaryReason(quant) {
+  const rows = normalizeReasonRows(quant.reason_codes || [], quant.risk_reason_codes || []);
+  const hard = rows.find((row) => severityForReason(row.code) === "hard");
+  const degraded = rows.find((row) => severityForReason(row.code) === "degraded");
+  return hard || degraded || rows[0] || null;
+}
+
+function buildNoTradeSummary(quant, bot) {
+  const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
+  const allowedAction = action.startsWith("entry") || action === "small_probe";
+  const candidatePresent = Boolean(bot.candidate_package?.present);
+  const reason = primaryReason(quant);
+  const sourceCount = quant.consensus_source_count ?? (Array.isArray(quant.consensus_sources) ? quant.consensus_sources.length : null);
+  const sources = listText(quant.consensus_sources);
+  const health = scorePct(quant.data_health_score);
+  const meta = [`共识 ${sourceCount ?? "缺失"} 源 ${sources}`, `data health ${health}`];
+  if (quant.market_data_mode) meta.push(`mode ${text(quant.market_data_mode)}`);
+  if (quant.net_edge_pct !== null && quant.net_edge_pct !== undefined) meta.push(`net edge ${pctField(quant.net_edge_pct)}`);
+  if (allowedAction && candidatePresent) {
+    return { line: `当前可交易 · 动作：${text(action)}`, meta: meta.join("，") };
+  }
+  const reasonText = reason ? text(reason.text || reason.code) : text(quant.execution_block_reason || "未形成开仓动作");
+  return { line: `当前未交易 · 原因：${reasonText}`, meta: meta.join("，") };
+}
+
 function renderSummary(data) {
   const quant = data.quant || {};
   const bot = data.bot || {};
@@ -506,15 +616,21 @@ function renderSummary(data) {
   setText("summaryRisk", quant.risk_filter_status);
   setText("summaryCandidate", bot.candidate_package?.present ? "present" : "missing");
   setText("summaryReview", review.review_status || "unavailable");
+  const noTrade = buildNoTradeSummary(quant, bot);
+  $("summaryBlockReason").textContent = noTrade.line;
+  $("summaryBlockMeta").textContent = noTrade.meta;
 }
 
 function renderTopbar(data) {
   const runtime = data.runtime || {};
   const workerMode = runtime.real_worker?.mode || "";
   const killSwitch = runtime.kill_switch || {};
-  $("updatedAt").textContent = `已更新 ${new Date().toLocaleTimeString()}`;
-  setPill($("orderModePill"), `真实提交：${text(workerMode || "dry_run")}`, workerMode === "submit_enabled" ? "red" : "gray");
+  const now = new Date();
+  $("updatedAt").textContent = `已更新 ${now.toLocaleString()}`;
+  const modeText = workerMode === "submit_enabled" ? "真实下单已启用" : "Dry-run / 只读观察";
+  setPill($("orderModePill"), modeText, workerMode === "submit_enabled" ? "red" : "blue");
   setPill($("killSwitchPill"), `熔断：${killSwitch.enabled ? "开启" : "关闭"}`, killSwitch.enabled ? "red" : "green");
+  $("modeNotice").textContent = `${modeText}；审查报告只读，不参与自动下单，最终以执行链路和风控结果为准。`;
 }
 
 function render(data) {
@@ -558,8 +674,30 @@ function render(data) {
     ["市场状态", quant.regime_bucket],
     ["查找表版本", quant.factor_lookup_version],
     ["自动化边界", quant.automation_boundary],
+    ["执行阻断原因", quant.execution_block_reason],
     ["执行警告", quant.execution_warnings || []],
   ]);
+  setBadge($("marketDataBadge"), quant.market_data_mode || quant.consensus_quality || "unknown", levelForStatus(quant.consensus_quality || quant.market_data_mode));
+  renderDetails("marketDataDetails", [
+    ["市场数据模式", quant.market_data_mode],
+    ["共识质量", quant.consensus_quality],
+    ["共识源数量", quant.consensus_source_count],
+    ["共识来源", listText(quant.consensus_sources)],
+    ["Binance 源状态", quant.binance_source_health],
+    ["Binance 失败原因", quant.binance_source_failure_reason],
+    ["Data health", scorePct(quant.data_health_score)],
+  ]);
+  const edgeMissing = quant.net_edge_pct === null || quant.net_edge_pct === undefined || quant.net_edge_pct === "";
+  setBadge($("edgeCostBadge"), edgeMissing ? "missing" : "available", edgeMissing ? "yellow" : "green");
+  renderDetails("edgeCostDetails", [
+    ["Net edge", pctField(quant.net_edge_pct)],
+    ["估算总成本", pctField(quant.estimated_cost_pct)],
+    ["手续费", pctField(quant.estimated_fee_pct)],
+    ["滑点", pctField(quant.estimated_slippage_pct)],
+    ["资金费率", pctField(quant.estimated_funding_pct)],
+    ["Edge 来源", quant.edge_source],
+  ]);
+  renderReasonChips("quantReasons", normalizeReasonRows(quant.reason_codes || [], quant.risk_reason_codes || quant.degrade_flags || []));
   const research = quant.research || {};
   setBadge($("researchBadge"), research.status || "unknown", levelForStatus(research.status));
   renderDetails("researchDetails", [
@@ -638,6 +776,7 @@ async function refresh() {
 }
 
 function refreshWithBanner() {
+  if (refreshPaused) return;
   refresh().catch((error) => {
     console.error(error);
     setPill($("refreshState"), "刷新失败", "red");
@@ -645,6 +784,13 @@ function refreshWithBanner() {
   });
 }
 
+function togglePause() {
+  refreshPaused = !refreshPaused;
+  $("pauseBtn").textContent = refreshPaused ? "继续" : "暂停";
+  setPill($("refreshState"), refreshPaused ? "已暂停" : "等待刷新", refreshPaused ? "yellow" : "blue");
+}
+
+$("pauseBtn").addEventListener("click", togglePause);
 $("refreshBtn").addEventListener("click", refreshWithBanner);
 refreshWithBanner();
 setInterval(refreshWithBanner, 5000);

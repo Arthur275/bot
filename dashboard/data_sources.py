@@ -66,9 +66,10 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     quant_handoff = _read_latest_handoff(paths.quant_root)
     quant_cycle = _read_latest_quant_cycle(paths.quant_root)
     quant_decision = quant_cycle.get("decision", {})
+    quant_metadata = quant_cycle.get("metadata", {})
     quant_risk = quant_decision.get("risk_report", {}) if isinstance(quant_decision, dict) else {}
     quant_regime = quant_decision.get("regime_state", {}) if isinstance(quant_decision, dict) else {}
-    quant_scheduler_status = quant_cycle.get("scheduler_status", {})
+    quant_scheduler_status = _read_latest_quant_scheduler_status(paths.quant_root) or quant_cycle.get("scheduler_status", {})
     quant_db_counts = _read_quant_duckdb_counts(quant_analysis_root / "quant_analysis.duckdb")
     decision_review = load_decision_review(bot_root=paths.bot_root, quant_root=paths.quant_root)
 
@@ -135,10 +136,26 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "confidence": bot_cycle.get("confidence") or quant_decision.get("confidence") or quant_handoff.get("confidence"),
             "sizing_tier": bot_cycle.get("sizing_tier") or quant_decision.get("sizing_tier") or _nested(quant_decision, "sizing_decision", "sizing_tier") or quant_handoff.get("sizing_tier") or "",
             "reasoning_summary": bot_cycle.get("reasoning_summary") or quant_decision.get("reasoning_summary") or quant_handoff.get("reasoning_summary") or "",
+            "execution_block_reason": bot_cycle.get("execution_block_reason") or quant_handoff.get("execution_block_reason") or "",
+            "reason_codes": _list(bot_cycle.get("reason_codes")) or _list(quant_risk.get("reason_codes")) or _list(quant_handoff.get("risk_reason_codes")),
+            "risk_reason_codes": _list(bot_cycle.get("risk_reason_codes")) or _list(quant_handoff.get("risk_reason_codes")),
             "supporting_factors": quant_handoff.get("supporting_factor_codes", [])[:10],
             "opposing_factors": quant_handoff.get("opposing_factor_codes", [])[:10],
             "veto_factors": quant_handoff.get("veto_factor_codes", [])[:10],
             "degrade_flags": bot_cycle.get("degrade_flags") or quant_risk.get("degrade_flags") or quant_handoff.get("degrade_flags") or [],
+            "data_health_score": _first_present(bot_cycle.get("data_health_score"), quant_risk.get("data_health_score"), quant_handoff.get("data_health_score")),
+            "market_data_mode": _first_present(bot_cycle.get("market_data_mode"), quant_metadata.get("market_data_mode"), quant_handoff.get("market_data_mode")),
+            "consensus_quality": _first_present(bot_cycle.get("consensus_quality"), quant_metadata.get("consensus_quality"), quant_handoff.get("consensus_quality")),
+            "consensus_source_count": _first_present(bot_cycle.get("consensus_source_count"), quant_metadata.get("consensus_source_count"), quant_handoff.get("consensus_source_count")),
+            "consensus_sources": _first_present(bot_cycle.get("consensus_sources"), quant_metadata.get("consensus_sources"), quant_handoff.get("consensus_sources")),
+            "binance_source_health": _first_present(bot_cycle.get("binance_source_health"), quant_metadata.get("binance_source_health"), quant_handoff.get("binance_source_health")),
+            "binance_source_failure_reason": _first_present(bot_cycle.get("binance_source_failure_reason"), quant_metadata.get("binance_source_failure_reason"), quant_handoff.get("binance_source_failure_reason")),
+            "net_edge_pct": _first_present(bot_cycle.get("net_edge_pct"), quant_handoff.get("net_edge_pct")),
+            "estimated_cost_pct": _first_present(bot_cycle.get("estimated_cost_pct"), quant_handoff.get("estimated_cost_pct")),
+            "estimated_fee_pct": _first_present(bot_cycle.get("estimated_fee_pct"), quant_handoff.get("estimated_fee_pct")),
+            "estimated_slippage_pct": _first_present(bot_cycle.get("estimated_slippage_pct"), quant_handoff.get("estimated_slippage_pct")),
+            "estimated_funding_pct": _first_present(bot_cycle.get("estimated_funding_pct"), quant_handoff.get("estimated_funding_pct")),
+            "edge_source": _first_present(bot_cycle.get("edge_source"), quant_handoff.get("edge_source")),
             "regime_bucket": quant_handoff.get("regime_bucket", "") or _regime_bucket(quant_regime),
             "factor_lookup_version": quant_handoff.get("factor_lookup_version", "") or factor_lookup.get("lookup_version", ""),
             "factor_lookup_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
@@ -330,6 +347,7 @@ def _read_latest_quant_cycle(quant_root: Path) -> dict[str, Any]:
             "cycle_dir": str(root),
             "generated_at": scheduler_status.get("generated_at") or decision_payload.get("generated_at") or _mtime_iso(root / "scheduler_status.json"),
             "decision": decision_payload.get("decision") or {},
+            "metadata": decision_payload.get("metadata") or {},
             "scheduler_status": scheduler_status,
         }
     for root in roots[:20]:
@@ -340,9 +358,39 @@ def _read_latest_quant_cycle(quant_root: Path) -> dict[str, Any]:
             "cycle_dir": str(root),
             "generated_at": decision_payload.get("generated_at") or _mtime_iso(root / "decision.json"),
             "decision": decision_payload.get("decision") or {},
+            "metadata": decision_payload.get("metadata") or {},
             "scheduler_status": {},
         }
     return {}
+
+
+def _read_latest_quant_scheduler_status(quant_root: Path) -> dict[str, Any]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and (path / "scheduler_status.json").exists()],
+            key=lambda path: _scheduler_status_sort_timestamp(path),
+            reverse=True,
+        )
+    except OSError:
+        return {}
+    for root in roots:
+        payload = _read_json(root / "scheduler_status.json")
+        if payload:
+            return {**payload, "cycle_dir": str(root)}
+    return {}
+
+
+def _scheduler_status_sort_timestamp(root: Path) -> float:
+    path = root / "scheduler_status.json"
+    payload = _read_json(path)
+    timestamp = _parse_timestamp(payload.get("generated_at") if payload else None)
+    if timestamp is not None:
+        return timestamp
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _cycle_sort_timestamp(root: Path) -> float:
@@ -377,6 +425,17 @@ def _nested(payload: dict[str, Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _regime_bucket(regime: dict[str, Any]) -> str:
