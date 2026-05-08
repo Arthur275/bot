@@ -68,6 +68,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     factor_governance = _read_json(quant_analysis_root / "factor_governance_summary.json")
     quant_handoff = _read_latest_handoff(paths.quant_root)
     quant_cycle = _read_latest_quant_cycle(paths.quant_root)
+    quant_incomplete_cycle = _read_latest_incomplete_quant_cycle(paths.quant_root)
     quant_decision = quant_cycle.get("decision", {})
     quant_metadata = quant_cycle.get("metadata", {})
     quant_risk = quant_decision.get("risk_report", {}) if isinstance(quant_decision, dict) else {}
@@ -159,6 +160,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "estimated_slippage_pct": _first_present(bot_cycle.get("estimated_slippage_pct"), quant_handoff.get("estimated_slippage_pct")),
             "estimated_funding_pct": _first_present(bot_cycle.get("estimated_funding_pct"), quant_handoff.get("estimated_funding_pct")),
             "edge_source": _first_present(bot_cycle.get("edge_source"), quant_handoff.get("edge_source")),
+            "latest_incomplete_cycle": quant_incomplete_cycle,
             "regime_bucket": quant_handoff.get("regime_bucket", "") or _regime_bucket(quant_regime),
             "factor_lookup_version": quant_handoff.get("factor_lookup_version", "") or factor_lookup.get("lookup_version", ""),
             "factor_lookup_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
@@ -504,6 +506,39 @@ def _read_latest_quant_scheduler_status(quant_root: Path) -> dict[str, Any]:
         if payload:
             return {**payload, "cycle_dir": str(root)}
     return {}
+
+
+def _read_latest_incomplete_quant_cycle(quant_root: Path) -> dict[str, Any]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir()],
+            key=lambda path: _cycle_sort_timestamp(path),
+            reverse=True,
+        )
+    except OSError:
+        return {"present": False}
+    for root in roots:
+        snapshot_registry = _read_json(root / "snapshot_registry.json")
+        if not snapshot_registry:
+            continue
+        if (root / "scheduler_status.json").exists():
+            continue
+        has_decision = _read_json(root / "decision.json") != {}
+        missing_parts = ["scheduler_status"]
+        if not has_decision:
+            missing_parts.append("decision")
+        return {
+            "present": True,
+            "cycle_dir": str(root),
+            "generated_at": snapshot_registry.get("generated_at") or _mtime_iso(root / "snapshot_registry.json"),
+            "status": "incomplete_missing_scheduler_status" if has_decision else "incomplete_snapshot_only",
+            "has_snapshot_registry": True,
+            "has_decision": has_decision,
+            "has_scheduler_status": False,
+            "missing_parts": missing_parts,
+        }
+    return {"present": False}
 
 
 def _scheduler_status_sort_timestamp(root: Path) -> float:

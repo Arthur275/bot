@@ -464,6 +464,14 @@ def test_load_dashboard_snapshot_prefers_complete_scheduler_cycle_over_newer_sna
 
     assert snapshot["runtime"]["quant_scheduler"]["label"] == "RUNNING"
     assert snapshot["quant"]["action"] == "wait"
+    incomplete = snapshot["quant"]["latest_incomplete_cycle"]
+    assert incomplete["present"] is True
+    assert incomplete["cycle_dir"].endswith("snap")
+    assert incomplete["generated_at"] == snapshot_at
+    assert incomplete["status"] == "incomplete_missing_scheduler_status"
+    assert incomplete["has_snapshot_registry"] is True
+    assert incomplete["has_decision"] is True
+    assert incomplete["has_scheduler_status"] is False
 
 
 def test_load_dashboard_snapshot_marks_kill_switch(tmp_path: Path) -> None:
@@ -545,6 +553,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "function clearElement(el)" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
     assert "setPill($(" in app_js
+    assert "latest_incomplete_cycle" in app_js
     assert "submitted_all_accepted" in app_js
     assert "partial_failed" in app_js
     assert "color-scheme: dark" in styles_css

@@ -691,6 +691,7 @@ function render(data) {
     ["Binance 源状态", quant.binance_source_health],
     ["Binance 失败原因", quant.binance_source_failure_reason],
     ["Data health", scorePct(quant.data_health_score)],
+    ["最新不完整 cycle", quant.latest_incomplete_cycle?.present ? quant.latest_incomplete_cycle.status : ""],
   ]);
   const edgeMissing = quant.net_edge_pct === null || quant.net_edge_pct === undefined || quant.net_edge_pct === "";
   setBadge($("edgeCostBadge"), edgeMissing ? "missing" : "available", edgeMissing ? "yellow" : "green");
