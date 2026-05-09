@@ -228,6 +228,9 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
                 "regime_state": {"regime_type": "trend", "direction": "long"},
             },
             "metadata": {
+                "market_data_mode": "restricted_two_source",
+                "consensus_quality": "degraded",
+                "consensus_source_count": 2,
                 "estimated_gross_edge_pct": 0.002,
                 "estimated_cost_pct": 0.0007,
                 "edge_source": "atr_15m_okx",
@@ -302,6 +305,10 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["charts"]["quant_metric_series"][0]["net_edge_pct"] == 0.13
     assert snapshot["charts"]["quant_metric_series"][0]["estimated_cost_pct"] == 0.07
     assert snapshot["charts"]["quant_metric_series"][0]["edge_source"] == "atr_15m_okx"
+    assert snapshot["charts"]["consensus_quality_series"][0]["quality"] == "degraded"
+    assert snapshot["charts"]["consensus_quality_series"][0]["quality_value"] == 2
+    assert snapshot["charts"]["consensus_quality_series"][0]["source_count"] == 2
+    assert snapshot["charts"]["consensus_quality_series"][0]["market_data_mode"] == "restricted_two_source"
     assert snapshot["bot"]["candidate_package"]["gate_allowed"] is True
     assert snapshot["bot"]["candidate_package"]["command_targets"] == ["entry_order", "maintain_protective_stop"]
     assert snapshot["bot"]["worker_events"][0]["payload"]["status"] == "skipped"
@@ -359,6 +366,177 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["quant"]["binance_source_failure_reason"] == "HTTP 451"
     assert snapshot["decision_review"]["review_status"] == "unavailable"
     assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
+
+
+def test_dashboard_trigger_watch_tracks_high_confidence_wait_shadow_outcomes(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    watch_base = datetime.now(timezone.utc) - timedelta(minutes=36)
+    watch_cycles = []
+    for offset, action, confidence, setup_strength, entry_score, price, transition in [
+        (0, "wait", 0.62, 0.82, 0.50, 100.0, "setup_ready_waiting_trigger"),
+        (5, "wait", 0.58, 0.70, 0.42, 101.0, "no_entry_alignment"),
+        (10, "observe_only", 0.55, 0.30, 0.10, 100.5, "no_entry_alignment"),
+        (15, "wait", 0.59, 0.65, 0.20, 102.0, "no_entry_alignment"),
+        (20, "wait", 0.61, 0.84, 0.49, 103.0, "setup_ready_waiting_trigger"),
+        (25, "observe_only", 0.42, 0.10, 0.05, 104.0, "no_entry_alignment"),
+        (30, "observe_only", 0.41, 0.10, 0.05, 104.5, "no_entry_alignment"),
+    ]:
+        run_dt = watch_base + timedelta(minutes=offset)
+        run_id = f"eth-15m-{run_dt.strftime('%Y%m%dT%H%M%SZ')}-watch"
+        watch_cycles.append((run_id, run_dt.isoformat(), action, "long", confidence, False, setup_strength, entry_score, price, transition))
+    for run_id, run_at, action, direction, confidence, trigger_ready, setup_strength, entry_score, price, transition in watch_cycles:
+        _write_json(
+            quant_root / "runtime" / "cycles" / run_id / "decision.json",
+            {
+                "generated_at": run_at,
+                "decision": {
+                    "action": action,
+                    "direction": direction,
+                    "confidence": confidence,
+                    "thesis_score": 0.58,
+                    "reasoning_summary": f"trigger_15m_ready=no | transition={transition}",
+                    "risk_report": {
+                        "risk_filter_status": "degraded",
+                        "degrade_flags": ["research_degraded"],
+                        "reason_codes": [transition],
+                        "data_health_score": 0.65,
+                    },
+                    "sizing_decision": {"sizing_tier": "none"},
+                    "setup_state": {"setup_direction": direction, "setup_strength": setup_strength},
+                    "trigger_state": {"trigger_ready": trigger_ready, "entry_timing_score": entry_score},
+                    "regime_state": {"regime_type": "trend", "direction": direction},
+                },
+                "metadata": {"consensus_mark_price": price},
+            },
+        )
+        _write_json(
+            quant_root / "runtime" / "cycles" / run_id / "scheduler_status.json",
+            {"generated_at": run_at, "status": "ok", "run_id": run_id},
+        )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "eth-15m-latest" / "decision.json",
+        {
+            "generated_at": generated_at,
+            "decision": {"action": "observe_only", "direction": "neutral", "confidence": 0.1},
+            "metadata": {"consensus_mark_price": 105.0},
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "eth-15m-latest" / "scheduler_status.json",
+        {"generated_at": generated_at, "status": "ok", "run_id": "eth-15m-latest"},
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    trigger_watch = snapshot["quant"]["trigger_watch"]
+    assert trigger_watch["status"] == "idle"
+    assert trigger_watch["label"] == "暂无等待触发"
+    assert trigger_watch["threshold_confidence"] == 0.6
+    assert trigger_watch["stats"]["sample_count"] == 2
+    assert trigger_watch["stats"]["resolved_1_count"] == 2
+    assert trigger_watch["stats"]["resolved_3_count"] == 2
+    assert trigger_watch["stats"]["resolved_6_count"] == 1
+    assert trigger_watch["stats"]["avg_return_1"] == 0.00985437
+    assert trigger_watch["stats"]["positive_rate_1"] == 1.0
+    assert trigger_watch["recent"][-1]["sample_id"] == watch_cycles[4][0]
+    assert trigger_watch["recent"][-1]["source"] == "quant_cycle"
+    assert trigger_watch["recent"][-1]["price"] == 103.0
+    assert trigger_watch["current"] == {}
+
+
+def test_dashboard_trigger_watch_marks_current_active_from_bot_latest_cycle(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json",
+        {
+            "sample_id": "bot-latest",
+            "finished_at": generated_at,
+            "effective_action": "wait",
+            "direction": "long",
+            "confidence": 0.603,
+            "entry_timing_score": 0.50,
+            "trigger_ready": False,
+            "risk_filter_status": "degraded",
+            "execution_block_reason": "not_entry_action",
+            "reasoning_summary": "setup_15m=long:0.83 | trigger_15m_ready=no | transition=setup_ready_waiting_trigger",
+            "runtime_snapshot": {"position": {"mark_price": 2316.18}},
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    trigger_watch = snapshot["quant"]["trigger_watch"]
+    assert trigger_watch["status"] == "active"
+    assert trigger_watch["label"] == "等待触发"
+    assert trigger_watch["stats"]["sample_count"] == 1
+    assert trigger_watch["current"]["sample_id"] == "bot-latest"
+    assert trigger_watch["current"]["setup_strength"] == 0.83
+    assert trigger_watch["current"]["price"] == 2316.18
+
+
+def test_dashboard_trigger_watch_merges_bot_samples_for_rescaled_confidence(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    base = datetime.now(timezone.utc) - timedelta(minutes=12)
+    price_rows = [
+        (base - timedelta(minutes=1), 100.0),
+        (base + timedelta(minutes=5), 101.0),
+        (base + timedelta(minutes=10), 102.0),
+        (base + timedelta(minutes=15), 103.0),
+    ]
+    for run_at, price in price_rows:
+        run_id = f"eth-15m-{run_at.strftime('%Y%m%dT%H%M%SZ')}-price"
+        _write_json(
+            quant_root / "runtime" / "cycles" / run_id / "decision.json",
+            {
+                "generated_at": run_at.isoformat(),
+                "decision": {"action": "observe_only", "direction": "neutral", "confidence": 0.1},
+                "metadata": {"consensus_mark_price": price},
+            },
+        )
+        _write_json(
+            quant_root / "runtime" / "cycles" / run_id / "scheduler_status.json",
+            {"generated_at": run_at.isoformat(), "status": "ok", "run_id": run_id},
+        )
+    _append_jsonl(
+        bot_root / "runtime" / "bot_runtime_scheduler" / "samples.jsonl",
+        [
+            {
+                "sample_id": 1,
+                "finished_at": base.isoformat(),
+                "effective_action": "wait",
+                "direction": "long",
+                "confidence": 0.603,
+                "entry_timing_score": 0.50,
+                "trigger_ready": False,
+                "reasoning_summary": "setup_15m=long:0.83 | trigger_15m_ready=no | transition=setup_ready_waiting_trigger",
+                "runtime_snapshot": {"position": {"mark_price": None}},
+            },
+            {
+                "sample_id": 2,
+                "finished_at": (base + timedelta(minutes=5)).isoformat(),
+                "effective_action": "observe_only",
+                "direction": "long",
+                "confidence": 0.10,
+                "runtime_snapshot": {"position": {"mark_price": None}},
+            },
+        ],
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    trigger_watch = snapshot["quant"]["trigger_watch"]
+    assert trigger_watch["status"] == "idle"
+    assert trigger_watch["stats"]["sample_count"] == 1
+    assert trigger_watch["stats"]["avg_return_1"] == 0.01
+    assert trigger_watch["stats"]["avg_return_3"] == 0.03
+    assert trigger_watch["recent"][0]["source"] == "bot_sample"
+    assert trigger_watch["recent"][0]["setup_strength"] == 0.83
+    assert trigger_watch["recent"][0]["price"] == 100.0
 
 
 def test_dashboard_performance_reads_okx_runtime_snapshot_position_pnl(tmp_path: Path) -> None:
@@ -599,13 +777,17 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "refreshPaused" in app_js
     assert "severityForReason" in app_js
     assert "buildNoTradeSummary" in app_js
+    assert "renderTriggerWatch" in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
+    assert {"triggerWatchBadge", "triggerWatchSummary", "triggerWatchStats", "triggerWatchRows"} <= html_ids
     assert {"cycleStatusChart", "quantMetricsChart", "reasonCodesChart", "consensusChart"} <= html_ids
     assert {"researchBadge", "researchDetails", "researchReasons", "quantReasons"} <= html_ids
     assert {"marketDataBadge", "marketDataDetails", "edgeCostBadge", "edgeCostDetails"} <= html_ids
     assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
     assert {"pauseBtn", "modeNotice"} <= html_ids
+    assert 'class="ops-grid"' in html
+    assert 'class="execution-grid"' in html
     assert referenced_ids <= html_ids
     assert "�" not in html
     assert "�" not in app_js
@@ -626,12 +808,16 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "echarts.init" in app_js
     assert "setPill($(" in app_js
     assert "latest_incomplete_cycle" in app_js
+    assert "trigger_watch" in app_js
     assert "submitted_all_accepted" in app_js
     assert "partial_failed" in app_js
     assert "color-scheme: dark" in styles_css
     assert '"Microsoft YaHei UI"' in styles_css
     assert "width: min(100%, 1680px)" in styles_css
     assert ".dashboard-grid" in styles_css
+    assert ".ops-grid" in styles_css
+    assert ".execution-grid" in styles_css
+    assert "minmax(680px, 1.2fr)" in styles_css
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in styles_css
     assert "overflow-wrap: anywhere" in styles_css
     assert "word-break: break-word" in styles_css
@@ -639,6 +825,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "overflow-x: hidden" in styles_css
     assert ".reason-chip.hard" in styles_css
     assert ".audit-item.degraded" in styles_css
+    assert ".trigger-watch-row" in styles_css
     assert "min-height: 44px" in styles_css
     assert "@media (max-width: 480px)" in styles_css
     assert ".toolbar {\n    grid-template-columns: 1fr;" in styles_css
@@ -724,6 +911,41 @@ def test_dashboard_overview_cache_reuses_snapshot_within_ttl(monkeypatch, tmp_pa
     second = cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
 
     assert first == second
+    assert len(calls) == 1
+
+
+def test_dashboard_overview_cache_shares_initial_load_across_threads(monkeypatch, tmp_path: Path) -> None:
+    bot_root = tmp_path / "bot"
+    quant_root = tmp_path / "quant"
+    calls: list[DashboardPaths] = []
+    started = threading.Event()
+    release = threading.Event()
+    cache = OverviewSnapshotCache(ttl_sec=1.0)
+
+    def fake_load_dashboard_snapshot(paths: DashboardPaths) -> dict:
+        calls.append(paths)
+        started.set()
+        assert release.wait(timeout=5)
+        return {"call_count": len(calls), "paths": {"bot_root": str(paths.bot_root), "quant_root": str(paths.quant_root)}}
+
+    monkeypatch.setattr(dashboard_app, "load_dashboard_snapshot", fake_load_dashboard_snapshot)
+
+    results: list[dict] = []
+
+    def get_snapshot() -> None:
+        results.append(cache.get(DashboardPaths(bot_root=bot_root, quant_root=quant_root)))
+
+    first_thread = threading.Thread(target=get_snapshot)
+    second_thread = threading.Thread(target=get_snapshot)
+    first_thread.start()
+    assert started.wait(timeout=5)
+    second_thread.start()
+    release.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert len(results) == 2
+    assert results[0] == results[1]
     assert len(calls) == 1
 
 

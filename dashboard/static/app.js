@@ -82,6 +82,10 @@ const valueLabels = {
   market_data_restricted_two_source: "市场数据限制两源",
   market_data_consensus_degraded: "市场数据共识降级",
   not_entry_action: "未形成开仓动作",
+  setup_ready_waiting_trigger: "结构就绪等待触发",
+  waiting_for_trigger: "等待触发器",
+  trigger_watch: "等待触发观察",
+  shadow_observe: "影子观察",
   no_order_submission: "不提交订单",
   shadow_preflight_only: "影子预检",
   candidate_execution_package_not_allowed: "候选执行包未放行",
@@ -255,6 +259,7 @@ function humanizeCode(value) {
     .replace(/\bokx\b/gi, "OKX")
     .replace(/\bcoinglass\b/gi, "CoinGlass")
     .replace(/\bbitget\b/gi, "Bitget")
+    .replace(/\bmexc\b/gi, "MEXC")
     .replace(/\bgate\b/gi, "Gate")
     .replace(/\bbinance\b/gi, "Binance")
     .replace(/\bconsensus\b/gi, "共识")
@@ -458,6 +463,13 @@ function pctField(value) {
   if (!Number.isFinite(n)) return "缺失";
   const scaled = Math.abs(n) > 1 ? n : n * 100;
   return `${scaled.toFixed(3)}%`;
+}
+
+function signedPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "待观察";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${(n * 100).toFixed(3)}%`;
 }
 
 function scorePct(value) {
@@ -805,6 +817,63 @@ function renderReasonChips(id, rows, level = "") {
     }
     wrap.appendChild(chip);
   });
+}
+
+function renderTriggerWatch(triggerWatch) {
+  const status = triggerWatch?.status || "idle";
+  setBadge($("triggerWatchBadge"), triggerWatch?.label || "暂无等待触发", status === "active" ? "blue" : "gray");
+  const summary = $("triggerWatchSummary");
+  const current = triggerWatch?.current || {};
+  const stats = triggerWatch?.stats || {};
+  if (status === "active" && current.sample_id) {
+    summary.textContent = `信心分 ${pct(current.confidence)}，${text(current.direction)}方向，触发器未就绪，影子统计只记录后续价格表现。`;
+  } else {
+    const count = Number(stats.sample_count || 0);
+    summary.textContent = count > 0
+      ? `已记录 ${count} 个等待触发样本，当前没有新的 60 分等待触发。`
+      : `暂无 60 分等待触发样本；阈值为 ${pct(triggerWatch?.threshold_confidence || 0.6)}。`;
+  }
+
+  const statsWrap = $("triggerWatchStats");
+  clearElement(statsWrap);
+  const statsRows = [
+    ["样本数", number(stats.sample_count || 0), stats.sample_count],
+    ["一周期均值", signedPct(stats.avg_return_1), stats.avg_return_1],
+    ["一周期胜率", pct(stats.positive_rate_1), stats.positive_rate_1],
+    ["三周期均值", signedPct(stats.avg_return_3), stats.avg_return_3],
+    ["三周期胜率", pct(stats.positive_rate_3), stats.positive_rate_3],
+    ["六周期均值", signedPct(stats.avg_return_6), stats.avg_return_6],
+    ["六周期胜率", pct(stats.positive_rate_6), stats.positive_rate_6],
+  ];
+  for (const [label, value, raw] of statsRows) {
+    const item = document.createElement("div");
+    appendText(item, "span", label);
+    const strong = appendText(item, "strong", value);
+    applyValueLevel(strong, raw, raw === null || raw === undefined ? "gray" : "");
+    statsWrap.appendChild(item);
+  }
+
+  const rowsWrap = $("triggerWatchRows");
+  clearElement(rowsWrap);
+  const rows = triggerWatch?.recent || [];
+  if (!rows.length) {
+    appendText(rowsWrap, "div", "暂无观察记录", "empty-row");
+    return;
+  }
+  for (const row of rows.slice().reverse().slice(0, 4)) {
+    const item = document.createElement("div");
+    item.className = "trigger-watch-row";
+    const head = document.createElement("div");
+    appendText(head, "strong", `${text(row.direction)} ${pct(row.confidence)}`);
+    appendText(head, "span", displayTimestamp(row.generated_at), "value-muted");
+    item.appendChild(head);
+    const meta = document.createElement("div");
+    appendText(meta, "span", `触发分 ${ratio(row.entry_timing_score)}`);
+    appendText(meta, "span", `结构 ${ratio(row.setup_strength)}`);
+    appendText(meta, "span", row.price ? `价格 ${Number(row.price).toFixed(2)}` : "价格待补");
+    item.appendChild(meta);
+    rowsWrap.appendChild(item);
+  }
 }
 
 function renderGovernanceRows(rows) {
@@ -1215,7 +1284,9 @@ function renderCharts(charts) {
       {
         name: "源数量",
         type: "bar",
-        barWidth: "54%",
+        barWidth: 8,
+        barMaxWidth: 9,
+        barCategoryGap: "62%",
         data: consensusRows.map((row) => row.source_count),
         itemStyle: { color: "rgba(88, 166, 255, 0.78)", borderRadius: [2, 2, 0, 0] },
       },
@@ -1321,6 +1392,7 @@ function render(data) {
     ["执行阻断原因", quant.execution_block_reason],
     ["执行警告", quant.execution_warnings || []],
   ]);
+  renderTriggerWatch(quant.trigger_watch || {});
   setBadge($("marketDataBadge"), quant.market_data_mode || quant.consensus_quality || "unknown", levelForStatus(quant.consensus_quality || quant.market_data_mode));
   renderDetails("marketDataDetails", [
     ["市场数据模式", quant.market_data_mode],

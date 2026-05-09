@@ -23,30 +23,48 @@ class OverviewSnapshotCache:
         self._expires_at = 0.0
         self._key: tuple[str, str] | None = None
         self._payload: dict | None = None
+        self._loading_key: tuple[str, str] | None = None
         self._refreshing = False
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
 
     def get(self, paths: DashboardPaths) -> dict:
-        now = time.monotonic()
         key = (str(paths.bot_root), str(paths.quant_root))
-        refresh_stale = False
-        with self._lock:
-            payload = self._payload
-            cache_hit = payload is not None and self._key == key
-            fresh = cache_hit and now < self._expires_at
-            if fresh:
-                return payload
-            if cache_hit:
-                refresh_stale = not self._refreshing
-                if refresh_stale:
-                    self._refreshing = True
+        while True:
+            now = time.monotonic()
+            refresh_stale = False
+            with self._condition:
+                payload = self._payload
+                cache_hit = payload is not None and self._key == key
+                fresh = cache_hit and now < self._expires_at
+                if fresh:
+                    return payload
+                if cache_hit:
+                    refresh_stale = not self._refreshing
+                    if refresh_stale:
+                        self._refreshing = True
+                    break
+                if self._loading_key is None:
+                    self._loading_key = key
+                    break
+                self._condition.wait(timeout=30.0)
         if cache_hit:
             if refresh_stale:
                 self._refresh_async(paths, key)
             return payload
-        payload = load_dashboard_snapshot(paths)
-        with self._lock:
+        try:
+            payload = load_dashboard_snapshot(paths)
+        except Exception:
+            with self._condition:
+                if self._loading_key == key:
+                    self._loading_key = None
+                self._condition.notify_all()
+            raise
+        with self._condition:
             self._store(payload, key)
+            if self._loading_key == key:
+                self._loading_key = None
+            self._condition.notify_all()
         return payload
 
     def _refresh_async(self, paths: DashboardPaths, key: tuple[str, str]) -> None:
@@ -56,11 +74,13 @@ class OverviewSnapshotCache:
     def _refresh_worker(self, paths: DashboardPaths, key: tuple[str, str]) -> None:
         try:
             payload = load_dashboard_snapshot(paths)
-            with self._lock:
+            with self._condition:
                 self._store(payload, key)
+                self._condition.notify_all()
         finally:
-            with self._lock:
+            with self._condition:
                 self._refreshing = False
+                self._condition.notify_all()
 
     def _store(self, payload: dict, key: tuple[str, str]) -> None:
         self._payload = payload

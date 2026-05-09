@@ -118,7 +118,9 @@
           <div id="consensusChart" class="chart-box compact-chart"></div>
           <p id="consensusSourceNote" class="source-note">来源：OKX、Bitget、Gate、CoinGlass、Binance</p>
         </article>
+      </section>
 
+      <section class="ops-grid" aria-label="量化与执行详情">
         <article class="panel detail-panel quant-panel">
           <div class="panel-head compact-head">
             <div>
@@ -141,6 +143,15 @@
           <section class="log-box terminal-note">
             <h3>量化摘要</h3>
             <div id="reasoning" class="summary-facts">暂无推理摘要。</div>
+          </section>
+          <section class="trigger-watch">
+            <div class="section-head">
+              <h3>等待触发观察</h3>
+              <span id="triggerWatchBadge" class="badge gray">暂无</span>
+            </div>
+            <p id="triggerWatchSummary" class="source-note">暂无 60 分等待触发样本。</p>
+            <div id="triggerWatchStats" class="metric-grid trigger-watch-stats"></div>
+            <div id="triggerWatchRows" class="trigger-watch-rows"></div>
           </section>
           <dl id="quantDetails" class="kv-grid hidden-compact"></dl>
           <div class="factor-evidence">
@@ -190,7 +201,9 @@
           <div class="section-head"><h3>降级标记</h3></div>
           <ul id="degradeFlags" class="signal-list"></ul>
         </article>
+      </section>
 
+      <section class="execution-grid" aria-label="样本治理与机器人链路">
         <article class="panel detail-panel factor-panel">
           <div class="panel-head compact-head">
             <div>

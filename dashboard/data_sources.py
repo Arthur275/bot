@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from .status_rules import kill_switch_status, lookup_status, runtime_status
 BOT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_QUANT_ROOT = BOT_ROOT.parent / "quant_system_rebuild"
 INCOMPLETE_QUANT_STATUSES = {"incomplete_snapshot_only", "incomplete_missing_scheduler_status"}
+TRIGGER_WATCH_CONFIDENCE_THRESHOLD = 0.60
+TRIGGER_WATCH_HORIZONS = (1, 3, 6)
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,11 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     decision_review_report_present = (bot_runtime / "reviews" / "latest_decision_review.json").exists()
     decision_review = load_decision_review(bot_root=paths.bot_root, quant_root=paths.quant_root)
     charts = _charts_summary(bot_root=paths.bot_root, quant_root=paths.quant_root)
+    trigger_watch = _trigger_watch_summary(
+        quant_root=paths.quant_root,
+        bot_samples_path=bot_scheduler_root / "samples.jsonl",
+        bot_latest_cycle=bot_cycle,
+    )
 
     kill_switch_path = bot_runtime / "controls" / "disable_real_execution.flag"
     return {
@@ -176,6 +184,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "factor_lookup_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
             "execution_warnings": quant_handoff.get("execution_warnings", []),
             "automation_boundary": bot_cycle.get("automation_boundary", ""),
+            "trigger_watch": trigger_watch,
             "research": _research_summary(research_health, reason_code_text_map=reason_code_text_map),
         },
         "bot": {
@@ -588,7 +597,7 @@ def _charts_summary(*, bot_root: Path, quant_root: Path) -> dict[str, Any]:
         "cycle_status_timeline": _cycle_status_timeline(quant_root, limit=80),
         "quant_metric_series": quant_metric_rows or _quant_metric_series(bot_samples),
         "reason_code_counts": _reason_code_counts(bot_samples, limit=10),
-        "consensus_quality_series": _consensus_quality_series(bot_samples),
+        "consensus_quality_series": _quant_consensus_quality_series(quant_root, limit=80) or _consensus_quality_series(bot_samples),
     }
 
 
@@ -699,6 +708,348 @@ def _quant_metric_series(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _trigger_watch_summary(
+    *,
+    quant_root: Path,
+    bot_samples_path: Path,
+    bot_latest_cycle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = _merge_trigger_watch_rows(
+        _trigger_watch_quant_rows(quant_root, limit=160),
+        _trigger_watch_bot_rows(bot_samples_path, limit=160),
+    )
+    source = "quant_cycles+bot_samples"
+    if bot_latest_cycle:
+        latest_bot_row = _trigger_watch_row_from_bot_sample(bot_latest_cycle)
+        if latest_bot_row and not _has_trigger_watch_row(rows, latest_bot_row):
+            rows.append(latest_bot_row)
+            rows.sort(key=lambda row: _parse_timestamp(row.get("generated_at")) or 0.0)
+            source = f"{source}+latest_cycle"
+    watch_indexes = [index for index, row in enumerate(rows) if _is_trigger_watch_row(row)]
+    current = _trigger_watch_current(rows, watch_indexes)
+    stats = _trigger_watch_stats(rows, watch_indexes)
+    recent = [_trigger_watch_public_row(rows[index]) for index in watch_indexes[-6:]]
+    return {
+        "status": "active" if current else "idle",
+        "label": "等待触发" if current else "暂无等待触发",
+        "source": source,
+        "threshold_confidence": TRIGGER_WATCH_CONFIDENCE_THRESHOLD,
+        "horizons": list(TRIGGER_WATCH_HORIZONS),
+        "current": current or {},
+        "stats": stats,
+        "recent": recent,
+    }
+
+
+def _merge_trigger_watch_rows(*row_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for group in row_groups:
+        for row in group:
+            if not _has_trigger_watch_row(rows, row):
+                rows.append(row)
+    rows.sort(key=_trigger_watch_sort_ts)
+    _fill_missing_trigger_watch_prices(rows)
+    return rows
+
+
+def _has_trigger_watch_row(rows: list[dict[str, Any]], candidate: dict[str, Any]) -> bool:
+    candidate_source = str(candidate.get("source") or "")
+    candidate_id = candidate.get("sample_id")
+    candidate_at = str(candidate.get("generated_at") or "")
+    return any(
+        str(row.get("source") or "") == candidate_source
+        and row.get("sample_id") == candidate_id
+        and str(row.get("generated_at") or "") == candidate_at
+        for row in rows
+    )
+
+
+def _trigger_watch_current(rows: list[dict[str, Any]], watch_indexes: list[int]) -> dict[str, Any] | None:
+    if watch_indexes and watch_indexes[-1] == len(rows) - 1:
+        return _trigger_watch_public_row(rows[watch_indexes[-1]])
+    return None
+
+
+def _trigger_watch_stats(rows: list[dict[str, Any]], watch_indexes: list[int]) -> dict[str, Any]:
+    stats: dict[str, Any] = {"sample_count": len(watch_indexes)}
+    for horizon in TRIGGER_WATCH_HORIZONS:
+        outcomes = [
+            value
+            for index in watch_indexes
+            for value in [_directional_future_return(rows, index, horizon)]
+            if value is not None
+        ]
+        stats[f"resolved_{horizon}_count"] = len(outcomes)
+        stats[f"avg_return_{horizon}"] = _average(outcomes)
+        stats[f"positive_rate_{horizon}"] = _positive_rate(outcomes)
+    return stats
+
+
+def _trigger_watch_public_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sample_id": row.get("sample_id"),
+        "source": row.get("source"),
+        "generated_at": row.get("generated_at"),
+        "action": row.get("action"),
+        "direction": row.get("direction"),
+        "confidence": row.get("confidence"),
+        "setup_strength": row.get("setup_strength"),
+        "entry_timing_score": row.get("entry_timing_score"),
+        "trigger_ready": row.get("trigger_ready"),
+        "risk_filter_status": row.get("risk_filter_status"),
+        "block_reason": row.get("block_reason"),
+        "price": row.get("price"),
+        "reason": row.get("reason"),
+    }
+
+
+def _trigger_watch_quant_rows(quant_root: Path, *, limit: int) -> list[dict[str, Any]]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and (path / "decision.json").exists()],
+            key=lambda path: _cycle_fast_sort_timestamp(path),
+            reverse=True,
+        )[:limit]
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for root in reversed(roots):
+        payload = _read_json(root / "decision.json")
+        decision = payload.get("decision") if isinstance(payload, dict) else {}
+        decision = decision if isinstance(decision, dict) else {}
+        if not decision:
+            continue
+        risk = decision.get("risk_report") if isinstance(decision, dict) else {}
+        risk = risk if isinstance(risk, dict) else {}
+        trigger = decision.get("trigger_state") if isinstance(decision, dict) else {}
+        trigger = trigger if isinstance(trigger, dict) else {}
+        setup = decision.get("setup_state") if isinstance(decision, dict) else {}
+        setup = setup if isinstance(setup, dict) else {}
+        metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        rows.append(
+            {
+                "source": "quant_cycle",
+                "sample_id": root.name,
+                "_sort_ts": _cycle_fast_sort_timestamp(root),
+                "generated_at": str(payload.get("generated_at") or _mtime_iso(root / "decision.json")),
+                "action": str(decision.get("action") or ""),
+                "direction": str(decision.get("direction") or setup.get("setup_direction") or trigger.get("trigger_direction") or ""),
+                "confidence": _float(decision.get("confidence")),
+                "setup_strength": _float(setup.get("setup_strength")),
+                "entry_timing_score": _float(trigger.get("entry_timing_score")),
+                "trigger_ready": trigger.get("trigger_ready"),
+                "risk_filter_status": str(risk.get("risk_filter_status") or ""),
+                "block_reason": str(decision.get("execution_block_reason") or ""),
+                "reasoning_summary": str(decision.get("reasoning_summary") or ""),
+                "reason_codes": _list(risk.get("reason_codes")) + _list(risk.get("degrade_flags")),
+                "price": _decision_price(metadata, decision),
+            }
+        )
+    return rows
+
+
+def _trigger_watch_bot_rows(bot_samples_path: Path, *, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sample in _tail_jsonl(bot_samples_path, limit=limit):
+        row = _trigger_watch_row_from_bot_sample(sample)
+        if row:
+            rows.append(row)
+    rows.sort(key=_trigger_watch_sort_ts)
+    return rows
+
+
+def _trigger_watch_row_from_bot_sample(sample: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(sample, dict):
+        return None
+    runtime_snapshot = sample.get("runtime_snapshot") if isinstance(sample.get("runtime_snapshot"), dict) else {}
+    position = runtime_snapshot.get("position") if isinstance(runtime_snapshot, dict) else {}
+    position = position if isinstance(position, dict) else {}
+    generated_at = str(sample.get("finished_at") or sample.get("generated_at") or sample.get("started_at") or "")
+    return {
+        "source": "bot_sample",
+        "sample_id": sample.get("sample_id"),
+        "_sort_ts": _parse_timestamp(generated_at),
+        "generated_at": generated_at,
+        "action": str(sample.get("effective_action") or sample.get("requested_action") or ""),
+        "direction": str(sample.get("direction") or sample.get("setup_direction") or sample.get("trigger_direction") or ""),
+        "confidence": _float(sample.get("confidence")),
+        "setup_strength": _extract_setup_strength(sample),
+        "entry_timing_score": _float(sample.get("entry_timing_score")),
+        "trigger_ready": sample.get("trigger_ready"),
+        "risk_filter_status": str(sample.get("risk_filter_status") or ""),
+        "block_reason": str(sample.get("execution_block_reason") or ""),
+        "reasoning_summary": str(sample.get("reasoning_summary") or ""),
+        "reason_codes": _list(sample.get("reason_codes")) + _list(sample.get("transition_reason_codes")),
+        "price": _first_float(
+            sample.get("consensus_mark_price"),
+            sample.get("mark_price"),
+            _nested(sample, "market_snapshot", "mark_price"),
+            position.get("mark_price"),
+            sample.get("last_price"),
+        ),
+    }
+
+
+def _is_trigger_watch_row(row: dict[str, Any]) -> bool:
+    confidence = _float(row.get("confidence"))
+    if confidence is None or confidence < TRIGGER_WATCH_CONFIDENCE_THRESHOLD:
+        return False
+    action = str(row.get("action") or "").lower()
+    if action not in {"wait", "observe_only", "observe"}:
+        return False
+    direction = str(row.get("direction") or "").lower()
+    if direction not in {"long", "short"}:
+        return False
+    summary = str(row.get("reasoning_summary") or "").lower()
+    reasons = " ".join(str(code).lower() for code in _list(row.get("reason_codes")))
+    trigger_ready = row.get("trigger_ready")
+    trigger_not_ready = trigger_ready is False or str(trigger_ready).lower() == "false"
+    return (
+        trigger_not_ready
+        or "trigger_15m_ready=no" in summary
+        or "setup_ready_waiting_trigger" in summary
+        or "setup_ready_waiting_trigger" in reasons
+        or str(row.get("block_reason") or "").lower() in {"not_entry_action", "waiting_for_trigger"}
+    )
+
+
+def _directional_future_return(rows: list[dict[str, Any]], index: int, horizon: int) -> float | None:
+    if horizon <= 0:
+        return None
+    base_price = _float(rows[index].get("price"))
+    if base_price is None or base_price <= 0:
+        return None
+    base_ts = _trigger_watch_sort_ts(rows[index])
+    future_rows = [
+        row
+        for row in rows[index + 1 :]
+        if _trigger_watch_sort_ts(row) > base_ts and _float(row.get("price")) is not None
+    ]
+    quant_price_rows = [row for row in future_rows if row.get("source") == "quant_cycle"]
+    if quant_price_rows:
+        future_rows = quant_price_rows
+    future_price = None
+    seen = 0
+    for row in future_rows:
+        price = _float(row.get("price"))
+        if price is None:
+            continue
+        seen += 1
+        if seen == horizon:
+            future_price = price
+            break
+    if future_price is None:
+        return None
+    direction = str(rows[index].get("direction") or "").lower()
+    raw_return = (future_price - base_price) / base_price
+    if direction == "short":
+        raw_return = -raw_return
+    elif direction != "long":
+        return None
+    return round(raw_return, 8)
+
+
+def _trigger_watch_sort_ts(row: dict[str, Any]) -> float:
+    timestamp = _float(row.get("_sort_ts"))
+    if timestamp is not None:
+        return timestamp
+    return _parse_timestamp(row.get("generated_at")) or 0.0
+
+
+def _fill_missing_trigger_watch_prices(rows: list[dict[str, Any]]) -> None:
+    price_points = [
+        (_trigger_watch_sort_ts(row), _float(row.get("price")))
+        for row in rows
+        if _float(row.get("price")) is not None
+    ]
+    for row in rows:
+        if _float(row.get("price")) is not None:
+            continue
+        row_ts = _trigger_watch_sort_ts(row)
+        if row_ts <= 0:
+            continue
+        fallback: tuple[float, float] | None = None
+        for price_ts, price in price_points:
+            if price is None:
+                continue
+            age = row_ts - price_ts
+            if 0 <= age <= 20 * 60:
+                fallback = (age, price)
+            elif fallback is None and 0 > age >= -2 * 60:
+                fallback = (abs(age), price)
+        if fallback is not None:
+            row["price"] = fallback[1]
+            row["price_source"] = "nearest_quant_price"
+
+
+def _decision_price(metadata: dict[str, Any], decision: dict[str, Any]) -> float | None:
+    return _first_float(
+        metadata.get("consensus_mark_price"),
+        _nested(metadata, "market_data", "consensus_mark_price"),
+        metadata.get("consensus_worst_case_price"),
+        metadata.get("binance_mark_price"),
+        _nested(metadata, "runtime_snapshot", "position", "mark_price"),
+        decision.get("mark_price"),
+        decision.get("price"),
+    )
+
+
+def _cycle_fast_sort_timestamp(root: Path) -> float:
+    match = re.search(r"(\d{8}T\d{6}Z)", root.name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+    try:
+        return root.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _extract_setup_strength(sample: dict[str, Any]) -> float | None:
+    value = sample.get("setup_strength")
+    if value not in (None, ""):
+        return _float(value)
+    summary = str(sample.get("reasoning_summary") or "")
+    match = re.search(r"setup_15m=[a-z_]+:([0-9.]+)", summary, re.IGNORECASE)
+    return _float(match.group(1)) if match else None
+
+
+def _first_float(*values: Any) -> float | None:
+    for value in values:
+        number = _float(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not number == number:
+        return None
+    return number
+
+
+def _average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 8)
+
+
+def _positive_rate(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(1 for value in values if value > 0) / len(values), 6)
+
+
 def _reason_code_counts(samples: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
     for sample in samples[-80:]:
@@ -723,6 +1074,39 @@ def _consensus_quality_series(samples: list[dict[str, Any]]) -> list[dict[str, A
             }
         )
     return rows
+
+
+def _quant_consensus_quality_series(quant_root: Path, *, limit: int) -> list[dict[str, Any]]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and (path / "decision.json").exists()],
+            key=lambda path: _cycle_fast_sort_timestamp(path),
+            reverse=True,
+        )[:limit]
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for root in reversed(roots):
+        payload = _read_json(root / "decision.json")
+        metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        quality = str(metadata.get("consensus_quality") or "")
+        rows.append(
+            {
+                "generated_at": str(payload.get("generated_at") or _mtime_iso(root / "decision.json")),
+                "sample_id": root.name,
+                "quality": quality,
+                "quality_value": _consensus_quality_value(quality),
+                "source_count": _chart_float(metadata.get("consensus_source_count")),
+                "market_data_mode": str(metadata.get("market_data_mode") or ""),
+            }
+        )
+    return [
+        row
+        for row in rows
+        if row["quality"] or row["source_count"] is not None or row["market_data_mode"]
+    ]
 
 
 def _cycle_status_value(status: str) -> int:
