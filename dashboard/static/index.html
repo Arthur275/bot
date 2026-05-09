@@ -3,176 +3,146 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="dashboard-build" content="terminal-cn-3" />
     <title>ETH 运行观察面板</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="topbar">
-      <div class="title-block">
+      <div class="brand-block">
+        <span class="eth-mark" aria-hidden="true"></span>
         <h1>ETH 运行观察面板</h1>
+        <span class="top-divider"></span>
         <p>只读观察自动化实盘链路</p>
       </div>
       <div class="toolbar">
-        <span id="refreshState" class="status-pill blue">等待刷新</span>
-        <span id="orderModePill" class="status-pill gray">真实提交：未知</span>
+        <span id="refreshState" class="status-pill blue">刷新：等待</span>
+        <span id="orderModePill" class="status-pill gray">模式：未知</span>
         <span id="killSwitchPill" class="status-pill gray">熔断：未知</span>
-        <span id="updatedAt" class="updated-at">暂无更新时间</span>
-        <button id="pauseBtn" type="button">暂停</button>
-        <button id="refreshBtn" type="button">刷新</button>
+        <span id="updatedAt" class="updated-at">最后更新：暂无</span>
+        <button id="pauseBtn" type="button"><span aria-hidden="true">Ⅱ</span> 暂停</button>
+        <button id="refreshBtn" type="button"><span aria-hidden="true">↻</span> 刷新</button>
       </div>
     </header>
 
     <main class="shell">
       <div id="errorBanner" class="error-banner" hidden></div>
-      <div id="modeNotice" class="notice-box mode-notice">当前模式加载中；审查报告只读，不参与自动下单。</div>
+      <div id="modeNotice" class="mode-notice" aria-live="polite">当前模式加载中；审查报告只读，不参与自动下单。</div>
 
       <section class="summary-bar" aria-label="当前链路摘要">
-        <div class="summary-reason">
-          <span>当前交易状态</span>
-          <strong id="summaryBlockReason">加载中</strong>
-          <small id="summaryBlockMeta">等待最新链路状态</small>
-        </div>
-        <div class="summary-profit">
-          <span>总收益</span>
-          <strong id="summaryProfit">暂无</strong>
-          <small id="summaryProfitMeta">权益暂无</small>
-        </div>
-        <div>
-          <span>当前动作</span>
-          <strong id="summaryAction">暂无</strong>
-        </div>
-        <div>
-          <span>风险状态</span>
-          <strong id="summaryRisk">暂无</strong>
-        </div>
-        <div>
-          <span>执行包</span>
-          <strong id="summaryCandidate">暂无</strong>
-        </div>
-        <div>
-          <span>审查</span>
-          <strong id="summaryReview">暂无</strong>
-        </div>
+        <article class="summary-card trade-card">
+          <div class="card-kicker"><span>1. 当前交易状态</span><span class="info-dot">?</span></div>
+          <strong id="summaryBlockReason" class="headline-value yellow">加载中</strong>
+          <div class="card-row"><span>方向</span><b id="summaryDirection">暂无</b></div>
+          <div class="card-row"><span>最新周期</span><b id="summaryLatestCycle">暂无</b></div>
+          <small id="summaryBlockMeta" class="card-note">等待最新链路状态</small>
+        </article>
+        <article class="summary-card summary-profit">
+          <div class="card-kicker"><span>2. 总收益 / 账户权益</span><span class="info-dot">?</span></div>
+          <strong id="summaryProfit" class="headline-value">暂无</strong>
+          <div class="card-row"><span>账户权益</span><b id="summaryProfitMeta">权益暂无</b></div>
+        </article>
+        <article class="summary-card">
+          <div class="card-kicker"><span>3. 当前量化动作</span><span class="info-dot">?</span></div>
+          <strong id="summaryAction" class="headline-value blue">暂无</strong>
+          <div class="card-row"><span>市场模式</span><b id="summaryMarketMode">暂无</b></div>
+        </article>
+        <article class="summary-card">
+          <div class="card-kicker"><span>4. 风险状态</span><span class="info-dot">?</span></div>
+          <strong id="summaryRisk" class="headline-value">暂无</strong>
+          <div class="card-row"><span>风险分</span><b id="summaryRiskScore">暂无</b></div>
+          <div class="card-row"><span>风险预算</span><b id="summaryRiskBudget">暂无</b></div>
+        </article>
+        <article class="summary-card">
+          <div class="card-kicker"><span>5. 候选执行包</span><span class="info-dot">?</span></div>
+          <strong id="summaryCandidate" class="headline-value blue">暂无</strong>
+          <div class="card-row"><span>快照来源</span><b id="summarySnapshotSource">暂无</b></div>
+          <div class="card-row"><span>生成时间</span><b id="summaryBundleGenerated">暂无</b></div>
+        </article>
+        <article class="summary-card">
+          <div class="card-kicker"><span>6. 审查状态</span><span class="info-dot">?</span></div>
+          <strong id="summaryReview" class="headline-value gray">暂无</strong>
+          <div class="card-row"><span>真实执行器</span><b id="summaryRealWorker">暂无</b></div>
+          <div class="card-row"><span>最近审查</span><b id="summaryLastReview">暂无</b></div>
+        </article>
       </section>
 
       <section class="flow-section" aria-label="链路健康条">
         <div id="runtimeGrid" class="flow-grid"></div>
       </section>
 
-      <section class="chart-section" aria-label="运行趋势图表">
-        <article class="panel chart-panel wide-chart">
+      <section class="terminal-grid" aria-label="运行监控主面板">
+        <article class="panel chart-panel chart-a">
           <div class="panel-head">
             <div>
-              <h2>运行状态时间线</h2>
-              <p>最近 quant cycle 的完成、阻断和不完整状态</p>
+              <h2>一）运行状态时间线</h2>
+              <p>最近 30 个量化周期</p>
             </div>
             <span id="chartRuntimeBadge" class="badge gray">等待数据</span>
           </div>
-          <div id="cycleStatusChart" class="chart-box"></div>
+          <div class="timeline-layout">
+            <div id="cycleStatusChart" class="chart-box timeline-chart"></div>
+            <div id="cycleStatusCounts" class="status-counts"></div>
+          </div>
         </article>
-        <article class="panel chart-panel">
+
+        <article class="panel chart-panel chart-b">
           <div class="panel-head">
             <div>
-              <h2>量化指标趋势</h2>
-              <p>数据健康、信心分、edge 和成本</p>
+              <h2>二）量化指标</h2>
+              <p>最近 30 个周期</p>
             </div>
+            <span id="chartQuantBadge" class="badge gray">等待数据</span>
           </div>
           <div id="quantMetricsChart" class="chart-box"></div>
+          <p id="quantMetricsNote" class="source-note">等待量化指标。</p>
         </article>
-        <article class="panel chart-panel">
+
+        <article class="panel chart-panel chart-c">
           <div class="panel-head">
             <div>
-              <h2>原因代码 Top N</h2>
-              <p>最近 bot 样本中的风险和降级原因</p>
+              <h2>三）主要原因代码</h2>
+              <p>最近 24 小时</p>
             </div>
           </div>
           <div id="reasonCodesChart" class="chart-box"></div>
         </article>
-        <article class="panel chart-panel wide-chart">
+
+        <article class="panel chart-panel chart-d">
           <div class="panel-head">
             <div>
-              <h2>市场数据共识</h2>
-              <p>共识质量和可用源数量随时间变化</p>
+              <h2>四）市场数据共识</h2>
+              <p>最近 30 个周期</p>
             </div>
           </div>
           <div id="consensusChart" class="chart-box compact-chart"></div>
-        </article>
-      </section>
-
-      <section class="dashboard-grid">
-        <article class="panel factor-panel">
-          <div class="panel-head">
-            <div>
-              <h2>样本采集与因子治理</h2>
-              <p>因子数据、查找表和治理质量</p>
-            </div>
-            <span id="factorLookupBadge" class="badge gray">未知</span>
-          </div>
-          <div class="metric-grid five">
-            <div><span>样本数</span><strong id="factorSamples">0</strong></div>
-            <div><span>观察数</span><strong id="factorObservations">0</strong></div>
-            <div><span>查找表行数</span><strong id="lookupRows">0</strong></div>
-            <div><span>因子值</span><strong id="factorValues">0</strong></div>
-            <div><span>治理</span><strong id="factorGovernanceStatus">未知</strong></div>
-          </div>
-          <dl id="factorDetails" class="kv-grid"></dl>
-          <div class="section-head">
-            <h3>因子治理明细</h3>
-            <span id="factorGovernanceBadge" class="badge gray">未知</span>
-          </div>
-          <div id="factorGovernanceRows" class="compact-table governance-table"></div>
-          <div class="two-column">
-            <section>
-              <h3>风险代码</h3>
-              <ul id="riskCodes" class="signal-list"></ul>
-            </section>
-            <section>
-              <h3>降级标记</h3>
-              <ul id="degradeFlags" class="signal-list"></ul>
-            </section>
-          </div>
+          <p id="consensusSourceNote" class="source-note">来源：OKX、Bitget、Gate、CoinGlass、Binance</p>
         </article>
 
-        <article class="panel quant-panel">
-          <div class="panel-head">
+        <article class="panel detail-panel quant-panel">
+          <div class="panel-head compact-head">
             <div>
               <h2>量化市场判断</h2>
               <p>当前动作、方向、风控和因子证据</p>
             </div>
             <span id="quantRiskBadge" class="badge gray">未知</span>
           </div>
-          <div class="metric-grid five">
-            <div><span>动作</span><strong id="quantAction">暂无</strong></div>
-            <div><span>方向</span><strong id="quantDirection">暂无</strong></div>
-            <div><span>风控</span><strong id="quantRiskStatus">暂无</strong></div>
-            <div><span>仓位档位</span><strong id="quantSizing">暂无</strong></div>
-            <div><span>策略信心分</span><strong id="quantConfidence">暂无</strong></div>
+          <div class="mini-kv">
+            <span>方向</span><strong id="quantDirection">暂无</strong>
+            <span>动作</span><strong id="quantAction">暂无</strong>
+            <span>风控</span><strong id="quantRiskStatus">暂无</strong>
+            <span>仓位档位</span><strong id="quantSizing">暂无</strong>
+            <span>信心分</span><strong id="quantConfidence">暂无</strong>
+            <span>市场状态</span><strong id="summaryRegime">暂无</strong>
+            <span>否决 / 审批</span><strong id="summaryApproval">暂无</strong>
           </div>
-          <section class="log-box">
-            <h3>量化摘要</h3>
-            <p id="reasoning">暂无推理摘要。</p>
-          </section>
-          <dl id="quantDetails" class="kv-grid"></dl>
-          <div class="section-head">
-            <h3>市场数据状态</h3>
-            <span id="marketDataBadge" class="badge gray">未知</span>
-          </div>
-          <dl id="marketDataDetails" class="kv-grid compact"></dl>
-          <div class="section-head">
-            <h3>Edge / Cost</h3>
-            <span id="edgeCostBadge" class="badge gray">未知</span>
-          </div>
-          <dl id="edgeCostDetails" class="kv-grid compact"></dl>
-          <div class="section-head">
-            <h3>当前原因代码</h3>
-          </div>
+          <div class="section-head"><h3>当前原因代码</h3></div>
           <div id="quantReasons" class="chip-grid reason-chips"></div>
-          <div class="section-head">
-            <h3>研究健康</h3>
-            <span id="researchBadge" class="badge gray">未知</span>
-          </div>
-          <dl id="researchDetails" class="kv-grid compact"></dl>
-          <div id="researchReasons" class="chip-grid reason-chips"></div>
+          <section class="log-box terminal-note">
+            <h3>量化摘要</h3>
+            <div id="reasoning" class="summary-facts">暂无推理摘要。</div>
+          </section>
+          <dl id="quantDetails" class="kv-grid hidden-compact"></dl>
           <div class="factor-evidence">
             <section>
               <h3>支持开仓</h3>
@@ -189,15 +159,77 @@
           </div>
         </article>
 
-        <article class="panel bot-panel">
-          <div class="panel-head">
+        <article class="panel detail-panel market-panel">
+          <div class="panel-head compact-head">
+            <div>
+              <h2>市场数据 / 共识状态</h2>
+              <p>源质量和快照新鲜度</p>
+            </div>
+            <span id="marketDataBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="marketDataDetails" class="kv-grid compact"></dl>
+          <div class="section-head">
+            <h3>研究健康</h3>
+            <span id="researchBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="researchDetails" class="kv-grid compact"></dl>
+          <div id="researchReasons" class="chip-grid reason-chips"></div>
+        </article>
+
+        <article class="panel detail-panel edge-panel">
+          <div class="panel-head compact-head">
+            <div>
+              <h2>优势 / 成本</h2>
+              <p>净优势、滑点和手续费</p>
+            </div>
+            <span id="edgeCostBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="edgeCostDetails" class="kv-grid compact"></dl>
+          <div class="section-head"><h3>风险代码</h3></div>
+          <ul id="riskCodes" class="signal-list"></ul>
+          <div class="section-head"><h3>降级标记</h3></div>
+          <ul id="degradeFlags" class="signal-list"></ul>
+        </article>
+
+        <article class="panel detail-panel factor-panel">
+          <div class="panel-head compact-head">
+            <div>
+              <h2>样本采集与因子治理</h2>
+              <p>因子数据、查找表和治理质量</p>
+            </div>
+            <span id="factorLookupBadge" class="badge gray">未知</span>
+          </div>
+          <div class="metric-grid five factor-strip">
+            <div><span>样本数</span><strong id="factorSamples">0</strong></div>
+            <div><span>观察数</span><strong id="factorObservations">0</strong></div>
+            <div><span>查找表行数</span><strong id="lookupRows">0</strong></div>
+            <div><span>因子值</span><strong id="factorValues">0</strong></div>
+            <div><span>治理</span><strong id="factorGovernanceStatus">未知</strong></div>
+          </div>
+          <dl id="factorDetails" class="kv-grid compact"></dl>
+          <div class="section-head">
+            <h3>因子治理明细</h3>
+            <span id="factorGovernanceBadge" class="badge gray">未知</span>
+          </div>
+          <div id="factorGovernanceRows" class="compact-table governance-table"></div>
+        </article>
+
+        <article class="panel detail-panel bot-panel">
+          <div class="panel-head compact-head">
             <div>
               <h2>机器人下单链路</h2>
               <p>持仓、候选执行包和执行器审计</p>
             </div>
             <span id="botStateBadge" class="badge gray">未知</span>
           </div>
-          <div class="metric-grid five">
+          <div class="bot-stepper">
+            <div><span>1</span><b>采集器</b><em id="stepCollector">暂无</em></div>
+            <div><span>2</span><b>量化判断</b><em id="stepQuant">暂无</em></div>
+            <div><span>3</span><b>调度器</b><em id="stepScheduler">暂无</em></div>
+            <div><span>4</span><b>执行器</b><em id="stepExecutor">暂无</em></div>
+            <div><span>5</span><b>审查</b><em id="stepReview">暂无</em></div>
+          </div>
+          <div class="metric-grid five bot-strip">
             <div><span>执行状态</span><strong id="botExecutionState">暂无</strong></div>
             <div><span>持仓</span><strong id="botPosition">暂无</strong></div>
             <div><span>方向</span><strong id="botDirection">暂无</strong></div>
@@ -208,21 +240,21 @@
             <h3>候选执行包</h3>
             <span id="candidateGateBadge" class="badge gray">未知</span>
           </div>
-          <dl id="candidateDetails" class="kv-grid"></dl>
-          <div class="section-head">
-            <h3>最新周期</h3>
-          </div>
+          <dl id="candidateDetails" class="kv-grid compact"></dl>
+          <div class="section-head"><h3>最新周期</h3></div>
           <dl id="cycleDetails" class="kv-grid compact"></dl>
           <section class="log-box audit-box">
             <h3>执行事件</h3>
             <div id="auditEvents" class="audit-list"></div>
           </section>
         </article>
+      </section>
 
+      <section class="dashboard-grid">
         <article class="panel review-panel">
-          <div class="panel-head">
+          <div class="panel-head compact-head">
             <div>
-              <h2>决策审查报告</h2>
+              <h2>决策审查报告（为什么等待）</h2>
               <p>解释和复盘，不参与自动下单</p>
             </div>
             <span id="reviewStatusBadge" class="badge gray">未知</span>
@@ -230,19 +262,35 @@
           <div class="notice-box">
             审查报告仅供解释和复盘，不参与自动下单。审查清晰不代表允许下单，最终以下单链路和风控结果为准。
           </div>
-          <div class="metric-grid five">
-            <div><span>审查状态</span><strong id="reviewStatus">暂无</strong></div>
-            <div><span>模式</span><strong id="reviewMode">暂无</strong></div>
-            <div><span>来源周期</span><strong id="reviewRunId" class="source-cycle">暂无</strong></div>
-            <div><span>交接包</span><strong id="reviewHandoffAge">暂无</strong></div>
-            <div><span>耗时</span><strong id="reviewLatency">暂无</strong></div>
+          <div class="review-terminal-grid">
+            <section>
+              <h3>阻断原因</h3>
+              <div id="reviewRiskFindings" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>预警</h3>
+              <div id="reviewExecutionFindings" class="finding-list"></div>
+            </section>
+            <section>
+              <h3>审查执行器</h3>
+              <div class="mini-kv review-worker-kv">
+                <span>审查状态</span><strong id="reviewStatus">暂无</strong>
+                <span>模式</span><strong id="reviewMode">暂无</strong>
+                <span>来源周期</span><strong id="reviewRunId" class="source-cycle">暂无</strong>
+                <span>交接包</span><strong id="reviewHandoffAge">暂无</strong>
+                <span>耗时</span><strong id="reviewLatency">暂无</strong>
+              </div>
+            </section>
+            <section>
+              <h3>风险摘要</h3>
+              <dl id="reviewDetails" class="kv-grid compact"></dl>
+            </section>
           </div>
-          <dl id="reviewDetails" class="kv-grid"></dl>
-          <div class="section-head">
-            <h3>数据源质量</h3>
-          </div>
-          <div id="reviewSourceQuality" class="compact-table quality-table"></div>
-          <div class="review-findings">
+          <div class="review-secondary">
+            <section>
+              <h3>数据源质量</h3>
+              <div id="reviewSourceQuality" class="compact-table quality-table"></div>
+            </section>
             <section>
               <h3>多头理由</h3>
               <div id="reviewBullCase" class="finding-list"></div>
@@ -250,14 +298,6 @@
             <section>
               <h3>空头理由</h3>
               <div id="reviewBearCase" class="finding-list"></div>
-            </section>
-            <section>
-              <h3>风险发现</h3>
-              <div id="reviewRiskFindings" class="finding-list"></div>
-            </section>
-            <section>
-              <h3>执行链路发现</h3>
-              <div id="reviewExecutionFindings" class="finding-list"></div>
             </section>
             <section>
               <h3>治理复查建议</h3>

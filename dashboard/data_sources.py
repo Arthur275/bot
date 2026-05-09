@@ -583,9 +583,10 @@ def _read_latest_incomplete_quant_cycle(quant_root: Path) -> dict[str, Any]:
 
 def _charts_summary(*, bot_root: Path, quant_root: Path) -> dict[str, Any]:
     bot_samples = _tail_jsonl(bot_root / "runtime" / "bot_runtime_scheduler" / "samples.jsonl", limit=80)
+    quant_metric_rows = _quant_cycle_metric_rows(quant_root, limit=80)
     return {
         "cycle_status_timeline": _cycle_status_timeline(quant_root, limit=80),
-        "quant_metric_series": _quant_metric_series(bot_samples),
+        "quant_metric_series": quant_metric_rows or _quant_metric_series(bot_samples),
         "reason_code_counts": _reason_code_counts(bot_samples, limit=10),
         "consensus_quality_series": _consensus_quality_series(bot_samples),
     }
@@ -626,6 +627,57 @@ def _cycle_status_timeline(quant_root: Path, *, limit: int) -> list[dict[str, An
     return rows
 
 
+def _quant_cycle_metric_rows(quant_root: Path, *, limit: int) -> list[dict[str, Any]]:
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and (path / "decision.json").exists()],
+            key=lambda path: _cycle_sort_timestamp(path),
+            reverse=True,
+        )[:limit]
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for root in reversed(roots):
+        payload = _read_json(root / "decision.json")
+        decision = payload.get("decision") if isinstance(payload, dict) else {}
+        decision = decision if isinstance(decision, dict) else {}
+        risk = decision.get("risk_report") if isinstance(decision, dict) else {}
+        risk = risk if isinstance(risk, dict) else {}
+        metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        trigger = decision.get("trigger_state") if isinstance(decision, dict) else {}
+        trigger = trigger if isinstance(trigger, dict) else {}
+        estimated_cost_pct = _first_present(
+            metadata.get("estimated_cost_pct"),
+            _sum_optional_numbers(
+                metadata.get("estimated_fee_pct"),
+                metadata.get("estimated_slippage_pct"),
+                metadata.get("estimated_funding_pct"),
+            ),
+        )
+        net_edge_pct = _first_present(
+            metadata.get("net_edge_pct"),
+            _net_edge_from_gross_and_cost(metadata.get("estimated_gross_edge_pct"), estimated_cost_pct),
+        )
+        rows.append(
+            {
+                "generated_at": str(payload.get("generated_at") or _mtime_iso(root / "decision.json")),
+                "sample_id": root.name,
+                "action": decision.get("action") or "",
+                "data_health_score": _chart_float(risk.get("data_health_score"), scale_unit=True),
+                "confidence": _chart_float(decision.get("confidence"), scale_unit=True),
+                "thesis_score": _chart_float(decision.get("thesis_score"), scale_unit=True),
+                "entry_timing_score": _chart_float(trigger.get("entry_timing_score"), scale_unit=True),
+                "net_edge_pct": _chart_float(net_edge_pct, scale_pct=True),
+                "estimated_cost_pct": _chart_float(estimated_cost_pct, scale_pct=True),
+                "edge_source": str(metadata.get("edge_source") or ""),
+                "edge_estimate_status": str(metadata.get("edge_estimate_status") or ""),
+            }
+        )
+    return rows
+
+
 def _quant_metric_series(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for sample in samples[-80:]:
@@ -636,8 +688,12 @@ def _quant_metric_series(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "action": sample.get("effective_action") or sample.get("requested_action") or "",
                 "data_health_score": _chart_float(sample.get("data_health_score"), scale_unit=True),
                 "confidence": _chart_float(sample.get("confidence"), scale_unit=True),
+                "thesis_score": _chart_float(sample.get("thesis_score"), scale_unit=True),
+                "entry_timing_score": _chart_float(sample.get("entry_timing_score"), scale_unit=True),
                 "net_edge_pct": _chart_float(sample.get("net_edge_pct"), scale_pct=True),
                 "estimated_cost_pct": _chart_float(sample.get("estimated_cost_pct"), scale_pct=True),
+                "edge_source": str(sample.get("edge_source") or ""),
+                "edge_estimate_status": str(sample.get("edge_estimate_status") or ""),
             }
         )
     return rows
@@ -697,10 +753,35 @@ def _chart_float(value: Any, *, scale_unit: bool = False, scale_pct: bool = Fals
     except (TypeError, ValueError):
         return None
     if scale_pct:
-        number = number * 100.0
-    elif scale_unit and abs(number) <= 1.0:
-        number = number * 100.0
+        number = number if abs(number) > 1.0 else number * 100.0
+    elif scale_unit and abs(number) > 1.0:
+        number = number / 100.0
     return round(number, 6)
+
+
+def _sum_optional_numbers(*values: Any) -> float | None:
+    total = 0.0
+    found = False
+    for value in values:
+        try:
+            if value is None or value == "":
+                continue
+            total += float(value)
+            found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def _net_edge_from_gross_and_cost(gross_edge_pct: Any, estimated_cost_pct: Any) -> float | None:
+    try:
+        if gross_edge_pct is None or gross_edge_pct == "":
+            return None
+        gross = float(gross_edge_pct)
+        cost = float(estimated_cost_pct or 0.0)
+        return gross - cost
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_incomplete_quant_status(value: Any) -> bool:

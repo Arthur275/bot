@@ -216,13 +216,22 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
                 "action": "small_probe",
                 "direction": "long",
                 "confidence": 0.42,
+                "thesis_score": 0.58,
                 "reasoning_summary": "latest quant cycle",
                 "risk_report": {
                     "risk_filter_status": "degraded",
                     "degrade_flags": ["research_degraded"],
+                    "data_health_score": 0.65,
                 },
                 "sizing_decision": {"sizing_tier": "none"},
+                "trigger_state": {"entry_timing_score": 0.31},
                 "regime_state": {"regime_type": "trend", "direction": "long"},
+            },
+            "metadata": {
+                "estimated_gross_edge_pct": 0.002,
+                "estimated_cost_pct": 0.0007,
+                "edge_source": "atr_15m_okx",
+                "edge_estimate_status": "confirmed_positive",
             },
         },
     )
@@ -286,6 +295,13 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
         "code": "research_not_ready",
         "text": "quant 共享映射：research 未就绪",
     }
+    assert snapshot["charts"]["quant_metric_series"][0]["data_health_score"] == 0.65
+    assert snapshot["charts"]["quant_metric_series"][0]["confidence"] == 0.42
+    assert snapshot["charts"]["quant_metric_series"][0]["thesis_score"] == 0.58
+    assert snapshot["charts"]["quant_metric_series"][0]["entry_timing_score"] == 0.31
+    assert snapshot["charts"]["quant_metric_series"][0]["net_edge_pct"] == 0.13
+    assert snapshot["charts"]["quant_metric_series"][0]["estimated_cost_pct"] == 0.07
+    assert snapshot["charts"]["quant_metric_series"][0]["edge_source"] == "atr_15m_okx"
     assert snapshot["bot"]["candidate_package"]["gate_allowed"] is True
     assert snapshot["bot"]["candidate_package"]["command_targets"] == ["entry_order", "maintain_protective_stop"]
     assert snapshot["bot"]["worker_events"][0]["payload"]["status"] == "skipped"
@@ -596,6 +612,14 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert ".innerHTML" not in app_js
     assert "replaceChildren" not in app_js
     assert "function clearElement(el)" in app_js
+    assert "judgement_not_ok: \"量化判断未返回可执行结果\"" in app_js
+    assert '"diagnostic:data_source": "数据源异常"' in app_js
+    assert '"risk_filter:unknown": "风控状态未知"' in app_js
+    assert 'waiting: "等待"' in app_js
+    assert '.replace(/\\bunavailable\\b/gi, "不可用")' in app_js
+    assert '.replace(/\\bwaiting\\b/gi, "等待")' in app_js
+    assert 'appendText(chip, "small", displayCode(row.code))' not in app_js
+    assert "chip.title = `原始代码：${row.code}`" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
     assert "renderOptionalWorkers(data.optional_workers || {})" in app_js
     assert "renderCharts(data.charts || {})" in app_js
