@@ -10,6 +10,11 @@ BOT_SCHEDULER_MANAGER_PATH = REPO_ROOT / "scripts" / "manage_bot_runtime_schedul
 LAUNCH_STACK_PATH = REPO_ROOT / "scripts" / "launch_runtime_stack.ps1"
 PLAN_PATH = REPO_ROOT / "docs" / "runtime_stack_manager_plan.md"
 FINAL_PLAN_PATH = REPO_ROOT / "docs" / "automation_research_factor_dashboard_final_plan.md"
+ARCHIVED_DOCS_ROOT = REPO_ROOT / "archive" / "docs" / "2026-05-09" / "docs"
+if not PLAN_PATH.exists():
+    PLAN_PATH = ARCHIVED_DOCS_ROOT / "runtime_stack_manager_plan.md"
+if not FINAL_PLAN_PATH.exists():
+    FINAL_PLAN_PATH = ARCHIVED_DOCS_ROOT / "automation_research_factor_dashboard_final_plan.md"
 
 
 def _script() -> str:
@@ -34,6 +39,7 @@ def test_runtime_stack_manager_entrypoints_exist() -> None:
     assert "[switch]$EnableRealOrders" in script
     assert "[switch]$EnableReviewWorker" in script
     assert "[switch]$DisableCoinglassOverlay" in script
+    assert "[int]$ResearchHealthIntervalSec = 3600" in script
     assert "[int]$ResearchRefreshEvery = 12" in script
     assert "[int]$ReviewIntervalSec = 300" in script
     assert "[double]$ConsensusRequestTimeoutSec = 10.0" in script
@@ -45,6 +51,7 @@ def test_runtime_stack_manager_starts_components_in_dependency_order() -> None:
     expected_order = [
         'Start-ManagedProcess -Name "dashboard"',
         'Start-ManagedProcess -Name "factor_ingest"',
+        'Start-ManagedProcess -Name "research_health"',
         'Start-ManagedProcess -Name "quant_judgement"',
         'Wait-ForCondition -Name "quant_judgement"',
         'Start-ManagedProcess -Name "bot_scheduler"',
@@ -76,6 +83,13 @@ def test_runtime_stack_manager_runs_bot_scheduler_through_stable_powershell_wrap
     assert 'Start-ManagedProcess -Name "bot_scheduler" -FilePath "powershell.exe"' in start_block
     assert '-ArgumentList $BotSchedulerArgs' in start_block
     assert "-Pattern \"bot_scheduler_loop.ps1\"" in start_block
+
+
+def test_runtime_stack_manager_status_and_stop_do_not_write_wrappers() -> None:
+    script = _script()
+
+    assert script.index('if ($Action -eq "status")') < script.index("$BotSchedulerWrapper =")
+    assert script.index('if ($Action -eq "stop")') < script.index("$BotSchedulerWrapper =")
 
 
 def test_runtime_stack_manager_does_not_outer_redirect_bot_scheduler_wrapper() -> None:
@@ -154,6 +168,8 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
         "Get-FileAgeSeconds",
         "factor_ingest_latest.json",
         "factor_summary.json",
+        "research_health.json",
+        "research_auto_refresh",
         "heartbeat.json",
         "handoff.json",
         "execution_handoff.json",
@@ -299,6 +315,12 @@ def test_runtime_stack_manager_refreshes_research_aliases_on_quant_schedule() ->
     assert '"--refresh-research-aliases"' not in quant_args
     assert '"--refresh-research-aliases-every"' in quant_args
     assert '([string]$ResearchRefreshEvery)' in quant_args
+    assert '"--whitelist-path"' in quant_args
+    assert "$FreshResearchWhitelistPath" in quant_args
+    assert '"--all-results-path"' in quant_args
+    assert "$FreshResearchAllResultsPath" in quant_args
+    assert '"--research-dispatch-request"' in quant_args
+    assert "$FreshResearchDispatchRequestPath" in quant_args
     assert '"--consensus-request-timeout-sec"' in quant_args
     assert '([string]$ConsensusRequestTimeoutSec)' in quant_args
     assert '"--include-coinglass-overlay"' in quant_args
@@ -307,7 +329,7 @@ def test_runtime_stack_manager_refreshes_research_aliases_on_quant_schedule() ->
     assert '"--consensus-request-timeout-sec"' in bot_args
     assert '([string]$ConsensusRequestTimeoutSec)' in bot_args
     assert '"--research-dispatch-request"' in bot_args
-    assert "runtime\\fresh_research\\dispatch_request.json" in bot_args
+    assert "$FreshResearchDispatchRequestPath" in bot_args
     assert '"--api-key-env"' in bot_args
     assert '"OKX_TRADE_API_KEY"' in bot_args
     assert '"--api-secret-env"' in bot_args
@@ -315,6 +337,30 @@ def test_runtime_stack_manager_refreshes_research_aliases_on_quant_schedule() ->
     assert '"--api-passphrase-env"' in bot_args
     assert '"OKX_TRADE_PASSPHRASE"' in bot_args
     assert '"--include-coinglass-overlay"' in bot_args
+
+
+def test_runtime_stack_manager_runs_research_health_auto_refresh_sidecar() -> None:
+    script = _script()
+    research_args = script[script.index("$ResearchHealthArgs = @(") : script.index("$QuantArgs = @(")]
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+    stop_block = script[script.index('if ($Action -eq "stop")') : script.index('Start-ManagedProcess -Name "dashboard"')]
+
+    assert '"research-health"' in research_args
+    assert '"--auto-refresh-worker"' in research_args
+    assert '"--research-refresh-lock-ttl-sec"' in research_args
+    assert '"1800"' in research_args
+    assert '"--feature-matrix-path"' in research_args
+    assert '"runtime\\feature_matrix.json"' in research_args
+    assert '"--research-refresh-output-dir"' in research_args
+    assert '"runtime\\fresh_research"' in research_args
+    assert '"--research-refresh-reports-dir"' in research_args
+    assert '"runtime\\reports"' in research_args
+    assert "$FreshResearchWhitelistPath" in research_args
+    assert "$FreshResearchAllResultsPath" in research_args
+    assert 'Start-ManagedProcess -Name "research_health"' in script
+    assert '-Pattern "research-health"' in script
+    assert 'Get-ManagedProcess -Name "research_health" -Pattern "research-health"' in status_function
+    assert 'Stop-ManagedProcess -Name "research_health" -Pattern "research-health"' in stop_block
 
 
 def test_runtime_stack_manager_uses_wrapper_pattern_for_bot_scheduler_status_and_stop() -> None:

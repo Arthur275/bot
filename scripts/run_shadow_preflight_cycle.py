@@ -14,7 +14,8 @@ except ImportError:
     from shadow_preflight_diagnostics import summarize_handoff, summarize_judgement
 
 
-DEFAULT_QUANT_ROOT = "D:/\u5f00\u53d1/quant_system_rebuild"
+BOT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_QUANT_ROOT = str(Path(os.environ.get("QUANT_ROOT") or BOT_ROOT.parent / "quant_system_rebuild"))
 
 
 class ParsedArgs(argparse.Namespace):

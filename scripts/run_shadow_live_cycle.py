@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -15,18 +16,19 @@ def _add_src_paths(*, bot_root: Path, quant_root: Path) -> None:
 
 
 def main() -> int:
+    bot_root = Path(__file__).resolve().parents[1]
+    default_quant_root = Path(os.environ.get("QUANT_ROOT") or bot_root.parent / "quant_system_rebuild")
     parser = argparse.ArgumentParser(description="Run one ETH bot shadow cycle against quant strict-live output.")
-    parser.add_argument("--quant-root", default="D:/开发/quant_system_rebuild")
+    parser.add_argument("--quant-root", default=str(default_quant_root))
     parser.add_argument(
         "--output-root",
-        default="C:/Users/左秋三/.codex/memories/eth_bot_shadow_live",
+        default=str(Path.home() / ".codex" / "memories" / "eth_bot_shadow_live"),
     )
     parser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
     parser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
 
-    bot_root = Path(__file__).resolve().parents[1]
     quant_root = Path(args.quant_root)
     _add_src_paths(bot_root=bot_root, quant_root=quant_root)
 

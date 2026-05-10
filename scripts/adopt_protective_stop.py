@@ -8,10 +8,6 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-
-
-DEFAULT_STATE_PATH = "D:/开发/eth_trading_bot/runtime/shared_state/bot_state.json"
-DEFAULT_REPORT_ROOT = "D:/开发/eth_trading_bot/runtime/reports/protective_stop_adopt"
 ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED", "LIVE", "EFFECTIVE"}
 PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET", "CONDITIONAL"}
 

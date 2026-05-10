@@ -7,6 +7,7 @@ param(
     [int]$IntervalSec = 300,
     [int]$WorkerIntervalSec = 30,
     [int]$ReviewIntervalSec = 300,
+    [int]$ResearchHealthIntervalSec = 3600,
     [int]$ResearchRefreshEvery = 12,
     [double]$ConsensusRequestTimeoutSec = 10.0,
     [int]$DependencyWaitSec = 30,
@@ -37,6 +38,10 @@ $BotRuntimeRoot = Join-Path $BotRoot "runtime\bot_runtime_scheduler"
 $BotAnalysisDb = Join-Path $BotRuntimeRoot "analysis\bot_runtime.duckdb"
 $BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"
 $KillSwitchPath = Join-Path $BotRoot "runtime\controls\disable_real_execution.flag"
+$FreshResearchRoot = Join-Path $QuantRoot "runtime\fresh_research"
+$FreshResearchWhitelistPath = Join-Path $FreshResearchRoot "whitelist.json"
+$FreshResearchAllResultsPath = Join-Path $FreshResearchRoot "all_results.json"
+$FreshResearchDispatchRequestPath = Join-Path $FreshResearchRoot "dispatch_request.json"
 $PathSep = [System.IO.Path]::PathSeparator
 
 New-Item -ItemType Directory -Force -Path $PidRoot, $LogRoot, $WrapperRoot, $BotRuntimeRoot | Out-Null
@@ -535,6 +540,7 @@ function Show-Status {
     $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
     $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
     $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    $research = Get-ManagedProcess -Name "research_health" -Pattern "research-health"
     $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
     $worker = Get-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
     if (-not $worker.Alive) {
@@ -598,6 +604,15 @@ function Show-Status {
     $quantState = Format-ProcessHealth $quant
     Write-Output ("quant_judgement: {0} pid={1} age={2} latest_run_id={3} log={4}" -f $quantState, $quant.Pid, (Format-Age $quantAge), $latestRunId, (Get-LogErrorSummary "quant_judgement"))
 
+    $researchHealth = Get-JsonFile (Join-Path $QuantRoot "runtime\scheduler\research_health.json")
+    $researchAuto = if ($null -ne $researchHealth -and $null -ne $researchHealth.metadata) { $researchHealth.metadata.research_auto_refresh } else { $null }
+    $researchAge = Get-AgeSeconds ($researchHealth.generated_at)
+    $researchStatus = if ($null -ne $researchHealth -and $null -ne $researchHealth.status) { [string]$researchHealth.status } else { "unavailable" }
+    $researchRefreshStatus = if ($null -ne $researchAuto -and $null -ne $researchAuto.status) { [string]$researchAuto.status } else { "unavailable" }
+    $researchQualifiedCount = if ($null -ne $researchAuto -and $null -ne $researchAuto.qualified_candidate_count) { [int]$researchAuto.qualified_candidate_count } else { 0 }
+    $researchState = Format-ProcessHealth $research
+    Write-Output ("research_health: {0} pid={1} age={2} status={3} refresh={4} qualified={5} log={6}" -f $researchState, $research.Pid, (Format-Age $researchAge), $researchStatus, $researchRefreshStatus, $researchQualifiedCount, (Get-LogErrorSummary "research_health"))
+
     $botHeartbeat = Get-JsonFile (Join-Path $BotRuntimeRoot "heartbeat.json")
     $botCycle = Get-JsonFile (Join-Path $BotRuntimeRoot "latest_cycle.json")
     $botAge = Get-AgeSeconds ($botHeartbeat.generated_at)
@@ -656,6 +671,23 @@ function Show-Status {
     Write-Output ("kill_switch: {0} path={1}" -f $killSwitchState, $KillSwitchPath)
 }
 
+if ($Action -eq "status") {
+    Show-Status
+    exit 0
+}
+
+if ($Action -eq "stop") {
+    Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
+    Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
+    Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
+    Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
+    Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "research_health" -Pattern "research-health"
+    Stop-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
+    exit 0
+}
+
 $DashboardArgs = @("-m", "dashboard.app", "--host", $HostName, "--port", ([string]$DashboardPort))
 $FactorArgs = @(
     "scripts\quant_runtime_scheduler.py",
@@ -667,6 +699,28 @@ $FactorArgs = @(
     "ETH",
     "--timeframe",
     "15m"
+)
+$ResearchHealthArgs = @(
+    "scripts\quant_runtime_scheduler.py",
+    "research-health",
+    "--loop",
+    "--interval-sec",
+    ([string]$ResearchHealthIntervalSec),
+    "--degraded-heartbeat-interval-sec",
+    ([string]$ResearchHealthIntervalSec),
+    "--auto-refresh-worker",
+    "--research-refresh-lock-ttl-sec",
+    "1800",
+    "--feature-matrix-path",
+    "runtime\feature_matrix.json",
+    "--research-refresh-output-dir",
+    "runtime\fresh_research",
+    "--research-refresh-reports-dir",
+    "runtime\reports",
+    "--whitelist-path",
+    $FreshResearchWhitelistPath,
+    "--all-results-path",
+    $FreshResearchAllResultsPath
 )
 $QuantArgs = @(
     "scripts\quant_runtime_scheduler.py",
@@ -684,6 +738,12 @@ $QuantArgs = @(
     ([string]$ConsensusRequestTimeoutSec),
     "--refresh-research-aliases-every",
     ([string]$ResearchRefreshEvery),
+    "--whitelist-path",
+    $FreshResearchWhitelistPath,
+    "--all-results-path",
+    $FreshResearchAllResultsPath,
+    "--research-dispatch-request",
+    $FreshResearchDispatchRequestPath,
     "--include-okx-overlay",
     "--include-coinglass-overlay"
 )
@@ -699,7 +759,7 @@ $BotArgs = @(
     "--consensus-request-timeout-sec",
     ([string]$ConsensusRequestTimeoutSec),
     "--research-dispatch-request",
-    (Join-Path $QuantRoot "runtime\fresh_research\dispatch_request.json"),
+    $FreshResearchDispatchRequestPath,
     "--analysis-db-path",
     $BotAnalysisDb,
     "--api-key-env",
@@ -754,24 +814,9 @@ $ReviewArgs = @(
     $QuantRoot
 )
 
-if ($Action -eq "status") {
-    Show-Status
-    exit 0
-}
-
-if ($Action -eq "stop") {
-    Stop-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
-    Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
-    Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
-    Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
-    Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
-    Stop-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
-    Stop-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
-    exit 0
-}
-
 Start-ManagedProcess -Name "dashboard" -FilePath $Python -ArgumentList $DashboardArgs -WorkingDirectory $BotRoot -Pattern "dashboard.app"
 Start-ManagedProcess -Name "factor_ingest" -FilePath $Python -ArgumentList $FactorArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
+Start-ManagedProcess -Name "research_health" -FilePath $Python -ArgumentList $ResearchHealthArgs -WorkingDirectory $QuantRoot -Pattern "research-health"
 Start-ManagedProcess -Name "quant_judgement" -FilePath $Python -ArgumentList $QuantArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
 Wait-ForCondition -Name "quant_judgement" -Condition { Test-QuantReady } -TimeoutSec $DependencyWaitSec | Out-Null
 Clear-StaleBotSchedulerLock

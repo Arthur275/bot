@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-env", default="OKX_TRADE_API_KEY")
     parser.add_argument("--api-secret-env", default="OKX_TRADE_API_SECRET")
     parser.add_argument("--api-passphrase-env", default="OKX_TRADE_PASSPHRASE")
-    parser.add_argument("--kill-switch-path", default=str(BOT_ROOT / "runtime" / "disable_real_execution.flag"))
+    parser.add_argument("--kill-switch-path", default=str(BOT_ROOT / "runtime" / "controls" / "disable_real_execution.flag"))
     parser.add_argument("--lock-path", default=str(BOT_ROOT / "runtime" / "reports" / "protective_stop_replace_watch" / "auto_replace.lock"))
     parser.add_argument("--json", action="store_true")
     return parser

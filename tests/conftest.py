@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import zlib
 from pathlib import Path
 
 import pytest
@@ -9,10 +10,12 @@ import pytest
 
 @pytest.fixture
 def tmp_path(request: pytest.FixtureRequest) -> Path:
-    safe_name = "".join(
+    readable_name = "".join(
         character if character.isalnum() or character in {"_", "-"} else "_"
         for character in request.node.nodeid
     )
+    digest = zlib.crc32(request.node.nodeid.encode("utf-8")) & 0xFFFFFFFF
+    safe_name = f"{readable_name[:48]}_{digest:08x}"
     configured_root = os.environ.get("BOT_TEST_TMP_ROOT")
     if configured_root:
         root = Path(configured_root) / "pytest_case_tmp"

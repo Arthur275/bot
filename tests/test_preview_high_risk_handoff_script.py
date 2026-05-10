@@ -106,6 +106,14 @@ def _state_store(tmp_path: Path) -> StateStore:
     return store
 
 
+def test_parser_defaults_to_runtime_controls_kill_switch() -> None:
+    parser = preview_high_risk_handoff.build_parser()
+
+    args = parser.parse_args(["--handoff-file", "handoff.json"])
+
+    assert Path(args.kill_switch_path) == preview_high_risk_handoff.BOT_ROOT / "runtime" / "controls" / "disable_real_execution.flag"
+
+
 def test_high_risk_preview_reports_reduce_expected_state(tmp_path: Path) -> None:
     handoff_file = _write_handoff(tmp_path, _handoff())
 

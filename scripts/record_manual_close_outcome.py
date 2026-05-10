@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from typing import Any, Protocol
 
 BOT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = BOT_ROOT / "src"
-DEFAULT_QUANT_ROOT = Path("D:/开发/quant_system_rebuild")
+DEFAULT_QUANT_ROOT = Path(os.environ.get("QUANT_ROOT") or BOT_ROOT.parent / "quant_system_rebuild")
 for candidate in (SRC_ROOT, DEFAULT_QUANT_ROOT / "src"):
     normalized = str(candidate)
     if normalized not in sys.path:
