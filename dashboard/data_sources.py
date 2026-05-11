@@ -227,13 +227,24 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "automation_boundary": bot_cycle.get("automation_boundary", ""),
             "trigger_watch": trigger_watch,
             "research": _research_summary(research_health, reason_code_text_map=reason_code_text_map),
+            "execution_layer_reasoning": bot_cycle.get("execution_layer_reasoning") or quant_handoff.get("execution_layer_reasoning") or "",
+            "execution_opportunity_status": bot_cycle.get("execution_opportunity_status") or quant_handoff.get("execution_opportunity_status") or "",
         },
         "bot": {
             "execution_state": bot_state.get("execution_state", ""),
             "automation_state": bot_state.get("automation_state", ""),
-            "position_state": bot_state.get("observed_position_state", ""),
-            "position_direction": bot_state.get("observed_position_direction", ""),
-            "position_size_pct": bot_state.get("observed_position_size_pct", 0.0),
+            "position_state": _first_present(
+                _nested(bot_cycle, "runtime_snapshot", "position", "position_state"),
+                bot_state.get("observed_position_state", ""),
+            ),
+            "position_direction": _first_present(
+                _nested(bot_cycle, "runtime_snapshot", "position", "direction"),
+                bot_state.get("observed_position_direction", ""),
+            ),
+            "position_size_pct": _first_present(
+                _nested(bot_cycle, "runtime_snapshot", "position", "size_pct"),
+                bot_state.get("observed_position_size_pct", 0.0),
+            ),
             "protective_stop_required": bool(bot_state.get("protective_stop_required", False)),
             "candidate_package": _candidate_summary(candidate),
             "automation_boundary": bot_cycle.get("automation_boundary", ""),

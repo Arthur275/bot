@@ -1,0 +1,6 @@
+{
+  "gitCommitHash": "578cccc8f112deed8d8eefe712feec716e866fb5",
+  "generatedAt": "2026-05-11T06:19:54.508Z",
+  "generator": "local-tools/build-structural-graph.mjs",
+  "mode": "deterministic-structural"
+}

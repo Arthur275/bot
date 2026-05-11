@@ -6,6 +6,11 @@ from typing import Any
 
 
 REASON_CODE_TEXT: dict[str, str] = {
+    "truth_candidate_unqualified": "真实候选不合格",
+    "truth_candidate_source:all_results_fallback": "真实候选来源为全结果降级回退",
+    "insufficient_quality_folds": "有效质量折数不足",
+    "low_passed_trade_share": "通过交易占比偏低",
+    "research_veto": "研究否决",
     "judgement_not_ok": "量化 judgement 未返回可执行结果",
     "pipeline_blocked": "量化流水线阻塞，机器人侧同步阻塞",
     "research_not_ready": "research 未就绪或已失效",
@@ -52,7 +57,7 @@ def reason_text(code: Any, mapping: dict[str, str] | None = None) -> str:
     raw = str(code or "").strip()
     if not raw:
         return "无"
-    effective_mapping = mapping or REASON_CODE_TEXT
+    effective_mapping = {**REASON_CODE_TEXT, **(mapping or {})}
     if raw in effective_mapping:
         return effective_mapping[raw]
     if raw.startswith("bundle_status:"):

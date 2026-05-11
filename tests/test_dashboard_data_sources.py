@@ -61,6 +61,8 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "reason_codes": ["trend_aligned"],
             "risk_reason_codes": ["market_data_restricted_two_source", "edge_estimate_missing"],
             "execution_block_reason": "not_entry_action",
+            "execution_layer_reasoning": "higher_timeframe_not_ready",
+            "execution_opportunity_status": "blocked",
             "data_health_score": 65.0,
             "market_data_mode": "restricted_two_source",
             "consensus_quality": "degraded",
@@ -105,7 +107,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "runtime_snapshot": {
                 "fetched_at": generated_at,
                 "snapshot_valid": True,
-                "position": {"position_state": "FLAT", "mark_price": 3450.0},
+                "position": {"position_state": "FLAT", "direction": "neutral", "size_pct": 0.0, "mark_price": 3450.0},
             },
             "automation_boundary": "real_order_submission_candidate",
         },
@@ -115,9 +117,9 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
         {
             "execution_state": "idle",
             "automation_state": "observing",
-            "observed_position_state": "FLAT",
-            "observed_position_direction": "neutral",
-            "observed_position_size_pct": 0.0,
+            "observed_position_state": "ARMED",
+            "observed_position_direction": "long",
+            "observed_position_size_pct": 0.25,
         },
     )
     _write_json(
@@ -144,6 +146,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
         {
             "schema": "reason_code_map_v1",
             "reason_code_text": {
+                "truth_candidate_unqualified": "quant 共享映射：真实候选不合格",
                 "research_not_ready": "quant 共享映射：research 未就绪",
                 "wf_quality_insufficient": "quant 共享映射：walk-forward 质量不足",
             },
@@ -169,7 +172,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
                         "decision": "unavailable",
                         "freshness": "stale",
                         "dataset_timestamp": "2026-05-04T00:00:00",
-                        "reason_codes": ["research_not_ready", "wf_quality_insufficient"],
+                        "reason_codes": ["research_not_ready", "wf_quality_insufficient", "truth_candidate_unqualified"],
                         "research_health_summary": "bundle stale",
                     },
                 },
@@ -298,6 +301,8 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["execution_warnings"] == ["route_c_missing"]
     assert snapshot["quant"]["automation_boundary"] == "real_order_submission_candidate"
     assert snapshot["quant"]["execution_block_reason"] == "not_entry_action"
+    assert snapshot["quant"]["execution_layer_reasoning"] == "higher_timeframe_not_ready"
+    assert snapshot["quant"]["execution_opportunity_status"] == "blocked"
     assert snapshot["quant"]["risk_reason_codes"] == ["market_data_restricted_two_source", "edge_estimate_missing"]
     assert snapshot["quant"]["data_health_score"] == 65.0
     assert snapshot["quant"]["market_data_mode"] == "restricted_two_source"
@@ -343,6 +348,10 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
         "code": "research_not_ready",
         "text": "quant 共享映射：research 未就绪",
     }
+    assert snapshot["quant"]["research"]["reason_texts"][2] == {
+        "code": "truth_candidate_unqualified",
+        "text": "quant 共享映射：真实候选不合格",
+    }
     assert snapshot["charts"]["quant_metric_series"][0]["data_health_score"] == 0.65
     assert snapshot["charts"]["quant_metric_series"][0]["confidence"] == 0.42
     assert snapshot["charts"]["quant_metric_series"][0]["thesis_score"] == 0.58
@@ -356,6 +365,9 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["charts"]["consensus_quality_series"][0]["market_data_mode"] == "restricted_two_source"
     assert snapshot["bot"]["candidate_package"]["gate_allowed"] is True
     assert snapshot["bot"]["candidate_package"]["command_targets"] == ["entry_order", "maintain_protective_stop"]
+    assert snapshot["bot"]["position_state"] == "FLAT"
+    assert snapshot["bot"]["position_direction"] == "neutral"
+    assert snapshot["bot"]["position_size_pct"] == 0.0
     assert snapshot["bot"]["worker_events"][0]["payload"]["status"] == "skipped"
 
 

@@ -90,6 +90,7 @@ const valueLabels = {
   market_data_restricted_two_source: "市场数据限制两源",
   market_data_consensus_degraded: "市场数据共识降级",
   not_entry_action: "未形成开仓动作",
+  higher_timeframe_not_ready: "大周期未就绪",
   setup_ready_waiting_trigger: "结构就绪等待触发",
   waiting_for_trigger: "等待触发器",
   trigger_watch: "等待触发观察",
@@ -1128,6 +1129,12 @@ function renderFindings(id, rows) {
 }
 
 function primaryReason(quant) {
+  const executionRows = normalizeReasonRows(
+    [quant.execution_block_reason].filter(Boolean),
+    quant.transition_reason_codes || []
+  );
+  const actionableExecution = executionRows.find((row) => row.code && row.code !== "none");
+  if (actionableExecution) return actionableExecution;
   const rows = normalizeReasonRows(quant.reason_codes || [], quant.risk_reason_codes || []);
   const hard = rows.find((row) => severityForReason(row.code) === "hard");
   const degraded = rows.find((row) => severityForReason(row.code) === "degraded");
@@ -1135,8 +1142,9 @@ function primaryReason(quant) {
 }
 
 function latestCycleLabel(quant, bot) {
-  if (quant.latest_incomplete_cycle?.present) return text(quant.latest_incomplete_cycle.status);
   const cycle = bot.latest_cycle || {};
+  if (cycle.sample_id) return formatRunId(cycle.sample_id).split("\n")[0];
+  if (quant.latest_incomplete_cycle?.present) return text(quant.latest_incomplete_cycle.status);
   return cycle.sample_id ? formatRunId(cycle.sample_id).split("\n")[0] : "暂无";
 }
 
@@ -1144,7 +1152,6 @@ function buildNoTradeSummary(quant, bot) {
   const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
   const allowedAction = action.startsWith("entry") || action === "small_probe";
   const candidatePresent = Boolean(bot.candidate_package?.present);
-  const reason = primaryReason(quant);
   const sourceCount = quant.consensus_source_count ?? (Array.isArray(quant.consensus_sources) ? quant.consensus_sources.length : null);
   const sources = listText(quant.consensus_sources);
   const health = scorePct(quant.data_health_score);
@@ -1152,10 +1159,13 @@ function buildNoTradeSummary(quant, bot) {
   if (quant.market_data_mode) meta.push(`模式 ${text(quant.market_data_mode)}`);
   if (quant.net_edge_pct !== null && quant.net_edge_pct !== undefined) meta.push(`净优势 ${pctField(quant.net_edge_pct)}`);
   if (allowedAction && candidatePresent) {
-    return { line: `当前可交易 · 动作：${text(action)}`, meta: meta.join("，") };
+    return { line: `当前可交易 · 动作：${text(action)}`, meta: meta.join("；") };
   }
-  const reasonText = reason ? text(reason.text || reason.code) : text(quant.execution_block_reason || "未形成开仓动作");
-  return { line: `当前未交易 · 原因：${reasonText}`, meta: meta.join("，") };
+  const reason = primaryReason(quant);
+  const reasonText = reason ? text(reason.text || reason.code) : text(quant.execution_block_reason || "not_entry_action");
+  const layerReason = quant.execution_layer_reasoning ? ` / ${text(quant.execution_layer_reasoning)}` : "";
+  const transitionReason = (quant.transition_reason_codes || [])[0] ? ` / ${text((quant.transition_reason_codes || [])[0])}` : "";
+  return { line: `当前未交易 · 原因：${reasonText}${layerReason}${transitionReason}`, meta: meta.join("；") };
 }
 
 function renderSummary(data) {
@@ -1510,6 +1520,8 @@ function render(data) {
     ["查找表版本", quant.factor_lookup_version],
     ["自动化边界", quant.automation_boundary],
     ["执行阻断原因", quant.execution_block_reason],
+    ["执行层原因", quant.execution_layer_reasoning],
+    ["执行机会状态", quant.execution_opportunity_status],
     ["执行警告", quant.execution_warnings || []],
   ]);
   renderTriggerWatch(quant.trigger_watch || {});
@@ -1541,7 +1553,7 @@ function render(data) {
   renderDetails("researchDetails", [
     ["决策状态", research.decision],
     ["新鲜度", research.freshness],
-    ["可用于决策", research.decision_ready ? "yes" : "no"],
+    ["研究包已生成", research.decision_ready ? "yes" : "no"],
     ["检查时间", research.generated_at],
     ["数据时间", research.dataset_timestamp],
     ["刷新周期", research.refresh_every ? `${research.refresh_every} 轮` : "未启用"],
