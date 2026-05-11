@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from bot.audit_logger import AuditLogger
 from bot.config import BotConfig, RuntimeMode
-from bot.exchange_adapter import AdapterCredentials, AdapterRuntimeSnapshot, BinancePerpAdapter, CommandExecutionResult, ExecutionCommand, OkxUsdtSwapAdapter
+from bot.exchange_adapter import AdapterCredentials, AdapterRuntimeSnapshot, BinancePerpAdapter, CommandExecutionResult, ExecutionCommand, OkxUsdtSwapAdapter, OrderSnapshot
 from bot.state_store import StateStore
 
 
@@ -26,9 +26,12 @@ HIGH_RISK_ACTIONS = {"reduce", "exit"}
 PROTECT_ACTIONS = {"protect", "protective_stop_repair", "maintain_protective_stop"}
 ACTIVE_ALGO_STATUSES = {"NEW", "PARTIALLY_FILLED"}
 OKX_ACTIVE_ALGO_STATUSES = {"LIVE", "EFFECTIVE"}
+ACTIVE_ORDER_STATUSES = {"NEW", "PARTIALLY_FILLED", "LIVE", "EFFECTIVE"}
 PROTECTIVE_ORDER_TYPES = {"STOP", "STOP_MARKET", "TRAILING_STOP_MARKET", "CONDITIONAL"}
+TAKE_PROFIT_ORDER_TYPES = {"LIMIT"}
 SUPPORTED_EXCHANGE_SYMBOLS = {"ETH-USDT-SWAP", "ETHUSDT"}
 BOT_PROTECTIVE_STOP_CLIENT_PREFIXES = ("ethbot-ps-", "ethbot-be-", "ethbot-ts-")
+BOT_TAKE_PROFIT_CLIENT_PREFIXES = ("ethbot-tp-",)
 STOP_PRICE_TOLERANCE = Decimal("0.00000001")
 WORKER_LOCK_OWNER = "real_order_worker"
 
@@ -46,6 +49,17 @@ class RealOrderAdapter(Protocol):
     def fetch_open_algo_orders_raw(self) -> list[dict[str, Any]]: ...
 
     def cancel_algo_order_raw(self, *, algo_id: str = "", client_algo_id: str = "") -> dict[str, Any]: ...
+
+
+class OrderSnapshotLike(Protocol):
+    order_id: str
+    client_order_id: str
+    order_type: str
+    status: str
+    side: str
+    reduce_only: bool
+    quantity: float | None
+    price: float | None
 
 
 AdapterFactory = Callable[[argparse.Namespace], RealOrderAdapter]
@@ -770,7 +784,8 @@ def _execute_entry_with_protective_stop_retry(
 ) -> list[CommandExecutionResult]:
     entry_commands = [command for command in commands if command.target == "entry_order"]
     stop_commands = [command for command in commands if command.target == "maintain_protective_stop"]
-    other_commands = [command for command in commands if command.target not in {"entry_order", "maintain_protective_stop"}]
+    take_profit_commands = [command for command in commands if command.target == "take_profit_order"]
+    other_commands = [command for command in commands if command.target not in {"entry_order", "maintain_protective_stop", "take_profit_order"}]
     results: list[CommandExecutionResult] = []
     if entry_commands:
         entry_results = _execute_command_batch_after_final_checks(
@@ -795,6 +810,17 @@ def _execute_entry_with_protective_stop_retry(
             allow_when_kill_switch=True,
         )
         results.extend(stop_results)
+        if not (stop_results and all(result.accepted for result in stop_results)):
+            return results
+    if take_profit_commands:
+        take_profit_results = _execute_take_profit_orders(
+            adapter=adapter,
+            commands=take_profit_commands,
+            package=package,
+            state_store=state_store,
+            kill_switch_path=kill_switch_path,
+        )
+        results.extend(take_profit_results)
     if other_commands:
         results.extend(
             _execute_command_batch_after_final_checks(
@@ -895,7 +921,40 @@ def _validate_commands_against_runtime_snapshot(
                 reason_codes.append("live_position_direction_mismatch_before_submit")
             if command.target in {"reduce_order", "exit_order", "maintain_protective_stop"} and not runtime_snapshot.position.position_amt:
                 reason_codes.append("live_position_quantity_missing_before_submit")
+        elif command.target == "take_profit_order":
+            if runtime_snapshot.position.position_state != "ENTERED":
+                reason_codes.append("live_position_not_entered_before_submit")
+            if direction and direction != runtime_snapshot.position.direction:
+                reason_codes.append("live_position_direction_mismatch_before_submit")
+            if not runtime_snapshot.position.position_amt:
+                reason_codes.append("live_position_quantity_missing_before_submit")
     return list(dict.fromkeys(reason_codes))
+
+
+def _execute_take_profit_orders(
+    *,
+    adapter: RealOrderAdapter,
+    commands: list[ExecutionCommand],
+    package: dict[str, Any],
+    state_store: StateStore,
+    kill_switch_path: Path,
+) -> list[CommandExecutionResult]:
+    results = _execute_command_batch_after_final_checks(
+        adapter=adapter,
+        commands=commands,
+        package=package,
+        state_store=state_store,
+        kill_switch_path=kill_switch_path,
+        block_on_kill_switch=False,
+    )
+    if not (results and all(result.accepted for result in results)):
+        return results
+    if _take_profit_orders_confirmed_active(adapter=adapter, commands=commands, results=results):
+        return results
+    return [
+        _unconfirmed_submission_result(command=command, submitted_result=result, reason="take_profit_order_confirmation_missing")
+        for command, result in zip(commands, results, strict=False)
+    ]
 
 
 def _protective_stop_confirmed_active(
@@ -918,6 +977,27 @@ def _protective_stop_confirmed_active(
         if match is None:
             return False
         result.details["protective_stop_confirmation"] = {"matched_order": match}
+    return True
+
+
+def _take_profit_orders_confirmed_active(
+    *,
+    adapter: RealOrderAdapter,
+    commands: list[ExecutionCommand],
+    results: list[CommandExecutionResult],
+) -> bool:
+    open_orders = adapter.fetch_runtime_snapshot().open_orders
+    if len(commands) != len(results):
+        return False
+    for command, result in zip(commands, results, strict=False):
+        match = find_matching_take_profit_order(
+            command=command,
+            result=result,
+            open_orders=open_orders,
+        )
+        if match is None:
+            return False
+        result.details["take_profit_confirmation"] = {"matched_order": match.model_dump(mode="json")}
     return True
 
 
@@ -1084,6 +1164,114 @@ def _result_identity_candidates(result: CommandExecutionResult) -> set[tuple[str
     return identities
 
 
+def find_matching_take_profit_order(
+    *,
+    command: ExecutionCommand,
+    result: CommandExecutionResult,
+    open_orders: list[OrderSnapshot],
+) -> OrderSnapshot | None:
+    result_identities = _result_identity_candidates(result)
+    for order in open_orders:
+        if not _is_bot_owned_take_profit_order(order):
+            continue
+        if not _order_snapshot_matches_result_identity(order=order, result_identities=result_identities):
+            continue
+        if _take_profit_order_mismatch_reasons(
+            order=order,
+            direction=str(getattr(command.payload, "direction", "") or ""),
+        ):
+            continue
+        if not _take_profit_price_matches_command_or_result(order=order, result=result):
+            continue
+        if not _take_profit_quantity_matches_command_or_result(order=order, result=result):
+            continue
+        return order
+    return None
+
+
+def _is_bot_owned_take_profit_order(order: OrderSnapshotLike) -> bool:
+    client_order_id = str(getattr(order, "client_order_id", "") or "")
+    order_id = str(getattr(order, "order_id", "") or "")
+    return (
+        client_order_id.startswith(BOT_TAKE_PROFIT_CLIENT_PREFIXES)
+        or order_id.startswith(BOT_TAKE_PROFIT_CLIENT_PREFIXES)
+    ) and _is_active_take_profit_order(order)
+
+
+def _is_active_take_profit_order(order: OrderSnapshotLike) -> bool:
+    return str(getattr(order, "status", "") or "").upper() in ACTIVE_ORDER_STATUSES and str(getattr(order, "order_type", "") or "").upper() in TAKE_PROFIT_ORDER_TYPES
+
+
+def _order_snapshot_identity(order: OrderSnapshotLike) -> tuple[str, str]:
+    order_id = str(getattr(order, "order_id", "") or "")
+    client_order_id = str(getattr(order, "client_order_id", "") or "")
+    return (order_id, client_order_id)
+
+
+def _order_snapshot_matches_result_identity(*, order: OrderSnapshotLike, result_identities: set[tuple[str, str]]) -> bool:
+    order_id = str(getattr(order, "order_id", "") or "")
+    client_order_id = str(getattr(order, "client_order_id", "") or "")
+    if not order_id and not client_order_id:
+        return False
+    return any(
+        (order_id and order_id in identity) or (client_order_id and client_order_id in identity)
+        for identity in result_identities
+    )
+
+
+def _take_profit_order_mismatch_reasons(*, order: OrderSnapshotLike, direction: str) -> list[str]:
+    reason_codes: list[str] = []
+    if not _is_active_take_profit_order(order):
+        reason_codes.append("order_not_active_take_profit")
+    if not bool(getattr(order, "reduce_only", False)):
+        reason_codes.append("reduce_only_missing")
+    if direction in {"long", "short"}:
+        expected_side = "SELL" if direction == "long" else "BUY"
+        if str(getattr(order, "side", "") or "").upper() != expected_side:
+            reason_codes.append("side_mismatch")
+    if _to_decimal(getattr(order, "price", None)) is None:
+        reason_codes.append("price_missing")
+    if not str(getattr(order, "order_id", "") or getattr(order, "client_order_id", "") or ""):
+        reason_codes.append("order_identity_missing")
+    return reason_codes
+
+
+def _take_profit_price_matches_command_or_result(*, order: OrderSnapshotLike, result: CommandExecutionResult) -> bool:
+    order_price = _to_decimal(getattr(order, "price", None))
+    if order_price is None:
+        return False
+    expected_values: list[Any] = []
+    details = result.details if isinstance(result.details, dict) else {}
+    expected_values.append(details.get("response_summary", {}).get("resolved_take_profit_price") if isinstance(details.get("response_summary"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("params", {}).get("price") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("body", {}).get("px") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("params", {}).get("price") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("body", {}).get("px") if isinstance(details.get("signed_request"), dict) else None)
+    for value in expected_values:
+        expected = _to_decimal(value)
+        if expected is not None and abs(order_price - expected) <= STOP_PRICE_TOLERANCE:
+            return True
+    return False
+
+
+def _take_profit_quantity_matches_command_or_result(*, order: OrderSnapshotLike, result: CommandExecutionResult) -> bool:
+    order_quantity = _to_decimal(getattr(order, "quantity", None))
+    if order_quantity is None:
+        return True
+    expected_values: list[Any] = []
+    details = result.details if isinstance(result.details, dict) else {}
+    expected_values.append(details.get("response_summary", {}).get("resolved_reduce_qty") if isinstance(details.get("response_summary"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("params", {}).get("quantity") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("prepared_request", {}).get("body", {}).get("sz") if isinstance(details.get("prepared_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("params", {}).get("quantity") if isinstance(details.get("signed_request"), dict) else None)
+    expected_values.append(details.get("signed_request", {}).get("body", {}).get("sz") if isinstance(details.get("signed_request"), dict) else None)
+    for value in expected_values:
+        expected = _to_decimal(value)
+        if expected is not None and abs(order_quantity - expected) <= STOP_PRICE_TOLERANCE:
+            return True
+    return False
+
+
 def _algo_order_identity(order: dict[str, Any]) -> tuple[str, str]:
     return (_algo_order_exchange_id(order), _algo_order_client_id(order))
 
@@ -1229,6 +1417,29 @@ def _synthetic_command_result(*, target: str, reason: str, command: ExecutionCom
         details={"synthetic_worker_block": True},
         idempotency_key=command.idempotency_key if command is not None else "",
         error_kind="worker_blocked",
+    )
+
+
+def _unconfirmed_submission_result(
+    *,
+    command: ExecutionCommand,
+    submitted_result: CommandExecutionResult,
+    reason: str,
+) -> CommandExecutionResult:
+    details = dict(submitted_result.details) if isinstance(submitted_result.details, dict) else {}
+    details["unconfirmed_submission_result"] = submitted_result.model_dump(mode="json")
+    details["synthetic_worker_block"] = True
+    return CommandExecutionResult(
+        target=command.target,
+        status="timeout",
+        accepted=False,
+        simulated=False,
+        reason=reason,
+        details=details,
+        idempotency_key=command.idempotency_key,
+        client_order_id=submitted_result.client_order_id,
+        exchange_order_id=submitted_result.exchange_order_id,
+        error_kind="timeout",
     )
 
 

@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from hashlib import sha256
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .binance_transport import (
     BinanceRequestConfigError,
@@ -38,10 +38,12 @@ class OrderSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str = ""
+    client_order_id: str = ""
     order_type: str
     status: str = "open"
     side: str = ""
     reduce_only: bool = False
+    quantity: float | None = None
     price: float | None = None
     trigger_price: float | None = None
 
@@ -139,6 +141,22 @@ class ProtectiveStopPayload(BaseModel):
     tp_ladder: list[float] = Field(default_factory=list)
 
 
+class TakeProfitOrderPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    direction: str = ""
+    price_ratio: float = Field(gt=0.0)
+    reduce_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
+    reduce_qty: float | None = Field(default=None, gt=0.0)
+    level: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_size_contract(self) -> "TakeProfitOrderPayload":
+        if (self.reduce_fraction is None) == (self.reduce_qty is None):
+            raise ValueError("take_profit_requires_exactly_one_size_contract")
+        return self
+
+
 class ReconciliationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -177,7 +195,7 @@ class ExecutionCommand(BaseModel):
     target: str
     idempotency_key: str = ""
     reason: str = ""
-    payload: EntryOrderPayload | ReduceOrderPayload | ExitOrderPayload | ProtectiveStopPayload | ReconciliationPayload | BreakevenPayload | TrailingStopPayload | RecentFillsPayload
+    payload: EntryOrderPayload | ReduceOrderPayload | ExitOrderPayload | ProtectiveStopPayload | TakeProfitOrderPayload | ReconciliationPayload | BreakevenPayload | TrailingStopPayload | RecentFillsPayload
 
 
 class CommandExecutionResult(BaseModel):
@@ -215,6 +233,7 @@ class AdapterCapabilities(BaseModel):
     supports_recent_fill_sync: bool = False
     supports_trailing_stop_update: bool = False
     supports_breakeven_update: bool = False
+    supports_take_profit_orders: bool = False
 
 
 class BinanceRequestMappingError(RuntimeError):
@@ -320,6 +339,8 @@ class BaseExchangeAdapter:
                     ),
                 )
             )
+        if execution_plan.place_take_profit_orders:
+            commands.extend(self._build_take_profit_commands(handoff=handoff, direction=resolved_direction))
         if execution_plan.advance_breakeven:
             commands.append(
                 ExecutionCommand(
@@ -376,6 +397,71 @@ class BaseExchangeAdapter:
             )
         return commands
 
+    def _build_take_profit_commands(self, *, handoff: dict[str, Any] | None, direction: str) -> list[ExecutionCommand]:
+        commands: list[ExecutionCommand] = []
+        for index, payload in enumerate(self._resolve_take_profit_payloads(handoff=handoff, direction=direction), start=1):
+            commands.append(
+                ExecutionCommand(
+                    command_type="order",
+                    operation="place",
+                    target="take_profit_order",
+                    idempotency_key=self._build_idempotency_key(target=f"take_profit_order:{index}", handoff=handoff),
+                    reason=f"take_profit_level:{index}",
+                    payload=payload,
+                )
+            )
+        return commands
+
+    def _resolve_take_profit_payloads(self, *, handoff: dict[str, Any] | None, direction: str) -> list[TakeProfitOrderPayload]:
+        handoff = handoff or {}
+        direct_orders = handoff.get("take_profit_orders")
+        if isinstance(direct_orders, list) and direct_orders:
+            payloads: list[TakeProfitOrderPayload] = []
+            for index, item in enumerate(direct_orders, start=1):
+                if not isinstance(item, dict):
+                    continue
+                price_ratio = item.get("price_ratio") or item.get("target_ratio") or item.get("ratio")
+                payloads.append(
+                    TakeProfitOrderPayload(
+                        direction=direction,
+                        price_ratio=float(price_ratio),
+                        reduce_fraction=self._optional_float(item.get("reduce_fraction")),
+                        reduce_qty=self._optional_float(item.get("reduce_qty")),
+                        level=int(item.get("level") or index),
+                    )
+                )
+            return payloads
+        ladder = handoff.get("tp_ladder")
+        if not isinstance(ladder, list) or not ladder:
+            return []
+        fractions = self._first_list(handoff, "tp_reduce_fractions", "take_profit_reduce_fractions")
+        qtys = self._first_list(handoff, "tp_reduce_qtys", "take_profit_reduce_qtys")
+        if (fractions is None) == (qtys is None):
+            return []
+        if fractions is not None:
+            if len(fractions) != len(ladder):
+                return []
+            return [
+                TakeProfitOrderPayload(
+                    direction=direction,
+                    price_ratio=float(price_ratio),
+                    reduce_fraction=float(fractions[index]),
+                    level=index + 1,
+                )
+                for index, price_ratio in enumerate(ladder)
+            ]
+        if len(qtys) != len(ladder):
+            return []
+        return [
+            TakeProfitOrderPayload(
+                direction=direction,
+                price_ratio=float(price_ratio),
+                reduce_qty=float(qtys[index]),
+                level=index + 1,
+            )
+            for index, price_ratio in enumerate(ladder)
+        ]
+
     @staticmethod
     def _resolve_primary_command_reason(execution_plan: ExecutionPlan) -> str:
         action = execution_plan.effective_action or execution_plan.requested_action or "wait"
@@ -387,6 +473,20 @@ class BaseExchangeAdapter:
             return float(execution_plan.executable_size_pct or 0.0)
         handoff = handoff or {}
         return float(handoff.get("executable_size_pct") or handoff.get("position_size_pct") or 0.0)
+
+    @staticmethod
+    def _first_list(handoff: dict[str, Any], *keys: str) -> list[Any] | None:
+        for key in keys:
+            value = handoff.get(key)
+            if isinstance(value, list):
+                return value
+        return None
+
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        return float(value)
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
@@ -520,6 +620,7 @@ class ExchangeAdapter(BaseExchangeAdapter):
             supports_recent_fill_sync=True,
             supports_trailing_stop_update=True,
             supports_breakeven_update=True,
+            supports_take_profit_orders=True,
         )
 
 
@@ -934,7 +1035,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
 
     @staticmethod
     def _requires_runtime_snapshot(command: ExecutionCommand) -> bool:
-        return command.target in {"entry_order", "reduce_order", "exit_order", "maintain_protective_stop", "advance_breakeven_stop", "advance_trailing_stop"}
+        return command.target in {"entry_order", "reduce_order", "exit_order", "maintain_protective_stop", "take_profit_order", "advance_breakeven_stop", "advance_trailing_stop"}
 
     @staticmethod
     def _runtime_snapshot_diagnostics(runtime_snapshot: AdapterRuntimeSnapshot | None) -> dict[str, Any]:
@@ -1118,14 +1219,21 @@ class RealExchangeAdapter(BaseExchangeAdapter):
                 first = payload["data"][0]
                 if isinstance(first, dict):
                     summary = {}
-                    for key in ("ordId", "algoId", "sCode", "sMsg", "clOrdId", "algoClOrdId", "side", "ordType", "sz", "triggerPx"):
+                    for key in ("ordId", "algoId", "sCode", "sMsg", "clOrdId", "algoClOrdId", "side", "ordType", "sz", "triggerPx", "px"):
                         if key in first:
                             summary[key] = first.get(key)
+                    if command.target == "take_profit_order":
+                        summary["resolved_take_profit_price"] = first.get("px") or first.get("price")
+                        summary["resolved_reduce_qty"] = first.get("sz") or first.get("quantity")
                     return summary
             summary: dict[str, Any] = {}
             for key in ("orderId", "status", "symbol", "side", "type", "clientOrderId"):
                 if key in payload:
                     summary[key] = payload.get(key)
+            if command.target == "take_profit_order":
+                prepared_body = command.payload.model_dump(mode="json")
+                summary["resolved_take_profit_price"] = prepared_body.get("resolved_take_profit_price")
+                summary["resolved_reduce_qty"] = prepared_body.get("resolved_reduce_qty")
             return summary
         return {}
 
@@ -1133,8 +1241,9 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         return AdapterCapabilities(
             supports_real_execution=True,
             supports_recent_fill_sync=True,
-            supports_trailing_stop_update=True,
-            supports_breakeven_update=True,
+            supports_trailing_stop_update=False,
+            supports_breakeven_update=False,
+            supports_take_profit_orders=True,
         )
 
 
@@ -1445,10 +1554,12 @@ class BinancePerpAdapter(RealExchangeAdapter):
             orders.append(
                 OrderSnapshot(
                     order_id=str(item.get("orderId") or ""),
+                    client_order_id=str(item.get("clientOrderId") or ""),
                     order_type=str(item.get("type") or ""),
                     status=str(item.get("status") or "open"),
                     side=str(item.get("side") or ""),
                     reduce_only=reduce_only,
+                    quantity=BinancePerpAdapter._to_optional_positive_float(item.get("origQty") or item.get("quantity")),
                     price=BinancePerpAdapter._to_optional_positive_float(item.get("price")),
                     trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("stopPrice")),
                 )
@@ -1470,10 +1581,12 @@ class BinancePerpAdapter(RealExchangeAdapter):
             orders.append(
                 OrderSnapshot(
                     order_id=f"algo:{item.get('algoId') or item.get('clientAlgoId') or ''}",
+                    client_order_id=str(item.get("clientAlgoId") or ""),
                     order_type=str(item.get("orderType") or item.get("type") or ""),
                     status=algo_status.lower(),
                     side=str(item.get("side") or ""),
                     reduce_only=reduce_only,
+                    quantity=BinancePerpAdapter._to_optional_positive_float(item.get("origQty") or item.get("quantity")),
                     price=BinancePerpAdapter._to_optional_positive_float(item.get("price")),
                     trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("triggerPrice") or item.get("stopPrice")),
                 )
@@ -1533,6 +1646,8 @@ class BinancePerpAdapter(RealExchangeAdapter):
             return self._resolve_exit_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
         if command.target == "maintain_protective_stop":
             return self._resolve_protective_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "take_profit_order":
+            return self._resolve_take_profit_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
         if command.target == "advance_breakeven_stop":
             return self._resolve_breakeven_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
         if command.target == "advance_trailing_stop":
@@ -1640,6 +1755,51 @@ class BinancePerpAdapter(RealExchangeAdapter):
         )
         raise BinanceRequestMappingError(
             "Real reduce order requires an explicit reduce quantity contract from quant handoff"
+        )
+
+    def _resolve_take_profit_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, TakeProfitOrderPayload):
+            raise BinanceRequestMappingError("Take-profit payload is required for real take-profit execution")
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Take-profit order",
+        )
+        price = self._derive_take_profit_price(
+            direction=position.direction,
+            reference_price=position.entry_price,
+            price_ratio=payload.price_ratio,
+        )
+        quantity = self._resolve_reduce_quantity(
+            position_amt=position.position_amt,
+            reduce_fraction=payload.reduce_fraction,
+            reduce_qty=payload.reduce_qty,
+            quantity_label="take-profit",
+        )
+        return prepared.model_copy(
+            update={
+                "params": {
+                    **prepared.params,
+                    "side": self._resolve_close_side(position.direction),
+                    "price": price,
+                    "quantity": quantity,
+                },
+                "body": {
+                    **prepared.body,
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_take_profit_price": price,
+                    "resolved_position_amt": self._format_exit_quantity(position.position_amt),
+                    "resolved_reduce_qty": quantity,
+                    "resolution_mode": "take_profit_from_live_entry",
+                },
+            }
         )
 
     @staticmethod
@@ -1943,6 +2103,32 @@ class BinancePerpAdapter(RealExchangeAdapter):
         return format(normalized, "f")
 
     @staticmethod
+    def _resolve_reduce_quantity(
+        *,
+        position_amt: float | None,
+        reduce_fraction: float | None,
+        reduce_qty: float | None,
+        quantity_label: str,
+    ) -> str:
+        try:
+            position_quantity = Decimal(str(abs(position_amt or 0.0)))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError(f"Real {quantity_label} order position amount is not a valid decimal") from exc
+        if position_quantity <= 0:
+            raise BinanceRequestMappingError(f"Real {quantity_label} order requires a positive live position amount")
+        if (reduce_fraction is None) == (reduce_qty is None):
+            raise BinanceRequestMappingError(f"Real {quantity_label} order requires exactly one of reduce_fraction or reduce_qty")
+        if reduce_qty is not None:
+            quantity = Decimal(str(reduce_qty))
+        else:
+            quantity = position_quantity * Decimal(str(reduce_fraction))
+        if quantity <= 0:
+            raise BinanceRequestMappingError(f"Real {quantity_label} order requires a positive reduce quantity")
+        if quantity > position_quantity:
+            raise BinanceRequestMappingError(f"Real {quantity_label} order reduce quantity exceeds live position amount")
+        return format(quantity.normalize(), "f")
+
+    @staticmethod
     def _resolve_close_side(direction: str) -> str:
         if direction == "long":
             return "SELL"
@@ -2039,6 +2225,28 @@ class BinancePerpAdapter(RealExchangeAdapter):
         return format(resolved, "f")
 
     @staticmethod
+    def _derive_take_profit_price(*, direction: str, reference_price: float, price_ratio: float) -> str:
+        try:
+            reference = Decimal(str(reference_price))
+            ratio = Decimal(str(price_ratio))
+        except InvalidOperation as exc:
+            raise BinanceRequestMappingError("Take-profit price inputs are not valid decimals") from exc
+        if reference <= 0:
+            raise BinanceRequestMappingError("Take-profit order requires a positive reference price")
+        if direction == "long":
+            if ratio <= 1:
+                raise BinanceRequestMappingError("Long take-profit price ratio must be greater than 1")
+        elif direction == "short":
+            if ratio <= 0 or ratio >= 1:
+                raise BinanceRequestMappingError("Short take-profit price ratio must be between 0 and 1")
+        else:
+            raise BinanceRequestMappingError("Take-profit direction must be long or short")
+        resolved = (reference * ratio).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if resolved <= 0:
+            raise BinanceRequestMappingError("Resolved take-profit price must be positive")
+        return format(resolved, "f")
+
+    @staticmethod
     def _derive_stop_price(*, direction: str, reference_price: float, stop_ratio: float) -> str:
         try:
             reference = Decimal(str(reference_price))
@@ -2096,6 +2304,14 @@ class BinancePerpAdapter(RealExchangeAdapter):
                 working_type="MARK_PRICE",
                 include_payload_body=True,
                 algo_order=True,
+            )
+        if command.target == "take_profit_order":
+            return self._build_order_request(
+                command=command,
+                side=self._resolve_close_side_from_payload(command.payload),
+                order_type="LIMIT",
+                reduce_only=True,
+                include_payload_body=True,
             )
         if command.target == "advance_breakeven_stop":
             return self._build_order_request(
@@ -2173,6 +2389,8 @@ class BinancePerpAdapter(RealExchangeAdapter):
             params["algoType"] = "CONDITIONAL"
         if reduce_only:
             params["reduceOnly"] = "true"
+        if order_type == "LIMIT":
+            params["timeInForce"] = "GTC"
         if working_type:
             params["workingType"] = working_type
         if new_order_resp_type:
@@ -2192,6 +2410,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
             "reduce_order": "ro",
             "exit_order": "xo",
             "maintain_protective_stop": "ps",
+            "take_profit_order": "tp",
             "advance_breakeven_stop": "be",
             "advance_trailing_stop": "ts",
         }
@@ -2329,6 +2548,8 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             raise BinanceRequestMappingError("Real OKX reduce order requires an explicit reduce size contract from quant handoff")
         if command.target == "maintain_protective_stop":
             return self._resolve_protective_stop_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
+        if command.target == "take_profit_order":
+            return self._resolve_take_profit_order_request(command=command, prepared=prepared, runtime_snapshot=runtime_snapshot)
         if command.target in {"advance_breakeven_stop", "advance_trailing_stop"}:
             raise BinanceRequestMappingError("Real OKX stop replace is not enabled until cancel/replace reconciliation is implemented")
         return prepared
@@ -2455,6 +2676,48 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             }
         )
 
+    def _resolve_take_profit_order_request(
+        self,
+        *,
+        command: ExecutionCommand,
+        prepared: PreparedAdapterRequest,
+        runtime_snapshot: AdapterRuntimeSnapshot | None,
+    ) -> PreparedAdapterRequest:
+        payload = command.payload
+        if not isinstance(payload, TakeProfitOrderPayload):
+            raise BinanceRequestMappingError("Take-profit payload is required for real OKX take-profit execution")
+        position = self._resolve_live_position_for_stop(
+            runtime_snapshot=runtime_snapshot,
+            payload_direction=payload.direction,
+            error_context="Take-profit order",
+        )
+        price = BinancePerpAdapter._derive_take_profit_price(
+            direction=position.direction,
+            reference_price=position.entry_price,
+            price_ratio=payload.price_ratio,
+        )
+        size = BinancePerpAdapter._resolve_reduce_quantity(
+            position_amt=position.position_amt,
+            reduce_fraction=payload.reduce_fraction,
+            reduce_qty=payload.reduce_qty,
+            quantity_label="OKX take-profit",
+        )
+        return prepared.model_copy(
+            update={
+                "body": {
+                    **prepared.body,
+                    "side": self._resolve_close_side(position.direction),
+                    "sz": size,
+                    "px": price,
+                    "resolved_from_entry_price": position.entry_price,
+                    "resolved_take_profit_price": price,
+                    "resolved_position_amt": self._format_position_contract_size(position.position_amt),
+                    "resolved_reduce_qty": size,
+                    "resolution_mode": "okx_take_profit_from_live_entry",
+                },
+            }
+        )
+
     def _map_command_to_request(self, command: ExecutionCommand) -> PreparedAdapterRequest:
         if command.target == "entry_order":
             return self._build_order_request(
@@ -2479,6 +2742,8 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             )
         if command.target == "maintain_protective_stop":
             return self._build_algo_order_request(command=command)
+        if command.target == "take_profit_order":
+            return self._build_take_profit_order_request(command=command)
         if command.target == "sync_recent_fills":
             return PreparedAdapterRequest(
                 method="GET",
@@ -2515,6 +2780,22 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             method="POST",
             path="/api/v5/trade/order",
             body=body,
+            idempotency_key=command.idempotency_key,
+        )
+
+    @staticmethod
+    def _build_take_profit_order_request(*, command: ExecutionCommand) -> PreparedAdapterRequest:
+        return PreparedAdapterRequest(
+            method="POST",
+            path="/api/v5/trade/order",
+            body={
+                "instId": OkxUsdtSwapAdapter.INST_ID,
+                "tdMode": "cross",
+                "side": OkxUsdtSwapAdapter._resolve_close_side_from_payload(command.payload),
+                "ordType": "limit",
+                "reduceOnly": "true",
+                "clOrdId": OkxUsdtSwapAdapter._build_client_order_id(command),
+            },
             idempotency_key=command.idempotency_key,
         )
 
@@ -2684,10 +2965,12 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             orders.append(
                 OrderSnapshot(
                     order_id=str(item.get("ordId") or item.get("clOrdId") or ""),
+                    client_order_id=str(item.get("clOrdId") or ""),
                     order_type=str(item.get("ordType") or ""),
                     status=str(item.get("state") or "open"),
                     side=str(item.get("side") or "").upper(),
                     reduce_only=BinancePerpAdapter._to_bool(item.get("reduceOnly")),
+                    quantity=BinancePerpAdapter._to_optional_positive_float(item.get("sz")),
                     price=BinancePerpAdapter._to_optional_positive_float(item.get("px")),
                     trigger_price=None,
                 )
@@ -2708,10 +2991,12 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             orders.append(
                 OrderSnapshot(
                     order_id=f"algo:{item.get('algoId') or item.get('algoClOrdId') or ''}",
+                    client_order_id=str(item.get("algoClOrdId") or ""),
                     order_type=str(item.get("ordType") or "conditional").upper(),
                     status=state or "live",
                     side=str(item.get("side") or "").upper(),
                     reduce_only=reduce_only,
+                    quantity=BinancePerpAdapter._to_optional_positive_float(item.get("sz")),
                     price=BinancePerpAdapter._to_optional_positive_float(item.get("orderPx")),
                     trigger_price=BinancePerpAdapter._to_optional_positive_float(item.get("triggerPx")),
                 )
@@ -2929,6 +3214,7 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
             "reduce_order": "ro",
             "exit_order": "xo",
             "maintain_protective_stop": "ps",
+            "take_profit_order": "tp",
             "advance_breakeven_stop": "be",
             "advance_trailing_stop": "ts",
         }

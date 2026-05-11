@@ -253,6 +253,7 @@ def test_bot_runtime_scheduler_writes_candidate_execution_package_when_gate_allo
                 "execution_allowed": True,
                 "risk_filter_status": "pass",
                 "initial_stop_loss": 0.97,
+                "tp_ladder": [],
             },
             "execution_plan": {"place_entry_order": True, "maintain_protective_stop": True},
             "execution_commands": [
@@ -368,6 +369,132 @@ def test_bot_runtime_scheduler_writes_repair_candidate_package_when_gate_allows(
     assert payload["candidate_execution_package"]["status"] == "written"
     assert package["action"] == "protective_stop_repair"
     assert package["execution_commands"][0]["target"] == "maintain_protective_stop"
+
+
+def test_bot_runtime_scheduler_blocks_candidate_when_tp_ladder_has_no_tp_order(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "symbol": "ETH",
+            "exchange_symbol": "ETH-USDT-SWAP",
+            "requested_action": "entry_long",
+            "effective_action": "entry_long",
+            "handoff": {
+                "action": "entry_long",
+                "direction": "long",
+                "execution_allowed": True,
+                "risk_filter_status": "pass",
+                "initial_stop_loss": 0.97,
+                "tp_ladder": [1.01, 1.02],
+            },
+            "execution_plan": {"place_entry_order": True, "maintain_protective_stop": True},
+            "command_targets": ["entry_order", "maintain_protective_stop"],
+            "execution_commands": [
+                {
+                    "command_type": "order",
+                    "operation": "place",
+                    "target": "entry_order",
+                    "idempotency_key": "entry:key",
+                    "reason": "effective_action:entry_long",
+                    "payload": {"action": "entry_long", "direction": "long", "position_size_pct": 0.02},
+                },
+                {
+                    "command_type": "order",
+                    "operation": "upsert",
+                    "target": "maintain_protective_stop",
+                    "idempotency_key": "stop:key",
+                    "reason": "protective_stop_required",
+                    "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01, 1.02]},
+                },
+            ],
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            ],
+            "audit_log_path": str(tmp_path / "audit.jsonl"),
+            "state_path": str(tmp_path / "state.json"),
+            "runtime_snapshot": {"snapshot_valid": True, "position": {"position_state": "FLAT"}},
+        },
+    )
+
+    assert payload["real_order_gate"]["allowed"] is False
+    assert "take_profit_orders_not_planned" in payload["real_order_gate"]["reason_codes"]
+    assert payload["candidate_execution_package"]["status"] == "skipped"
+
+
+def test_bot_runtime_scheduler_writes_candidate_when_take_profit_order_is_planned(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "symbol": "ETH",
+            "exchange_symbol": "ETH-USDT-SWAP",
+            "requested_action": "entry_long",
+            "effective_action": "entry_long",
+            "handoff": {
+                "action": "entry_long",
+                "direction": "long",
+                "execution_allowed": True,
+                "risk_filter_status": "pass",
+                "initial_stop_loss": 0.97,
+                "tp_ladder": [1.01],
+                "tp_reduce_fractions": [0.5],
+            },
+            "execution_plan": {"place_entry_order": True, "maintain_protective_stop": True, "place_take_profit_orders": True},
+            "command_targets": ["entry_order", "maintain_protective_stop", "take_profit_order"],
+            "execution_commands": [
+                {
+                    "command_type": "order",
+                    "operation": "place",
+                    "target": "entry_order",
+                    "idempotency_key": "entry:key",
+                    "reason": "effective_action:entry_long",
+                    "payload": {"action": "entry_long", "direction": "long", "position_size_pct": 0.02},
+                },
+                {
+                    "command_type": "order",
+                    "operation": "upsert",
+                    "target": "maintain_protective_stop",
+                    "idempotency_key": "stop:key",
+                    "reason": "protective_stop_required",
+                    "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01]},
+                },
+                {
+                    "command_type": "order",
+                    "operation": "place",
+                    "target": "take_profit_order",
+                    "idempotency_key": "tp:key",
+                    "reason": "take_profit_level:1",
+                    "payload": {"direction": "long", "price_ratio": 1.01, "reduce_fraction": 0.5, "level": 1},
+                },
+            ],
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+                {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            ],
+            "audit_log_path": str(tmp_path / "audit.jsonl"),
+            "state_path": str(tmp_path / "state.json"),
+            "runtime_snapshot": {"snapshot_valid": True, "position": {"position_state": "FLAT"}},
+        },
+    )
+
+    package = json.loads(Path(payload["candidate_execution_package"]["latest_path"]).read_text(encoding="utf-8"))
+
+    assert payload["real_order_gate"]["allowed"] is True
+    assert package["execution_commands"][-1]["target"] == "take_profit_order"
+    assert package["execution_commands"][-1]["payload"]["reduce_fraction"] == 0.5
 
 
 def test_bot_runtime_scheduler_records_error_and_degraded_heartbeat(tmp_path: Path, monkeypatch) -> None:

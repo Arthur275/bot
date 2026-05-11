@@ -12,6 +12,7 @@ from bot.exchange_adapter import (
     EntryOrderPayload,
     ExchangeAdapter,
     ExitOrderPayload,
+    TakeProfitOrderPayload,
     PositionSnapshot,
     ProtectiveStopPayload,
     RealExchangeAdapter,
@@ -172,6 +173,55 @@ def test_exchange_adapter_builds_execution_commands() -> None:
     assert isinstance(commands[3].payload, TrailingStopPayload)
     assert isinstance(commands[4].payload, RecentFillsPayload)
     assert all(command.idempotency_key for command in commands)
+
+
+def test_exchange_adapter_builds_take_profit_commands_from_explicit_fractions() -> None:
+    commands = ExchangeAdapter().build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_take_profit_orders=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T12:15:00",
+            "action": "entry_long",
+            "direction": "long",
+            "tp_ladder": [1.01, 1.02],
+            "tp_reduce_fractions": [0.5, 0.5],
+        },
+    )
+
+    assert [(command.target, command.reason) for command in commands] == [
+        ("take_profit_order", "take_profit_level:1"),
+        ("take_profit_order", "take_profit_level:2"),
+    ]
+    assert isinstance(commands[0].payload, TakeProfitOrderPayload)
+    assert commands[0].payload.price_ratio == 1.01
+    assert commands[0].payload.reduce_fraction == 0.5
+    assert commands[0].payload.level == 1
+    assert commands[1].idempotency_key.startswith("take_profit_order:2:")
+
+
+def test_exchange_adapter_does_not_build_ambiguous_take_profit_ladder_contract() -> None:
+    commands = ExchangeAdapter().build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_take_profit_orders=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T12:15:00",
+            "action": "entry_long",
+            "direction": "long",
+            "tp_ladder": [1.01, 1.02],
+            "tp_reduce_fractions": [0.5, 0.5],
+            "tp_reduce_qtys": [0.01, 0.01],
+        },
+    )
+
+    assert commands == []
 
 
 def test_exchange_adapter_uses_typed_entry_payload() -> None:
@@ -3176,6 +3226,67 @@ def test_okx_usdt_swap_adapter_preflight_protective_stop_resolves_body() -> None
     assert results[0].client_order_id.startswith("ethbot-ps-")
 
 
+def test_okx_usdt_swap_adapter_preflight_take_profit_order_resolves_limit_reduce_only() -> None:
+    transport = FakeTransport(
+        responses=[
+            TransportResponse(
+                http_status=200,
+                payload={
+                    "code": "0",
+                    "data": [
+                        {
+                            "instId": "ETH-USDT-SWAP",
+                            "pos": "2",
+                            "posSide": "net",
+                            "avgPx": "3100.0",
+                            "markPx": "3120.5",
+                            "lever": "10",
+                            "notionalUsd": "62.41",
+                        }
+                    ],
+                },
+            ),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": [{"totalEq": "100.0"}]}),
+            TransportResponse(http_status=200, payload={"code": "0", "data": []}),
+        ]
+    )
+    signer = OkxRequestSigner(
+        _okx_credentials(),
+        env_getter=lambda key: {"OKX_API_KEY": "key", "OKX_API_SECRET": "secret", "OKX_API_PASSPHRASE": "pass"}.get(key),
+    )
+    adapter = OkxUsdtSwapAdapter(_okx_credentials(), signer=signer, transport=transport)
+    commands = adapter.build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_take_profit_orders=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:01:30",
+            "action": "entry_long",
+            "direction": "long",
+            "tp_ladder": [1.01],
+            "tp_reduce_fractions": [0.5],
+        },
+    )
+
+    results = adapter.preflight_commands(commands=commands)
+
+    assert results[0].target == "take_profit_order"
+    assert results[0].status == "preflight_ready"
+    body = results[0].details["prepared_request"]["body"]
+    assert body["instId"] == "ETH-USDT-SWAP"
+    assert body["side"] == "sell"
+    assert body["ordType"] == "limit"
+    assert body["reduceOnly"] == "true"
+    assert body["sz"] == "1"
+    assert body["px"] == "3131.0"
+    assert body["resolution_mode"] == "okx_take_profit_from_live_entry"
+    assert results[0].client_order_id.startswith("ethbot-tp-")
+
+
 def test_okx_usdt_swap_adapter_missing_passphrase_yields_request_signing_failed() -> None:
     transport = FakeTransport(
         responses=[
@@ -3481,3 +3592,13 @@ def test_exchange_adapter_exposes_capabilities() -> None:
     assert capabilities.supports_recent_fill_sync is True
     assert capabilities.supports_trailing_stop_update is True
     assert capabilities.supports_breakeven_update is True
+    assert capabilities.supports_take_profit_orders is True
+
+
+def test_real_exchange_adapter_capabilities_match_blocked_post_entry_features() -> None:
+    capabilities = RealExchangeAdapter(_credentials()).get_capabilities()
+    assert capabilities.supports_real_execution is True
+    assert capabilities.supports_recent_fill_sync is True
+    assert capabilities.supports_trailing_stop_update is False
+    assert capabilities.supports_breakeven_update is False
+    assert capabilities.supports_take_profit_orders is True

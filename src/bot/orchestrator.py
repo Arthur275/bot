@@ -131,6 +131,7 @@ class ShadowOrchestrator:
         execution_plan = self._position_manager.build_execution_plan(
             handoff=cycle.handoff,
             guard=guard,
+            adapter_capabilities=capabilities,
             runtime_state=self._build_runtime_state_payload(
                 state=state,
                 handoff=cycle.handoff,
@@ -298,6 +299,7 @@ class ShadowOrchestrator:
         execution_plan = self._position_manager.build_execution_plan(
             handoff=cycle.handoff,
             guard=guard,
+            adapter_capabilities=capabilities,
             runtime_state=self._build_runtime_state_payload(
                 state=state,
                 handoff=cycle.handoff,

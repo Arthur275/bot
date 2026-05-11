@@ -372,7 +372,7 @@ button:focus {
 .flow-card.red .flow-status::before { background: var(--red); }
 
 .flow-age {
-  color: var(--weak);
+  color: var(--muted);
   font-family: var(--mono);
   font-size: 11px;
 }
@@ -792,6 +792,23 @@ button:focus {
 .trigger-watch {
   margin-top: 10px;
   min-width: 0;
+}
+
+.probe-diagnostic {
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.probe-diagnostic .source-note {
+  margin: 0 0 8px;
+}
+
+.probe-diagnostic-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.probe-diagnostic-facts strong {
+  font-size: 13px;
 }
 
 .trigger-watch .source-note {
@@ -1563,6 +1580,7 @@ button:focus {
 
   .metric-grid,
   .metric-grid.five,
+  .probe-diagnostic-facts,
   .factor-strip,
   .bot-strip,
   .status-counts {

@@ -41,6 +41,14 @@ const valueLabels = {
   entry_long: "开多",
   entry_short: "开空",
   small_probe: "小探针",
+  strong_momentum_probe: "强动量试探仓",
+  strong_momentum: "强动量",
+  probe_retest_momentum: "回踩动量试探",
+  probe_research_evidence_gap: "研究证据缺口试探",
+  trigger_edge_probe: "触发边缘试探",
+  trend_continuation_probe: "趋势延续试探",
+  contrarian_short_probe: "反向空头试探",
+  strong_consensus_probe: "强共识试探",
   exit: "平仓",
   reduce: "减仓",
   wait: "等待",
@@ -127,6 +135,16 @@ const valueLabels = {
   okx_longs_crowded: "OKX 多头拥挤",
   coinglass_funding_extreme: "CoinGlass 资金费率极端",
   edge_estimate_missing: "优势估算缺失",
+  edge_missing: "优势估算缺失",
+  overlay_bias_conflict: "叠加偏向冲突",
+  overlay_mixed: "叠加信号混杂",
+  same_direction_crowding: "同向拥挤压仓",
+  same_direction_funding_extreme: "同向资金费率极端",
+  same_direction_liquidation_risk: "同向清算风险",
+  position_cap_zero: "仓位上限为 0",
+  position_cap_below_probe_floor: "仓位上限低于试探仓底线",
+  capped_by_strong_momentum_probe: "强动量试探仓上限压制",
+  strong_momentum_probe_size_cap: "强动量试探仓最高 3%",
   estimated_cost_pct: "估算成本",
   research_veto: "研究否决",
   insufficient_quality_folds: "有效质量折数不足",
@@ -134,6 +152,10 @@ const valueLabels = {
   wf_trade_count_low: "走前交易数偏低",
   wf_quality_insufficient: "走前质量不足",
   wf_trade_share_low: "走前交易占比偏低",
+  walk_forward_missing: "走前验证缺失",
+  walk_forward_folds_missing: "走前验证折数缺失",
+  walk_forward_fold_details_missing: "走前验证明细缺失",
+  wf_dispersion_high: "走前结果分散偏高",
   direction_not_aligned: "方向不一致",
   governance_negative_expectancy: "治理结论为负期望",
   governance_watch: "治理观察",
@@ -149,6 +171,9 @@ const valueLabels = {
   overlay_crowding_warning: "叠加拥挤预警",
   "overlay_bias:bearish": "叠加偏向偏空",
   "overlay_bias:bullish": "叠加偏向偏多",
+  "coinglass_liq_risk_side:long": "CoinGlass 多头清算风险",
+  "coinglass_liq_risk_side:short": "CoinGlass 空头清算风险",
+  okx_shorts_crowded: "OKX 空头拥挤",
   regime_alignment: "市场状态一致",
   "regime:long": "大周期多头",
   "regime:neutral": "大周期中性",
@@ -780,6 +805,44 @@ function severityForReason(code, fallback = "watch") {
   return fallback || "watch";
 }
 
+function isStrongMomentumProbe(quant) {
+  return String(quant?.probe_source || "").toLowerCase() === "strong_momentum_probe";
+}
+
+function boolText(value) {
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return "暂无";
+}
+
+function compactPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "暂无";
+  const scaled = Math.abs(n) > 1 ? n : n * 100;
+  return `${scaled.toFixed(2)}%`;
+}
+
+function probeStatus(quant) {
+  if (!quant?.probe_source) return { label: "未启用试探仓", level: "gray" };
+  if (quant.execution_allowed === false) return { label: "试探仓被阻断", level: "red" };
+  if (quant.execution_allowed === true) return { label: "试探仓可执行", level: isStrongMomentumProbe(quant) ? "blue" : "green" };
+  return { label: "试探仓观察", level: isStrongMomentumProbe(quant) ? "blue" : "gray" };
+}
+
+function uniqueReasonRows(...groups) {
+  const seen = new Set();
+  const rows = [];
+  for (const group of groups) {
+    for (const row of normalizeReasonRows(group || [])) {
+      const code = row.code || row.text;
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
 function severityLabel(severity) {
   if (severity === "hard") return "阻断";
   if (severity === "degraded") return "降级";
@@ -817,6 +880,63 @@ function renderReasonChips(id, rows, level = "") {
     }
     wrap.appendChild(chip);
   });
+}
+
+function renderProbeDiagnostics(quant) {
+  const status = probeStatus(quant);
+  setBadge($("probeDiagnosticBadge"), status.label, status.level);
+  const summary = $("probeDiagnosticSummary");
+  const probeSource = quant.probe_source || "";
+  if (!probeSource) {
+    summary.textContent = "当前没有试探仓信号；普通开仓闸门仍按原规则判断。";
+  } else if (isStrongMomentumProbe(quant)) {
+    const action = text(quant.requested_action || quant.action);
+    const size = compactPct(quant.executable_size_pct ?? quant.position_size_pct);
+    const cap = compactPct(quant.position_cap_pct);
+    const prefix = quant.execution_allowed === false ? "信号存在，但执行闸门未放行" : "信号已进入执行闸门";
+    summary.textContent = `${text(probeSource)}：${prefix}，请求 ${action}，执行仓位 ${size}，风控上限 ${cap}。放行必须同时满足结构强、回踩成立、触发未完全确认、研究层仅为证据不足。`;
+  } else {
+    summary.textContent = `${text(probeSource)}：按 ${text(quant.probe_risk_tier || "unknown")} 风险层展示，最终仍以执行闸门为准。`;
+  }
+
+  const facts = $("probeDiagnosticFacts");
+  clearElement(facts);
+  const rows = [
+    ["请求动作", quant.requested_action || quant.action],
+    ["执行允许", boolText(quant.execution_allowed)],
+    ["试探来源", quant.probe_source],
+    ["风险层", quant.probe_risk_tier],
+    ["执行仓位", compactPct(quant.executable_size_pct ?? quant.position_size_pct)],
+    ["信号仓位", compactPct(quant.signal_size_pct)],
+    ["仓位上限", compactPct(quant.position_cap_pct)],
+    ["研究闸门", quant.research_gate_status],
+    ["结构方向", quant.setup_direction],
+    ["触发方向", quant.trigger_direction],
+    ["触发就绪", boolText(quant.trigger_ready)],
+    ["结构强度", ratio(quant.setup_strength)],
+    ["触发分", ratio(quant.entry_timing_score)],
+    ["回踩支撑", boolText(quant.retest_support)],
+    ["突破支撑", boolText(quant.breakout_support)],
+    ["斜率支撑", boolText(quant.slope_support)],
+    ["叠加偏向", quant.overlay_bias],
+    ["失效周期", quant.probe_expiry_bars ? `${quant.probe_expiry_bars} ${text(quant.probe_expiry_timeframe || "bar")}` : ""],
+  ];
+  for (const [label, value] of rows) {
+    const item = document.createElement("div");
+    appendText(item, "span", label);
+    const strong = appendText(item, "strong", text(value));
+    applyValueLevel(strong, value);
+    facts.appendChild(item);
+  }
+
+  const reasons = uniqueReasonRows(
+    quant.sizing_reason_codes || [],
+    quant.research_gate_reasons || [],
+    quant.transition_reason_codes || [],
+    quant.runtime_vetoes || [],
+    quant.invalidate_conditions || []
+  );
+  renderReasonChips("probeDiagnosticReasons", reasons);
 }
 
 function renderTriggerWatch(triggerWatch) {
@@ -1415,6 +1535,7 @@ function render(data) {
     ["优势来源", quant.edge_source],
   ]);
   renderReasonChips("quantReasons", normalizeReasonRows(quant.reason_codes || [], quant.risk_reason_codes || quant.degrade_flags || []));
+  renderProbeDiagnostics(quant);
   const research = quant.research || {};
   setBadge($("researchBadge"), research.status || "unknown", levelForStatus(research.status));
   renderDetails("researchDetails", [

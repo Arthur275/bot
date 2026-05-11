@@ -74,6 +74,29 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "estimated_slippage_pct": 0.0004,
             "estimated_funding_pct": 0.0002,
             "edge_source": "consensus",
+            "execution_allowed": True,
+            "executable_size_pct": 0.005,
+            "position_size_pct": 0.005,
+            "position_cap_pct": 0.03,
+            "probe_source": "strong_momentum_probe",
+            "probe_risk_tier": "strong_momentum",
+            "probe_expiry_bars": 6,
+            "probe_expiry_timeframe": "15m",
+            "probe_invalid_if_no_followthrough": True,
+            "runtime_vetoes": [],
+            "research_gate_status": "blocked",
+            "research_gate_reasons": ["wf_quality_insufficient"],
+            "transition_reason_codes": ["setup_ready_waiting_trigger"],
+            "sizing_reason_codes": ["capped_by_strong_momentum_probe", "edge_estimate_missing"],
+            "setup_direction": "long",
+            "trigger_direction": "long",
+            "trigger_ready": False,
+            "setup_strength": 0.83,
+            "entry_timing_score": 0.52,
+            "retest_support": True,
+            "breakout_support": False,
+            "slope_support": True,
+            "overlay_bias": "bullish",
             "runtime_account_equity": 88.25,
             "runtime_account_equity_source": "totalEq",
             "runtime_unrealized_pnl_usd": 1.75,
@@ -289,6 +312,28 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["estimated_slippage_pct"] == 0.0004
     assert snapshot["quant"]["estimated_funding_pct"] == 0.0002
     assert snapshot["quant"]["edge_source"] == "consensus"
+    assert snapshot["quant"]["execution_allowed"] is True
+    assert snapshot["quant"]["executable_size_pct"] == 0.005
+    assert snapshot["quant"]["position_size_pct"] == 0.005
+    assert snapshot["quant"]["position_cap_pct"] == 0.03
+    assert snapshot["quant"]["probe_source"] == "strong_momentum_probe"
+    assert snapshot["quant"]["probe_risk_tier"] == "strong_momentum"
+    assert snapshot["quant"]["probe_expiry_bars"] == 6
+    assert snapshot["quant"]["probe_expiry_timeframe"] == "15m"
+    assert snapshot["quant"]["probe_invalid_if_no_followthrough"] is True
+    assert snapshot["quant"]["research_gate_status"] == "blocked"
+    assert snapshot["quant"]["research_gate_reasons"] == ["wf_quality_insufficient"]
+    assert snapshot["quant"]["transition_reason_codes"] == ["setup_ready_waiting_trigger"]
+    assert snapshot["quant"]["sizing_reason_codes"] == ["capped_by_strong_momentum_probe", "edge_estimate_missing"]
+    assert snapshot["quant"]["setup_direction"] == "long"
+    assert snapshot["quant"]["trigger_direction"] == "long"
+    assert snapshot["quant"]["trigger_ready"] is False
+    assert snapshot["quant"]["setup_strength"] == 0.83
+    assert snapshot["quant"]["entry_timing_score"] == 0.52
+    assert snapshot["quant"]["retest_support"] is True
+    assert snapshot["quant"]["breakout_support"] is False
+    assert snapshot["quant"]["slope_support"] is True
+    assert snapshot["quant"]["overlay_bias"] == "bullish"
     assert {"cycle_status_timeline", "quant_metric_series", "reason_code_counts", "consensus_quality_series"} <= set(snapshot["charts"])
     assert snapshot["quant"]["research"]["status"] == "unavailable"
     assert snapshot["quant"]["research"]["freshness"] == "stale"
@@ -778,11 +823,13 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "severityForReason" in app_js
     assert "buildNoTradeSummary" in app_js
     assert "renderTriggerWatch" in app_js
+    assert "renderProbeDiagnostics" in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
     assert {"triggerWatchBadge", "triggerWatchSummary", "triggerWatchStats", "triggerWatchRows"} <= html_ids
     assert {"cycleStatusChart", "quantMetricsChart", "reasonCodesChart", "consensusChart"} <= html_ids
     assert {"researchBadge", "researchDetails", "researchReasons", "quantReasons"} <= html_ids
+    assert {"probeDiagnosticBadge", "probeDiagnosticSummary", "probeDiagnosticFacts", "probeDiagnosticReasons"} <= html_ids
     assert {"marketDataBadge", "marketDataDetails", "edgeCostBadge", "edgeCostDetails"} <= html_ids
     assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
     assert {"pauseBtn", "modeNotice"} <= html_ids
@@ -809,6 +856,9 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "setPill($(" in app_js
     assert "latest_incomplete_cycle" in app_js
     assert "trigger_watch" in app_js
+    assert "strong_momentum_probe: \"强动量试探仓\"" in app_js
+    assert "capped_by_strong_momentum_probe: \"强动量试探仓上限压制\"" in app_js
+    assert ".probe-diagnostic" in styles_css
     assert "submitted_all_accepted" in app_js
     assert "partial_failed" in app_js
     assert "color-scheme: dark" in styles_css

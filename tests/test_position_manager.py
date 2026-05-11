@@ -1,7 +1,7 @@
 from bot.network_guard import GuardDecision
 from bot.position_manager import PositionManager
 from bot.execution_risk_gate import ExecutionRiskGate, ExecutionRiskGateConfig
-from bot.exchange_adapter import EntryOrderPayload, ExchangeAdapter
+from bot.exchange_adapter import AdapterCapabilities, EntryOrderPayload, ExchangeAdapter
 
 
 def test_position_manager_maps_entry_to_entry_plan() -> None:
@@ -273,9 +273,126 @@ def test_position_manager_keeps_execution_hygiene_actions_under_wait() -> None:
     assert plan.effective_action == "wait"
     assert plan.plan_reason == "quant_action_passthrough"
     assert plan.maintain_protective_stop is True
+    assert plan.advance_breakeven is False
+    assert plan.advance_trailing_stop is False
+    assert plan.sync_recent_fills is True
+
+
+def test_position_manager_only_advances_post_entry_stops_when_adapter_supports_it() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "wait",
+            "position_size_pct": 0.3,
+            "breakeven_trigger": 1.01,
+            "trailing_rule": "trail_with_trigger",
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_size_pct": 0.3,
+            "breakeven_ready": True,
+            "trailing_ready": True,
+        },
+        adapter_capabilities=AdapterCapabilities(
+            supports_breakeven_update=True,
+            supports_trailing_stop_update=True,
+        ),
+    )
+
     assert plan.advance_breakeven is True
     assert plan.advance_trailing_stop is True
-    assert plan.sync_recent_fills is True
+    assert plan.sync_recent_fills is False
+
+
+def test_position_manager_plans_take_profit_only_with_explicit_contract_and_capability() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "direction": "long",
+            "execution_allowed": True,
+            "risk_filter_status": "pass",
+            "position_size_pct": 0.2,
+            "executable_size_pct": 0.02,
+            "max_account_risk_pct_per_trade": 0.01,
+            "initial_stop_loss": 0.97,
+            "tp_ladder": [1.01, 1.02],
+            "tp_reduce_fractions": [0.5, 0.5],
+        },
+        guard=GuardDecision(judgement_status="ok", allow_entry=True),
+        adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
+    )
+
+    assert plan.place_entry_order is True
+    assert plan.place_take_profit_orders is True
+
+
+def test_position_manager_does_not_plan_take_profit_for_bare_ladder() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "direction": "long",
+            "execution_allowed": True,
+            "risk_filter_status": "pass",
+            "position_size_pct": 0.2,
+            "executable_size_pct": 0.02,
+            "max_account_risk_pct_per_trade": 0.01,
+            "initial_stop_loss": 0.97,
+            "tp_ladder": [1.01, 1.02],
+        },
+        guard=GuardDecision(judgement_status="ok", allow_entry=True),
+        adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
+    )
+
+    assert plan.place_entry_order is True
+    assert plan.place_take_profit_orders is False
+
+
+def test_position_manager_does_not_plan_take_profit_for_malformed_direct_orders() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "direction": "long",
+            "execution_allowed": True,
+            "risk_filter_status": "pass",
+            "position_size_pct": 0.2,
+            "executable_size_pct": 0.02,
+            "max_account_risk_pct_per_trade": 0.01,
+            "initial_stop_loss": 0.97,
+            "take_profit_orders": ["not-a-contract"],
+        },
+        guard=GuardDecision(judgement_status="ok", allow_entry=True),
+        adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
+    )
+
+    assert plan.place_entry_order is True
+    assert plan.place_take_profit_orders is False
+
+
+def test_position_manager_does_not_plan_take_profit_for_ambiguous_ladder_size_contract() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "entry_long",
+            "direction": "long",
+            "execution_allowed": True,
+            "risk_filter_status": "pass",
+            "position_size_pct": 0.2,
+            "executable_size_pct": 0.02,
+            "max_account_risk_pct_per_trade": 0.01,
+            "initial_stop_loss": 0.97,
+            "tp_ladder": [1.01, 1.02],
+            "tp_reduce_fractions": [0.5, 0.5],
+            "tp_reduce_qtys": [0.01, 0.01],
+        },
+        guard=GuardDecision(judgement_status="ok", allow_entry=True),
+        adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
+    )
+
+    assert plan.place_entry_order is True
+    assert plan.place_take_profit_orders is False
 
 
 def test_position_manager_does_not_maintain_existing_protective_stop_under_wait() -> None:

@@ -4,7 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="dashboard-build" content="terminal-cn-3" />
+    <meta name="description" content="Read-only ETH trading bot runtime dashboard for monitoring strategy, risk, execution, and research health." />
     <title>ETH 运行观察面板</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -140,6 +142,15 @@
           </div>
           <div class="section-head"><h3>当前原因代码</h3></div>
           <div id="quantReasons" class="chip-grid reason-chips"></div>
+          <section class="probe-diagnostic">
+            <div class="section-head">
+              <h3>试探仓诊断</h3>
+              <span id="probeDiagnosticBadge" class="badge gray">未启用试探仓</span>
+            </div>
+            <p id="probeDiagnosticSummary" class="source-note">当前没有试探仓信号。</p>
+            <div id="probeDiagnosticFacts" class="metric-grid probe-diagnostic-facts"></div>
+            <div id="probeDiagnosticReasons" class="chip-grid reason-chips"></div>
+          </section>
           <section class="log-box terminal-note">
             <h3>量化摘要</h3>
             <div id="reasoning" class="summary-facts">暂无推理摘要。</div>

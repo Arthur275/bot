@@ -143,6 +143,106 @@ def test_real_order_gate_blocks_high_risk_auto_submit_for_now() -> None:
     assert "real_reduce_not_implemented" in decision.reason_codes
 
 
+def test_real_order_gate_blocks_entry_when_strategy_tp_ladder_has_no_tp_order() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload={
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "effective_action": "entry_long",
+            "blocked": False,
+            "degraded": False,
+            "handoff": {
+                "execution_allowed": True,
+                "risk_filter_status": "pass",
+                "initial_stop_loss": 0.97,
+                "tp_ladder": [1.01, 1.02],
+            },
+            "execution_plan": {
+                "place_entry_order": True,
+                "maintain_protective_stop": True,
+            },
+            "command_targets": ["entry_order", "maintain_protective_stop"],
+            "runtime_snapshot": {
+                "snapshot_valid": True,
+                "position": {"position_state": "FLAT"},
+            },
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            ],
+        },
+    )
+
+    assert decision.allowed is False
+    assert "take_profit_orders_not_planned" in decision.reason_codes
+
+
+def test_real_order_gate_allows_entry_when_take_profit_order_is_planned() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload={
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "effective_action": "entry_long",
+            "blocked": False,
+            "degraded": False,
+            "handoff": {
+                "execution_allowed": True,
+                "risk_filter_status": "pass",
+                "initial_stop_loss": 0.97,
+                "tp_ladder": [1.01],
+            },
+            "execution_plan": {
+                "place_entry_order": True,
+                "maintain_protective_stop": True,
+                "place_take_profit_orders": True,
+            },
+            "command_targets": ["entry_order", "maintain_protective_stop", "take_profit_order"],
+            "runtime_snapshot": {
+                "snapshot_valid": True,
+                "position": {"position_state": "FLAT"},
+            },
+            "preflight": [
+                {"target": "entry_order", "status": "preflight_ready", "error": ""},
+                {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+                {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            ],
+        },
+    )
+
+    assert decision.allowed is True
+    assert "take_profit_orders_not_planned" not in decision.reason_codes
+
+
+def test_real_order_gate_blocks_unsupported_post_entry_stop_commands() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload={
+            "runtime_mode": "real",
+            "engine_mode": "strict-live",
+            "effective_action": "wait",
+            "command_targets": ["advance_breakeven_stop", "advance_trailing_stop"],
+            "adapter_capabilities": {
+                "supports_breakeven_update": False,
+                "supports_trailing_stop_update": False,
+            },
+            "runtime_snapshot": {
+                "snapshot_valid": True,
+                "position": {"position_state": "ENTERED", "direction": "long"},
+            },
+            "preflight": [
+                {"target": "advance_breakeven_stop", "status": "preflight_ready", "error": ""},
+                {"target": "advance_trailing_stop", "status": "preflight_ready", "error": ""},
+            ],
+        },
+    )
+
+    assert decision.allowed is False
+    assert "breakeven_update_not_supported" in decision.reason_codes
+    assert "trailing_stop_update_not_supported" in decision.reason_codes
+
+
 def test_real_order_gate_blocks_exit_without_reduce_contract_reason() -> None:
     decision = evaluate_real_order_gate(
         enable_real_orders=True,

@@ -11,7 +11,7 @@ import pytest
 
 from bot.config import RuntimeMode
 from bot.audit_logger import AuditLogger
-from bot.exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult, ExecutionCommand, PositionSnapshot
+from bot.exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult, ExecutionCommand, OrderSnapshot, PositionSnapshot
 from bot.state_store import ExecutionLayerState, StateStore
 from scripts import real_order_worker
 
@@ -151,6 +151,46 @@ class FakeRealOrderAdapter:
                         )
                     )
                 self._snapshot.protective_stop_present = True
+            if command.target == "take_profit_order":
+                direction = str(getattr(command.payload, "direction", "") or self._snapshot.position.direction or "long")
+                side = "SELL" if direction == "long" else "BUY"
+                quantity = str(abs(float(self._snapshot.position.position_amt or 0.048)) * float(getattr(command.payload, "reduce_fraction", None) or 1.0))
+                price = "3030.0"
+                client_id = f"ethbot-tp-{command.idempotency_key.replace(':', '-')}"
+                exchange_id = f"order-{command.idempotency_key.replace(':', '-')}"
+                details = {
+                    "prepared_request": {
+                        "body": {
+                            "instId": "ETH-USDT-SWAP",
+                            "clOrdId": client_id,
+                            "side": side,
+                            "ordType": "limit",
+                            "reduceOnly": "true",
+                            "sz": quantity,
+                            "px": price,
+                        }
+                    },
+                    "response_payload": {"data": [{"ordId": exchange_id, "clOrdId": client_id, "sCode": "0"}]},
+                    "response_summary": {
+                        "ordId": exchange_id,
+                        "clOrdId": client_id,
+                        "resolved_take_profit_price": price,
+                        "resolved_reduce_qty": quantity,
+                    },
+                }
+                if not any(str(order.order_id) == client_id for order in self._snapshot.open_orders):
+                    self._snapshot.open_orders.append(
+                        OrderSnapshot(
+                            order_id=exchange_id,
+                            client_order_id=client_id,
+                            order_type="LIMIT",
+                            status="NEW",
+                            side=side,
+                            reduce_only=True,
+                            quantity=float(quantity),
+                            price=float(price),
+                        )
+                    )
             results.append(
                 CommandExecutionResult(
                     target=command.target,
@@ -218,6 +258,19 @@ class RejectingStopAdapter(FakeRealOrderAdapter):
                 for command in commands
             ]
         return super().execute_commands(commands=commands, runtime_mode=runtime_mode)
+
+
+class UnconfirmedTakeProfitAdapter(FakeRealOrderAdapter):
+    def execute_commands(
+        self,
+        *,
+        commands: list[ExecutionCommand],
+        runtime_mode: RuntimeMode,
+    ) -> list[CommandExecutionResult]:
+        results = super().execute_commands(commands=commands, runtime_mode=runtime_mode)
+        if any(command.target == "take_profit_order" for command in commands):
+            self._snapshot.open_orders = []
+        return results
 
 
 def _algo_order(
@@ -415,6 +468,141 @@ def test_real_order_worker_retries_protective_stop_after_entry(tmp_path: Path) -
         "maintain_protective_stop",
         "maintain_protective_stop",
     ]
+
+
+def test_real_order_worker_submits_take_profit_after_entry_stop_confirmation(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path))
+    package["execution_commands"].extend(
+        [
+            {
+                "command_type": "order",
+                "operation": "upsert",
+                "target": "maintain_protective_stop",
+                "idempotency_key": "stop:key",
+                "reason": "protective_stop_required",
+                "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01]},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key",
+                "reason": "take_profit_level:1",
+                "payload": {"direction": "long", "price_ratio": 1.01, "reduce_fraction": 0.5, "level": 1},
+            },
+        ]
+    )
+    package["preflight"].extend(
+        [
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ]
+    )
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = FakeRealOrderAdapter()
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "submitted_all_accepted"
+    assert [command.target for command in adapter.executed_commands] == [
+        "entry_order",
+        "maintain_protective_stop",
+        "take_profit_order",
+    ]
+    tp_result = result["results"][-1]
+    assert tp_result["target"] == "take_profit_order"
+    assert tp_result["details"]["take_profit_confirmation"]["matched_order"]["client_order_id"].startswith("ethbot-tp-")
+
+
+def test_real_order_worker_does_not_submit_take_profit_when_stop_confirmation_fails(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path))
+    package["execution_commands"].extend(
+        [
+            {
+                "command_type": "order",
+                "operation": "upsert",
+                "target": "maintain_protective_stop",
+                "idempotency_key": "stop:key",
+                "reason": "protective_stop_required",
+                "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01]},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key",
+                "reason": "take_profit_level:1",
+                "payload": {"direction": "long", "price_ratio": 1.01, "reduce_fraction": 0.5, "level": 1},
+            },
+        ]
+    )
+    package["preflight"].extend(
+        [
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ]
+    )
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = RejectingStopAdapter()
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    assert [command.target for command in adapter.executed_commands] == [
+        "entry_order",
+        "maintain_protective_stop",
+        "maintain_protective_stop",
+        "maintain_protective_stop",
+    ]
+
+
+def test_real_order_worker_marks_take_profit_unconfirmed_for_recovery(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path))
+    package["execution_commands"].extend(
+        [
+            {
+                "command_type": "order",
+                "operation": "upsert",
+                "target": "maintain_protective_stop",
+                "idempotency_key": "stop:key",
+                "reason": "protective_stop_required",
+                "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01]},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key",
+                "reason": "take_profit_level:1",
+                "payload": {"direction": "long", "price_ratio": 1.01, "reduce_fraction": 0.5, "level": 1},
+            },
+        ]
+    )
+    package["preflight"].extend(
+        [
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ]
+    )
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = UnconfirmedTakeProfitAdapter()
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    tp_result = result["results"][-1]
+    assert tp_result["target"] == "take_profit_order"
+    assert tp_result["accepted"] is False
+    assert tp_result["status"] == "timeout"
+    assert tp_result["error_kind"] == "timeout"
+    assert tp_result["reason"] == "take_profit_order_confirmation_missing"
+    assert tp_result["details"]["unconfirmed_submission_result"]["accepted"] is True
 
 
 def test_real_order_worker_cancels_ghost_stop_before_entry(tmp_path: Path) -> None:

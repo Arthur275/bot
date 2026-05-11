@@ -20,6 +20,7 @@ class ExecutionPlan(BaseModel):
     place_reduce_order: bool = False
     place_exit_order: bool = False
     maintain_protective_stop: bool = False
+    place_take_profit_orders: bool = False
     advance_breakeven: bool = False
     advance_trailing_stop: bool = False
     sync_recent_fills: bool = False
@@ -41,6 +42,7 @@ class PositionManager:
         handoff: dict[str, Any] | None,
         guard: GuardDecision,
         runtime_state: dict[str, Any] | None = None,
+        adapter_capabilities: Any | None = None,
     ) -> ExecutionPlan:
         requested_action = str((handoff or {}).get("action") or "wait")
         runtime_state = runtime_state or {}
@@ -50,7 +52,11 @@ class PositionManager:
         breakeven_ready = bool(runtime_state.get("breakeven_ready"))
         trailing_ready = bool(runtime_state.get("trailing_ready"))
         recent_fill_sync_required = bool(runtime_state.get("recent_fill_sync_required"))
+        supports_breakeven_update = bool(getattr(adapter_capabilities, "supports_breakeven_update", False))
+        supports_trailing_stop_update = bool(getattr(adapter_capabilities, "supports_trailing_stop_update", False))
+        supports_take_profit_orders = bool(getattr(adapter_capabilities, "supports_take_profit_orders", False))
         has_open_risk = self._has_open_risk(runtime_state, handoff)
+        has_take_profit_contract = self._has_take_profit_contract(handoff)
         needs_recovery_reconciliation = recovery_required or reconciliation_required
         protective_stop_present = bool(runtime_state.get("protective_stop_present"))
         needs_protective_stop = bool(
@@ -167,8 +173,9 @@ class PositionManager:
             place_reduce_order=effective_action == PositionAction.REDUCE.value,
             place_exit_order=effective_action == PositionAction.EXIT.value,
             maintain_protective_stop=needs_protective_stop or action_refreshes_protective_stop,
-            advance_breakeven=breakeven_ready and has_open_risk,
-            advance_trailing_stop=trailing_ready and has_open_risk,
+            place_take_profit_orders=effective_action in entry_actions and supports_take_profit_orders and has_take_profit_contract,
+            advance_breakeven=breakeven_ready and has_open_risk and supports_breakeven_update,
+            advance_trailing_stop=trailing_ready and has_open_risk and supports_trailing_stop_update,
             sync_recent_fills=recent_fill_sync_required and (has_open_risk or effective_action in {PositionAction.REDUCE.value, PositionAction.EXIT.value}),
             needs_reconciliation=needs_recovery_reconciliation,
             recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
@@ -193,6 +200,49 @@ class PositionManager:
         if observed_size > 0.0 or observed_state == "ENTERED" or handoff_state == "ENTERED":
             return True
         return handoff_size > 0.0 and handoff_action not in entry_actions
+
+    @staticmethod
+    def _has_take_profit_contract(handoff: dict[str, Any] | None) -> bool:
+        handoff = handoff or {}
+        direct_orders = handoff.get("take_profit_orders")
+        if isinstance(direct_orders, list) and direct_orders:
+            return all(PositionManager._take_profit_order_has_size(item) for item in direct_orders)
+        ladder = handoff.get("tp_ladder")
+        if not isinstance(ladder, list) or not ladder:
+            return False
+        has_fractions = PositionManager._has_take_profit_ladder_size_list(
+            handoff=handoff,
+            ladder=ladder,
+            keys=("tp_reduce_fractions", "take_profit_reduce_fractions"),
+        )
+        has_qtys = PositionManager._has_take_profit_ladder_size_list(
+            handoff=handoff,
+            ladder=ladder,
+            keys=("tp_reduce_qtys", "take_profit_reduce_qtys"),
+        )
+        return has_fractions != has_qtys
+
+    @staticmethod
+    def _has_take_profit_ladder_size_list(
+        *,
+        handoff: dict[str, Any],
+        ladder: list[Any],
+        keys: tuple[str, ...],
+    ) -> bool:
+        for key in keys:
+            values = handoff.get(key)
+            if isinstance(values, list) and len(values) == len(ladder) and values:
+                return True
+        return False
+
+    @staticmethod
+    def _take_profit_order_has_size(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        has_ratio = item.get("price_ratio") not in (None, "") or item.get("target_ratio") not in (None, "") or item.get("ratio") not in (None, "")
+        has_fraction = item.get("reduce_fraction") not in (None, "")
+        has_qty = item.get("reduce_qty") not in (None, "")
+        return has_ratio and (has_fraction != has_qty)
 
     @staticmethod
     def _contrarian_probe_expired(*, runtime_state: dict[str, Any], has_open_risk: bool) -> bool:

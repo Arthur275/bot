@@ -99,6 +99,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/overview":
             self._send_json(OVERVIEW_CACHE.get(DashboardPaths.from_env()))
             return
+        if parsed.path == "/favicon.ico":
+            self._send_file(STATIC_ROOT / "favicon.svg")
+            return
         if parsed.path in {"", "/"}:
             self._send_file(STATIC_ROOT / "index.html")
             return

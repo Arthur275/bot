@@ -78,6 +78,12 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     quant_metadata = quant_cycle.get("metadata", {})
     quant_risk = quant_decision.get("risk_report", {}) if isinstance(quant_decision, dict) else {}
     quant_regime = quant_decision.get("regime_state", {}) if isinstance(quant_decision, dict) else {}
+    quant_sizing = quant_decision.get("sizing_decision", {}) if isinstance(quant_decision, dict) else {}
+    quant_sizing = quant_sizing if isinstance(quant_sizing, dict) else {}
+    quant_setup = quant_decision.get("setup_state", {}) if isinstance(quant_decision, dict) else {}
+    quant_setup = quant_setup if isinstance(quant_setup, dict) else {}
+    quant_trigger = quant_decision.get("trigger_state", {}) if isinstance(quant_decision, dict) else {}
+    quant_trigger = quant_trigger if isinstance(quant_trigger, dict) else {}
     quant_scheduler_status = _read_latest_quant_scheduler_status(paths.quant_root) or quant_cycle.get("scheduler_status", {})
     quant_db_counts = _read_quant_duckdb_counts(quant_analysis_root / "quant_analysis.duckdb")
     decision_review_report_present = (bot_runtime / "reviews" / "latest_decision_review.json").exists()
@@ -152,6 +158,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "governance": _factor_governance_summary(factor_governance),
         },
         "quant": {
+            "requested_action": bot_cycle.get("requested_action") or quant_decision.get("action") or quant_handoff.get("action") or "",
             "action": bot_cycle.get("effective_action") or quant_decision.get("action") or quant_handoff.get("action") or "",
             "direction": bot_cycle.get("direction") or quant_decision.get("direction") or quant_handoff.get("direction") or "",
             "risk_filter_status": bot_cycle.get("risk_filter_status") or quant_risk.get("risk_filter_status") or quant_handoff.get("risk_filter_status") or "",
@@ -161,10 +168,44 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "execution_block_reason": bot_cycle.get("execution_block_reason") or quant_handoff.get("execution_block_reason") or "",
             "reason_codes": _list(bot_cycle.get("reason_codes")) or _list(quant_risk.get("reason_codes")) or _list(quant_handoff.get("risk_reason_codes")),
             "risk_reason_codes": _list(bot_cycle.get("risk_reason_codes")) or _list(quant_handoff.get("risk_reason_codes")),
+            "transition_reason_codes": _first_list_present(bot_cycle.get("transition_reason_codes"), quant_handoff.get("transition_reason_codes")),
+            "sizing_reason_codes": _first_list_present(
+                bot_cycle.get("sizing_reason_codes"),
+                quant_sizing.get("reason_codes"),
+                quant_handoff.get("sizing_reason_codes"),
+            ),
             "supporting_factors": quant_handoff.get("supporting_factor_codes", [])[:10],
             "opposing_factors": quant_handoff.get("opposing_factor_codes", [])[:10],
             "veto_factors": quant_handoff.get("veto_factor_codes", [])[:10],
             "degrade_flags": bot_cycle.get("degrade_flags") or quant_risk.get("degrade_flags") or quant_handoff.get("degrade_flags") or [],
+            "runtime_vetoes": _first_list_present(bot_cycle.get("runtime_vetoes"), quant_risk.get("runtime_vetoes"), quant_handoff.get("runtime_vetoes")),
+            "research_gate_status": _first_present(bot_cycle.get("research_gate_status"), quant_risk.get("research_gate_status"), quant_handoff.get("research_gate_status")),
+            "research_gate_reasons": _first_list_present(bot_cycle.get("research_gate_reasons"), quant_risk.get("research_gate_reasons"), quant_handoff.get("research_gate_reasons")),
+            "execution_allowed": _first_present(bot_cycle.get("execution_allowed"), quant_handoff.get("execution_allowed")),
+            "position_size_pct": _first_present(bot_cycle.get("position_size_pct"), quant_decision.get("position_size_pct"), quant_handoff.get("position_size_pct")),
+            "executable_size_pct": _first_present(bot_cycle.get("executable_size_pct"), quant_handoff.get("executable_size_pct")),
+            "signal_size_pct": _first_present(bot_cycle.get("signal_size_pct"), quant_sizing.get("signal_size_pct"), quant_handoff.get("signal_size_pct")),
+            "position_cap_pct": _first_present(bot_cycle.get("position_cap_pct"), quant_risk.get("position_cap"), quant_handoff.get("position_cap_pct")),
+            "probe_source": _first_present(bot_cycle.get("probe_source"), quant_decision.get("probe_source"), quant_handoff.get("probe_source")),
+            "probe_risk_tier": _first_present(bot_cycle.get("probe_risk_tier"), quant_decision.get("probe_risk_tier"), quant_handoff.get("probe_risk_tier")),
+            "probe_expiry_bars": _first_present(bot_cycle.get("probe_expiry_bars"), quant_decision.get("probe_expiry_bars"), quant_handoff.get("probe_expiry_bars")),
+            "probe_expiry_timeframe": _first_present(bot_cycle.get("probe_expiry_timeframe"), quant_decision.get("probe_expiry_timeframe"), quant_handoff.get("probe_expiry_timeframe")),
+            "probe_invalid_if_no_followthrough": _first_present(
+                bot_cycle.get("probe_invalid_if_no_followthrough"),
+                quant_decision.get("probe_invalid_if_no_followthrough"),
+                quant_handoff.get("probe_invalid_if_no_followthrough"),
+            ),
+            "invalidate_conditions": _first_list_present(bot_cycle.get("invalidate_conditions"), _nested(quant_decision, "exit_plan", "invalidate_conditions"), quant_handoff.get("invalidate_conditions")),
+            "setup_direction": _first_present(bot_cycle.get("setup_direction"), quant_setup.get("setup_direction"), quant_handoff.get("setup_direction")),
+            "trigger_direction": _first_present(bot_cycle.get("trigger_direction"), quant_trigger.get("trigger_direction"), quant_handoff.get("trigger_direction")),
+            "trigger_ready": _first_present(bot_cycle.get("trigger_ready"), quant_trigger.get("trigger_ready"), quant_handoff.get("trigger_ready")),
+            "setup_strength": _first_present(bot_cycle.get("setup_strength"), quant_setup.get("setup_strength"), quant_handoff.get("setup_strength")),
+            "entry_timing_score": _first_present(bot_cycle.get("entry_timing_score"), quant_trigger.get("entry_timing_score"), quant_handoff.get("entry_timing_score")),
+            "breakout_support": _first_present(bot_cycle.get("breakout_support"), quant_trigger.get("breakout_support"), quant_handoff.get("breakout_support")),
+            "retest_support": _first_present(bot_cycle.get("retest_support"), quant_trigger.get("retest_support"), quant_handoff.get("retest_support")),
+            "slope_support": _first_present(bot_cycle.get("slope_support"), quant_trigger.get("slope_support"), quant_handoff.get("slope_support")),
+            "overlay_bias": _first_present(bot_cycle.get("overlay_bias"), quant_handoff.get("overlay_bias")),
+            "overlay_summary": _first_present(bot_cycle.get("overlay_summary"), quant_handoff.get("overlay_summary")),
             "data_health_score": _first_present(bot_cycle.get("data_health_score"), quant_risk.get("data_health_score"), quant_handoff.get("data_health_score")),
             "market_data_mode": _first_present(bot_cycle.get("market_data_mode"), quant_metadata.get("market_data_mode"), quant_handoff.get("market_data_mode")),
             "consensus_quality": _first_present(bot_cycle.get("consensus_quality"), quant_metadata.get("consensus_quality"), quant_handoff.get("consensus_quality")),
@@ -1223,6 +1264,13 @@ def _first_present(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _first_list_present(*values: Any) -> list[Any]:
+    for value in values:
+        if isinstance(value, list) and value:
+            return value
+    return []
 
 
 def _list(value: Any) -> list[Any]:

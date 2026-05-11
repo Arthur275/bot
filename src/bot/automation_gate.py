@@ -15,6 +15,7 @@ ENTRY_ACTIONS = {
 }
 HIGH_RISK_ACTIONS = {PositionAction.REDUCE.value, PositionAction.EXIT.value}
 PROTECT_ACTIONS = {"protective_stop_repair", "protect", "maintain_protective_stop"}
+POST_ENTRY_RISK_TARGETS = {"advance_breakeven_stop", "advance_trailing_stop"}
 DEFAULT_KILL_SWITCH_PATH = Path("runtime/controls/disable_real_execution.flag")
 
 
@@ -57,6 +58,8 @@ def evaluate_real_order_gate(
     execution_plan = payload.get("execution_plan") or {}
     runtime_snapshot = payload.get("runtime_snapshot") or {}
     position = runtime_snapshot.get("position") or {}
+    adapter_capabilities = payload.get("adapter_capabilities") or {}
+    command_targets = _command_targets(payload)
 
     if str(payload.get("runtime_mode") or "") != "real":
         reason_codes.append("runtime_mode_not_real")
@@ -64,6 +67,14 @@ def evaluate_real_order_gate(
         reason_codes.append("engine_mode_not_strict_live")
     if bool(payload.get("blocked", False)) or bool(payload.get("degraded", False)):
         reason_codes.append("cycle_blocked_or_degraded")
+    if POST_ENTRY_RISK_TARGETS.intersection(command_targets):
+        _append_post_entry_risk_gate_reasons(
+            reason_codes=reason_codes,
+            command_targets=command_targets,
+            adapter_capabilities=adapter_capabilities,
+        )
+    if _has_strategy_tp_ladder(handoff) and not _has_take_profit_order(command_targets):
+        reason_codes.append("take_profit_orders_not_planned")
     if action not in ENTRY_ACTIONS and action not in HIGH_RISK_ACTIONS and action not in PROTECT_ACTIONS:
         reason_codes.append("action_not_executable")
 
@@ -134,6 +145,35 @@ def _has_ready_preflight(payload: dict[str, Any], target: str) -> bool:
         if item.get("target") == target and item.get("status") == "preflight_ready" and not item.get("error"):
             return True
     return False
+
+
+def _command_targets(payload: dict[str, Any]) -> set[str]:
+    targets = {str(target) for target in payload.get("command_targets") or [] if str(target)}
+    for command in payload.get("execution_commands") or []:
+        if isinstance(command, dict) and command.get("target"):
+            targets.add(str(command.get("target")))
+    return targets
+
+
+def _has_strategy_tp_ladder(handoff: dict[str, Any]) -> bool:
+    ladder = handoff.get("tp_ladder")
+    return isinstance(ladder, list) and len(ladder) > 0
+
+
+def _has_take_profit_order(command_targets: set[str]) -> bool:
+    return any(target == "take_profit_order" or target.startswith("take_profit_order:") for target in command_targets)
+
+
+def _append_post_entry_risk_gate_reasons(
+    *,
+    reason_codes: list[str],
+    command_targets: set[str],
+    adapter_capabilities: dict[str, Any],
+) -> None:
+    if "advance_breakeven_stop" in command_targets and adapter_capabilities.get("supports_breakeven_update") is not True:
+        reason_codes.append("breakeven_update_not_supported")
+    if "advance_trailing_stop" in command_targets and adapter_capabilities.get("supports_trailing_stop_update") is not True:
+        reason_codes.append("trailing_stop_update_not_supported")
 
 
 def _append_protective_repair_gate_reasons(
