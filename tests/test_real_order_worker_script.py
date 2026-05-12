@@ -605,6 +605,48 @@ def test_real_order_worker_marks_take_profit_unconfirmed_for_recovery(tmp_path: 
     assert tp_result["details"]["unconfirmed_submission_result"]["accepted"] is True
 
 
+def test_real_order_worker_blocks_take_profit_if_kill_switch_appears_after_entry_stop(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path))
+    package["execution_commands"].extend(
+        [
+            {
+                "command_type": "order",
+                "operation": "upsert",
+                "target": "maintain_protective_stop",
+                "idempotency_key": "stop:key",
+                "reason": "protective_stop_required",
+                "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": [1.01]},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key",
+                "reason": "take_profit_level:1",
+                "payload": {"direction": "long", "price_ratio": 1.01, "reduce_fraction": 0.5, "level": 1},
+            },
+        ]
+    )
+    package["preflight"].extend(
+        [
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ]
+    )
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = FakeRealOrderAdapter(create_kill_switch_on_submit=Path(args.kill_switch_path))
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    assert [command.target for command in adapter.executed_commands] == ["entry_order", "maintain_protective_stop"]
+    tp_result = result["results"][-1]
+    assert tp_result["target"] == "take_profit_order"
+    assert tp_result["reason"] == "kill_switch_enabled_before_submit"
+
+
 def test_real_order_worker_cancels_ghost_stop_before_entry(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.submit_real_orders = True
@@ -690,6 +732,28 @@ def test_real_order_worker_cleans_algo_orders_after_exit(tmp_path: Path) -> None
     assert adapter.canceled_algo_orders == [{"algoId": "456", "algoClOrdId": "ethbot-ps-exit", "status": "canceled"}]
 
 
+def test_real_order_worker_blocks_exit_cleanup_if_kill_switch_appears_after_exit_order(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    _write_package(Path(args.package_path), action="exit")
+    adapter = FakeRealOrderAdapter(
+        position_state="ENTERED",
+        direction="long",
+        protective_stop_present=True,
+        open_algo_orders=[_algo_order(algoId="456", clientAlgoId="ethbot-ps-exit")],
+        create_kill_switch_on_submit=Path(args.kill_switch_path),
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    assert [command.target for command in adapter.executed_commands] == ["exit_order"]
+    assert adapter.canceled_algo_orders == []
+    cleanup_result = result["results"][-1]
+    assert cleanup_result["target"] == "cleanup_open_algo_orders"
+    assert cleanup_result["reason"] == "kill_switch_enabled_before_submit"
+
+
 def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.submit_real_orders = True
@@ -721,6 +785,40 @@ def test_real_order_worker_refreshes_stop_after_reduce_before_cleanup(tmp_path: 
         "maintain_protective_stop",
     ]
     assert adapter.canceled_algo_orders == [{"algoId": "789", "algoClOrdId": "ethbot-ps-old", "status": "canceled"}]
+
+
+def test_real_order_worker_blocks_reduce_stop_refresh_if_kill_switch_appears_after_reduce(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.submit_real_orders = True
+    package = _write_package(Path(args.package_path), action="reduce")
+    package["execution_commands"].append(
+        {
+            "command_type": "order",
+            "operation": "upsert",
+            "target": "maintain_protective_stop",
+            "idempotency_key": "reduce-stop:key",
+            "reason": "protective_stop_required",
+            "payload": {"direction": "long", "initial_stop_loss": 0.97, "tp_ladder": []},
+        }
+    )
+    package["preflight"].append({"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""})
+    Path(args.package_path).write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
+    adapter = FakeRealOrderAdapter(
+        position_state="ENTERED",
+        direction="long",
+        protective_stop_present=True,
+        open_algo_orders=[_algo_order(algoId="789", clientAlgoId="ethbot-ps-old")],
+        create_kill_switch_on_submit=Path(args.kill_switch_path),
+    )
+
+    result = real_order_worker.run_once(args=args, adapter_factory=lambda _: adapter)
+
+    assert result["status"] == "partial_failed"
+    assert [command.target for command in adapter.executed_commands] == ["reduce_order"]
+    assert adapter.canceled_algo_orders == []
+    stop_result = result["results"][-1]
+    assert stop_result["target"] == "maintain_protective_stop"
+    assert stop_result["reason"] == "kill_switch_enabled_before_submit"
 
 
 def test_real_order_worker_reduce_cleanup_keeps_new_and_external_stops(tmp_path: Path) -> None:

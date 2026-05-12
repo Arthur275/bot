@@ -67,7 +67,7 @@ const valueLabels = {
   error: "错误",
   ok: "正常",
   allowed: "允许",
-  blocked: "阻断",
+  blocked: "未放行",
   yes: "是",
   no: "否",
   none: "暂无",
@@ -124,6 +124,7 @@ const valueLabels = {
   trigger_ready_for_small_probe: "触发器允许小探针",
   trigger_ready_but_research_not_enough: "触发器就绪但研究证据不足",
   trigger_ready_but_conviction_not_enough: "触发器就绪但信心不足",
+  monitor: "观察 / 等待确认",
   net_edge_below_cost: "净优势低于成本",
   net_edge_pct: "净优势",
   bundle_missing: "研究包缺失",
@@ -176,6 +177,10 @@ const valueLabels = {
   "coinglass_liq_risk_side:short": "CoinGlass 空头清算风险",
   okx_shorts_crowded: "OKX 空头拥挤",
   regime_alignment: "市场状态一致",
+  trigger_not_ready: "触发器未就绪",
+  conviction_below_probe_floor: "信心/论证分未到小仓位门槛",
+  candidate_package_waiting: "未生成候选执行包",
+  research_quality_diagnostic: "研究质量诊断未达标",
   "regime:long": "大周期多头",
   "regime:neutral": "大周期中性",
   supporting_factor: "支持因子",
@@ -203,6 +208,7 @@ const valueLabels = {
   trigger_15m_ready: "15分钟触发就绪",
   setup_15m: "15分钟设置层",
   gate_4h: "4小时闸门",
+  block_long: "阻断多头",
   block_short: "阻断空头",
   score: "评分",
   health: "健康",
@@ -229,6 +235,36 @@ const valueLabels = {
   truth_candidate_unqualified: "真实候选不合格",
   wf_return_drift_high: "走前收益漂移偏高",
   win_rate_low: "胜率偏低",
+  not_live_ready: "未进 live",
+  live_ready_candidate: "live 候选已就绪",
+  scan_row_count_below_live_minimum: "扫描样本数未达 live 门槛",
+  scan_required_fields_missing: "扫描必需字段缺失",
+  scan_required_complete_rows_zero: "扫描必需字段完整行数为 0",
+  walk_forward_evidence_missing: "走前验证证据缺失",
+  wf_quality_insufficient: "走前质量折数不足",
+  wf_trade_share_low: "走前交易占比偏低",
+  factor_governance_not_evaluated: "因子治理未完成评估",
+  net_expectancy_non_positive: "净期望不为正",
+  candidate_authenticity_blocked: "候选诊断阻断 live",
+  candidate_authenticity_not_live_ready: "候选诊断未达 live",
+  needs_review: "需复核",
+  suspect_false_positive: "疑似假阳性",
+  research_only: "仅研究",
+  candidate_watch: "可观察",
+  not_promising: "暂不看好",
+  review_candidate: "仅研究候选",
+  qualified_candidate: "合格候选",
+  live_candidate: "live 候选",
+  authenticity_missing: "报告未含候选诊断",
+  observation_rows_low: "观察行数偏少",
+  no_signals: "无信号",
+  signal_count_low: "信号数偏少",
+  signal_days_low: "信号天数偏少",
+  single_day_signal_cluster: "信号集中在单日",
+  high_win_rate_low_sample: "高胜率但样本太少",
+  return_concentration_high: "收益集中度偏高",
+  time_alignment_sensitive_factor: "时间对齐敏感因子",
+  factor_value_repetition_high: "因子值重复度偏高",
 };
 
 const sourceLabels = {
@@ -274,6 +310,7 @@ function text(value, fallback = "暂无") {
 
 function humanizeCode(value) {
   return String(value)
+    .replace(/\b(research|execution|risk|real_order|automation)_gate\b/gi, "$1 闸门")
     .replace(/[_-]+/g, " ")
     .replace(/\b(\d+)h\b/gi, "$1小时")
     .replace(/\b(\d+)m\b/gi, "$1分钟")
@@ -317,7 +354,7 @@ function humanizeCode(value) {
     .replace(/\bstale\b/gi, "过期")
     .replace(/\bunavailable\b/gi, "不可用")
     .replace(/\bmissing\b/gi, "缺失")
-    .replace(/\bblocked\b/gi, "阻断")
+    .replace(/\bblocked\b/gi, "未放行")
     .replace(/\bveto\b/gi, "否决")
     .replace(/\bok\b/gi, "正常")
     .replace(/\bflag\b/gi, "标记")
@@ -373,7 +410,6 @@ function humanizeCode(value) {
     .replace(/\bdegraded\b/gi, "降级")
     .replace(/\baging\b/gi, "接近过期")
     .replace(/\bconfirm\b/gi, "确认层")
-    .replace(/\bgate\b/gi, "闸门")
     .replace(/\bstatus\b/gi, "状态")
     .replace(/\baligned\b/gi, "一致")
     .replace(/\bscore\b/gi, "评分")
@@ -647,11 +683,12 @@ function formatRunId(value) {
 
 function levelForStatus(value, fallback = "gray") {
   const raw = String(value || "").toLowerCase();
-  if (["running", "fresh", "ok", "pass", "allowed", "submitted_all_accepted", "active"].includes(raw)) return "green";
+  if (["running", "fresh", "ok", "pass", "allowed", "submitted_all_accepted", "active", "candidate_watch", "qualified_candidate", "live_candidate"].includes(raw)) return "green";
   if (["clear", "watch", "ready"].includes(raw)) return "blue";
-  if (["degraded", "stale", "aging", "needs_attention"].includes(raw)) return "yellow";
-  if (["blocked", "veto", "error", "on", "partial_failed", "all_failed", "unknown_after_exception"].includes(raw)) return "red";
-  if (["missing", "unavailable", "disabled", "off"].includes(raw)) return "gray";
+  if (["degraded", "stale", "aging", "needs_attention", "needs_review", "research_only", "suspect_false_positive", "authenticity_missing"].includes(raw)) return "yellow";
+  if (["veto", "error", "on", "partial_failed", "all_failed", "unknown_after_exception"].includes(raw)) return "red";
+  if (raw === "blocked") return "yellow";
+  if (["missing", "unavailable", "disabled", "off", "not_promising", "review_candidate", "not_live_ready"].includes(raw)) return "gray";
   return fallback;
 }
 
@@ -660,11 +697,38 @@ function levelForDisplay(value, fallback = "") {
   const label = text(value, "").toLowerCase();
   const merged = `${raw} ${label}`;
   if (!raw && !label) return fallback;
-  if (/(阻断|否决|错误|失败|不可用|缺失|过低|不合格|禁用|blocked|veto|error|failed|missing|unavailable)/i.test(merged)) return "red";
-  if (/(降级|预警|接近过期|不足|拥挤|偏高|受限|观察|degraded|warning|stale|aging|insufficient|crowded|restricted|watch)/i.test(merged)) return "yellow";
+  if (/(否决|错误|失败|不可用|缺失|过低|不合格|禁用|veto|error|failed|missing|unavailable)/i.test(merged)) return "red";
+  if (/(阻断|未放行|降级|预警|接近过期|不足|拥挤|偏高|受限|观察|blocked|degraded|warning|stale|aging|insufficient|crowded|restricted|watch)/i.test(merged)) return "yellow";
   if (/(正常|运行中|通过|可用|新鲜|清晰|允许|存在|就绪|是|running|ok|pass|available|fresh|clear|allowed|present|ready|yes)/i.test(merged)) return "green";
   if (/(模拟|仅观察|等待|中性|参考|observe|wait|neutral|reference)/i.test(merged)) return "blue";
   return fallback;
+}
+
+function reasonChipLabel(severity, context = "") {
+  if (context === "diagnostic") return severity === "hard" ? "诊断" : severityLabel(severity);
+  if (context === "execution") return severity === "hard" ? "未放行" : severityLabel(severity);
+  return severityLabel(severity);
+}
+
+function reasonChipTitle(row, context = "") {
+  const code = row?.code || "";
+  const prefix = context === "diagnostic" ? "这是研究诊断，不参与自动下单。" : "";
+  const codeText = code && code !== "none" ? `原始代码：${code}` : "";
+  return [prefix, codeText].filter(Boolean).join(" ");
+}
+
+function cycleStatusLabel(status) {
+  const raw = String(status || "").toLowerCase();
+  if (raw === "blocked") return "未入场";
+  if (raw === "incomplete_snapshot_only") return "快照未完成";
+  if (raw === "incomplete_missing_scheduler_status") return "状态缺失";
+  return text(status || "unknown");
+}
+
+function executionOpportunityText(value) {
+  const raw = String(value || "").toLowerCase();
+  if (raw === "blocked") return "未放行";
+  return text(value);
 }
 
 function applyValueLevel(el, value, fallback = "") {
@@ -825,9 +889,13 @@ function compactPct(value) {
 
 function probeStatus(quant) {
   if (!quant?.probe_source) return { label: "未启用试探仓", level: "gray" };
-  if (quant.execution_allowed === false) return { label: "试探仓被阻断", level: "red" };
+  if (quant.execution_allowed === false) return { label: "试探仓未放行", level: "yellow" };
   if (quant.execution_allowed === true) return { label: "试探仓可执行", level: isStrongMomentumProbe(quant) ? "blue" : "green" };
   return { label: "试探仓观察", level: isStrongMomentumProbe(quant) ? "blue" : "gray" };
+}
+
+function executionModeText(runtime) {
+  return runtime?.real_worker?.mode === "submit_enabled" ? "真实下单已启用" : "模拟执行";
 }
 
 function uniqueReasonRows(...groups) {
@@ -845,7 +913,7 @@ function uniqueReasonRows(...groups) {
 }
 
 function severityLabel(severity) {
-  if (severity === "hard") return "阻断";
+  if (severity === "hard") return "硬拦截";
   if (severity === "degraded") return "降级";
   return "观察";
 }
@@ -862,7 +930,7 @@ function normalizeReasonRows(rows, fallbackCodes = []) {
   return items;
 }
 
-function renderReasonChips(id, rows, level = "") {
+function renderReasonChips(id, rows, level = "", options = {}) {
   const wrap = $(id);
   clearElement(wrap);
   const normalizedRows = rows && rows.length > 0 ? rows.slice(0, 8) : [{ code: "none", text: "暂无" }];
@@ -874,11 +942,9 @@ function renderReasonChips(id, rows, level = "") {
     rank.className = "reason-rank";
     rank.textContent = String(index + 1);
     chip.appendChild(rank);
-    appendText(chip, "span", severityLabel(severity), "reason-severity");
+    appendText(chip, "span", reasonChipLabel(severity, options.context || ""), "reason-severity");
     appendText(chip, "strong", text(row.text || row.code));
-    if (row.code && row.code !== "none") {
-      chip.title = `原始代码：${row.code}`;
-    }
+    chip.title = reasonChipTitle(row, options.context || "");
     wrap.appendChild(chip);
   });
 }
@@ -889,7 +955,9 @@ function renderProbeDiagnostics(quant) {
   const summary = $("probeDiagnosticSummary");
   const probeSource = quant.probe_source || "";
   if (!probeSource) {
-    summary.textContent = "当前没有试探仓信号；普通开仓闸门仍按原规则判断。";
+    const setup = ratio(quant.setup_strength);
+    const trigger = boolText(quant.trigger_ready);
+    summary.textContent = `当前没有试探仓信号；结构强度 ${setup} 只是方向证据，不等于允许下单。触发就绪：${trigger}。`;
   } else if (isStrongMomentumProbe(quant)) {
     const action = text(quant.requested_action || quant.action);
     const size = compactPct(quant.executable_size_pct ?? quant.position_size_pct);
@@ -937,7 +1005,68 @@ function renderProbeDiagnostics(quant) {
     quant.runtime_vetoes || [],
     quant.invalidate_conditions || []
   );
-  renderReasonChips("probeDiagnosticReasons", reasons);
+  renderReasonChips("probeDiagnosticReasons", reasons, "", { context: "execution" });
+}
+
+function buildDecisionBrief(data) {
+  const quant = data.quant || {};
+  const bot = data.bot || {};
+  const runtime = data.runtime || {};
+  const research = quant.research || {};
+  const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
+  const direction = text(quant.direction || bot.position_direction);
+  const modeText = executionModeText(runtime);
+  const confidence = pct(quant.confidence);
+  const thesis = pct(quant.thesis_score);
+  const setup = ratio(quant.setup_strength);
+  const triggerReady = quant.trigger_ready === true;
+  const candidatePresent = Boolean(bot.candidate_package?.present);
+  const executionAllowed = quant.execution_allowed === true;
+  const entryAction = action.startsWith("entry") || action === "small_probe";
+  const researchBlocked = ["blocked", "veto"].includes(String(research.status || research.decision || "").toLowerCase());
+  const reasons = [];
+  if (!triggerReady) reasons.push("触发器未就绪");
+  if (!entryAction) reasons.push("未形成开仓动作");
+  if (entryAction && !candidatePresent) reasons.push("候选执行包未生成");
+  if (!executionAllowed) reasons.push("执行闸门未放行");
+  if (researchBlocked) reasons.push("研究质量诊断未达标");
+
+  if (entryAction && candidatePresent && executionAllowed) {
+    return {
+      badge: "可执行候选",
+      level: "green",
+      title: `当前可执行：${text(action)} ${direction}`,
+      text: `候选执行包已生成，执行闸门已放行。当前执行模式：${modeText}。`,
+      mode: modeText,
+      gate: `信心 ${confidence} / 论证 ${thesis}`,
+      research: `${text(research.status || research.decision)}，${text(research.freshness)}`,
+    };
+  }
+
+  const triggerText = triggerReady ? "触发器已就绪" : "触发器未就绪";
+  const coreReason = reasons.length ? reasons.slice(0, 3).join("，") : text(quant.execution_block_reason || "wait");
+  return {
+    badge: "当前等待",
+    level: "blue",
+    title: `当前未下单：${direction}方向，等待确认`,
+    text: `${coreReason}。结构强度 ${setup} 是方向证据，不等于下单许可；信心 ${confidence}，论证 ${thesis}。`,
+    mode: modeText,
+    gate: triggerText,
+    research: researchBlocked ? "研究诊断未达标，不是前端故障" : `${text(research.status || research.decision)}，${text(research.freshness)}`,
+  };
+}
+
+function renderDecisionBrief(data) {
+  const brief = buildDecisionBrief(data);
+  setBadge($("decisionBriefBadge"), brief.badge, brief.level);
+  $("decisionBriefTitle").textContent = brief.title;
+  $("decisionBriefText").textContent = brief.text;
+  $("decisionBriefMode").textContent = brief.mode;
+  $("decisionBriefGate").textContent = brief.gate;
+  $("decisionBriefResearch").textContent = brief.research;
+  applyValueLevel($("decisionBriefMode"), brief.mode);
+  applyValueLevel($("decisionBriefGate"), brief.gate, brief.level);
+  applyValueLevel($("decisionBriefResearch"), brief.research, brief.level);
 }
 
 function renderTriggerWatch(triggerWatch) {
@@ -1027,6 +1156,57 @@ function renderGovernanceRows(rows) {
     for (const [label, raw] of cells) {
       const cell = appendText(item, "span", label);
       applyValueLevel(cell, raw);
+    }
+    wrap.appendChild(item);
+  }
+}
+
+function promotionSummaryText(promotion) {
+  const generated = promotion?.generated_at ? `最近刷新 ${displayTimestamp(promotion.generated_at)}；` : "";
+  const latest = promotion?.latest_promotion_at ? `最近晋升 ${displayTimestamp(promotion.latest_promotion_at)}；` : "最近晋升 暂无 qualified/live；";
+  const counts = `review ${number(promotion?.review_candidate_count || 0)}，qualified ${number(promotion?.qualified_candidate_count || 0)}，live ${number(promotion?.live_candidate_count || 0)} / 总候选 ${number(promotion?.candidate_count || 0)}`;
+  const liveText = promotion?.valid_for_live_decision ? "研究闸门已有 live 候选可参与实时决策。" : "当前没有 live 候选，研究闸门仍不会放行。";
+  const issues = promotion?.issues?.length ? ` 主要问题：${promotion.issues.slice(0, 3).map((code) => text(code)).join("，")}。` : "";
+  return `${generated}${latest}${counts}。${liveText}${issues}`;
+}
+
+function renderCandidatePromotion(promotion) {
+  const summary = promotion || {};
+  setBadge($("candidatePromotionBadge"), summary.label || summary.status || "missing", levelForStatus(summary.status || "missing"));
+  $("candidatePromotionSummary").textContent = promotionSummaryText(summary);
+
+  const wrap = $("candidatePromotionRows");
+  clearElement(wrap);
+  const header = document.createElement("div");
+  header.className = "table-row table-head promotion-row";
+  ["候选", "研究状态", "Live 状态", "触发", "WF", "未进 live 原因"].forEach((label) => appendText(header, "span", label));
+  wrap.appendChild(header);
+
+  const rows = summary.top_candidates && summary.top_candidates.length > 0 ? summary.top_candidates.slice(0, 8) : [];
+  if (!rows.length) {
+    appendText(wrap, "div", "暂无候选晋升记录", "empty-row");
+    return;
+  }
+
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "table-row promotion-row";
+    const candidateLabel = row.candidate_id || "未知候选";
+    const reasons = row.live_block_reasons || [];
+    const reasonText = reasons.length ? reasons.slice(0, 3).map((code) => text(code)).join("，") : "已进 live / 无阻断";
+    const wfText = `${number(row.walk_forward_quality_passed_folds)} 折 / ${pct(row.walk_forward_passed_trade_share)}`;
+    const cells = [
+      [candidateLabel, candidateLabel],
+      [text(row.candidate_review_status), row.candidate_review_status],
+      [text(row.live_candidate_status), row.live_candidate_status],
+      [number(row.total_triggers), row.total_triggers],
+      [wfText, row.walk_forward_passed_trade_share],
+      [reasonText, reasons.join(",") || row.live_candidate_status],
+    ];
+    for (const [label, raw] of cells) {
+      const cell = appendText(item, "span", label);
+      applyValueLevel(cell, raw);
+      if (Array.isArray(reasons) && reasons.length) cell.title = reasons.map((code) => text(code)).join("，");
     }
     wrap.appendChild(item);
   }
@@ -1148,6 +1328,17 @@ function latestCycleLabel(quant, bot) {
   return cycle.sample_id ? formatRunId(cycle.sample_id).split("\n")[0] : "暂无";
 }
 
+function reviewStatusText(status) {
+  const normalized = String(status || "unavailable").toLowerCase();
+  const labels = {
+    clear: "解释清晰",
+    watch: "需要观察",
+    blocked: "审查阻断",
+    unavailable: "审查不可用",
+  };
+  return labels[normalized] || text(status || "unavailable");
+}
+
 function buildNoTradeSummary(quant, bot) {
   const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
   const allowedAction = action.startsWith("entry") || action === "small_probe";
@@ -1199,14 +1390,14 @@ function renderSummary(data) {
   $("summaryCandidate").textContent = candidate.present ? "1 个候选" : "缺失";
   $("summarySnapshotSource").textContent = candidate.snapshot_source ? text(candidate.snapshot_source) : listText(quant.consensus_sources);
   $("summaryBundleGenerated").textContent = compactDateTime(candidate.generated_at);
-  setText("summaryReview", review.review_status || "unavailable");
+  $("summaryReview").textContent = reviewStatusText(review.review_status);
   $("summaryReview").className = `headline-value ${levelForStatus(review.review_status || "unavailable")}`;
   $("summaryRealWorker").textContent = text(runtime.real_worker?.mode || runtime.real_worker?.label || "unknown");
   $("summaryLastReview").textContent = review.generated_at ? compactDateTime(review.generated_at) : fmtAge(review.source_handoff_age_sec);
   $("summaryLatestCycle").textContent = latestCycleLabel(quant, bot);
   const noTrade = buildNoTradeSummary(quant, bot);
-  $("summaryBlockReason").textContent = action ? text(action) : noTrade.line;
-  $("summaryBlockReason").className = `headline-value ${riskLevel}`;
+  $("summaryBlockReason").textContent = noTrade.line;
+  $("summaryBlockReason").className = `headline-value ${action === "wait" || action === "observe_only" ? "blue" : riskLevel}`;
   $("summaryBlockMeta").textContent = noTrade.meta;
 }
 
@@ -1218,7 +1409,7 @@ function renderCharts(charts) {
   const cycleRows = charts?.cycle_status_timeline || [];
   const statusColors = {
     ok: chartPalette.green,
-    blocked: chartPalette.red,
+    blocked: chartPalette.yellow,
     degraded: chartPalette.yellow,
     unreliable: chartPalette.red,
     incomplete_snapshot_only: chartPalette.yellow,
@@ -1226,15 +1417,6 @@ function renderCharts(charts) {
     missing: chartPalette.gray,
   };
   const statusOrder = ["blocked", "incomplete_snapshot_only", "degraded", "ok"];
-  const statusNames = {
-    ok: "正常",
-    degraded: "降级",
-    incomplete_snapshot_only: "快照未完成",
-    incomplete_missing_scheduler_status: "状态缺失",
-    blocked: "阻断",
-    missing: "缺失",
-    unreliable: "不可靠",
-  };
   const rowTotal = Math.max(cycleRows.length, 1);
   const counts = statusOrder.map((status) => {
     const count = cycleRows.filter((row) => row.status === status).length;
@@ -1246,7 +1428,7 @@ function renderCharts(charts) {
     for (const item of counts.slice().reverse()) {
       const row = document.createElement("div");
       row.className = `status-count ${item.status}`;
-      appendText(row, "span", statusNames[item.status] || text(item.status));
+      appendText(row, "span", cycleStatusLabel(item.status));
       appendText(row, "b", `${item.count} (${(item.ratio * 100).toFixed(1)}%)`);
       countsWrap.appendChild(row);
     }
@@ -1271,7 +1453,7 @@ function renderCharts(charts) {
       axisLabel: {
         color: chartPalette.muted,
         fontSize: 11,
-        formatter: (value) => ["阻断", "快照未完成", "降级", "正常"][value] || "",
+        formatter: (value) => ["未入场", "快照未完成", "降级", "正常"][value] || "",
       },
       axisTick: { show: false },
       axisLine: { lineStyle: { color: chartPalette.grid } },
@@ -1295,7 +1477,7 @@ function renderCharts(charts) {
       trigger: "item",
       formatter: (item) => {
         const data = item?.data || {};
-        return `${statusNames[data.status] || text(data.status || "unknown")}<br/>${compactTime(data.generated_at)}<br/>${formatRunId(data.run_id || "")}`;
+        return `${cycleStatusLabel(data.status)}<br/>${compactTime(data.generated_at)}<br/>${formatRunId(data.run_id || "")}`;
       },
     },
   });
@@ -1449,7 +1631,8 @@ function updateExecutionStepper(runtime, review) {
   for (const [id, item, labelKey, ageKey] of rows) {
     const label = item[labelKey] || item.label || "unknown";
     const el = $(id);
-    el.textContent = `${text(label, "未知")} · ${fmtAge(item[ageKey])}`;
+    const displayLabel = labelKey === "review_status" ? reviewStatusText(label) : text(label, "未知");
+    el.textContent = `${displayLabel} · ${fmtAge(item[ageKey])}`;
     applyValueLevel(el, label);
     const row = el.closest("div");
     if (row) {
@@ -1461,12 +1644,11 @@ function updateExecutionStepper(runtime, review) {
 
 function renderTopbar(data) {
   const runtime = data.runtime || {};
-  const workerMode = runtime.real_worker?.mode || "";
   const killSwitch = runtime.kill_switch || {};
   const now = new Date();
   $("updatedAt").textContent = `最后更新：${now.toLocaleString()}`;
-  const modeText = workerMode === "submit_enabled" ? "真实下单已启用" : "模拟执行";
-  setPill($("orderModePill"), modeText, workerMode === "submit_enabled" ? "red" : "blue");
+  const modeText = executionModeText(runtime);
+  setPill($("orderModePill"), modeText, runtime.real_worker?.mode === "submit_enabled" ? "red" : "blue");
   setPill($("killSwitchPill"), `熔断：${killSwitch.enabled ? "开启" : "关闭"}`, killSwitch.enabled ? "red" : "green");
   $("modeNotice").textContent = `${modeText}；审查报告只读，不参与自动下单，最终以执行链路和风控结果为准。`;
 }
@@ -1478,6 +1660,7 @@ function render(data) {
   const review = data.decision_review || {};
 
   renderTopbar(data);
+  renderDecisionBrief(data);
   renderSummary(data);
   renderRuntime(data.runtime || {}, review);
   renderOptionalWorkers(data.optional_workers || {});
@@ -1502,6 +1685,7 @@ function render(data) {
     ["治理时间", governance.generated_at],
   ]);
   renderGovernanceRows(governance.rows || []);
+  renderCandidatePromotion(factor.candidate_promotion || {});
   renderSignalList("riskCodes", factor.top_reason_codes || []);
   renderSignalList("degradeFlags", factor.top_degrade_flags || []);
 
@@ -1519,9 +1703,9 @@ function render(data) {
     ["市场状态", quant.regime_bucket],
     ["查找表版本", quant.factor_lookup_version],
     ["自动化边界", quant.automation_boundary],
-    ["执行阻断原因", quant.execution_block_reason],
+    ["执行未放行原因", quant.execution_block_reason],
     ["执行层原因", quant.execution_layer_reasoning],
-    ["执行机会状态", quant.execution_opportunity_status],
+    ["执行机会状态", executionOpportunityText(quant.execution_opportunity_status)],
     ["执行警告", quant.execution_warnings || []],
   ]);
   renderTriggerWatch(quant.trigger_watch || {});
@@ -1558,7 +1742,7 @@ function render(data) {
     ["数据时间", research.dataset_timestamp],
     ["刷新周期", research.refresh_every ? `${research.refresh_every} 轮` : "未启用"],
   ]);
-  renderReasonChips("researchReasons", research.reason_texts || [], levelForStatus(research.status));
+  renderReasonChips("researchReasons", research.reason_texts || [], levelForStatus(research.status), { context: "diagnostic" });
   renderChips("supportingFactors", quant.supporting_factors || [], "green");
   renderChips("opposingFactors", quant.opposing_factors || quant.degrade_flags || [], "yellow");
   renderChips("vetoFactors", quant.veto_factors || [], "red");
@@ -1573,7 +1757,7 @@ function render(data) {
   const candidate = bot.candidate_package || {};
   $("candidateState").textContent = candidate.present ? "存在" : "缺失";
   applyValueLevel($("candidateState"), candidate.present ? "present" : "missing");
-  setBadge($("candidateGateBadge"), candidate.gate_allowed ? "allowed" : "blocked", candidate.gate_allowed ? "green" : "gray");
+  setBadge($("candidateGateBadge"), candidate.present ? (candidate.gate_allowed ? "allowed" : "waiting") : "missing", candidate.gate_allowed ? "green" : "gray");
   renderDetails("candidateDetails", [
     ["是否存在", candidate.present ? "yes" : "no"],
     ["执行包", candidate.package_id],
@@ -1581,7 +1765,7 @@ function render(data) {
     ["方向", candidate.direction],
     ["生成时间", candidate.generated_at],
     ["过期时间", candidate.expires_at],
-    ["闸门", candidate.gate_allowed ? "allowed" : "blocked"],
+    ["闸门", candidate.present ? (candidate.gate_allowed ? "allowed" : "waiting") : "missing"],
     ["命令", candidate.command_targets || []],
   ]);
   const cycle = bot.latest_cycle || {};
@@ -1595,8 +1779,8 @@ function render(data) {
   renderAudit(bot.worker_events || []);
 
   const reviewStatus = review.review_status || "unavailable";
-  setBadge($("reviewStatusBadge"), reviewStatus, levelForStatus(reviewStatus));
-  setText("reviewStatus", reviewStatus);
+  setBadge($("reviewStatusBadge"), reviewStatusText(reviewStatus), levelForStatus(reviewStatus));
+  setText("reviewStatus", reviewStatusText(reviewStatus));
   setText("reviewMode", review.review_mode);
   $("reviewRunId").textContent = formatRunId(review.source_run_id);
   $("reviewRunId").title = review.source_run_id || "";
@@ -1642,6 +1826,20 @@ function togglePause() {
   setPill($("refreshState"), refreshPaused ? "刷新：暂停" : "刷新：等待", refreshPaused ? "yellow" : "blue");
 }
 
+function activateTab(tab) {
+  const active = ["quant", "bot", "factor"].includes(tab) ? tab : "quant";
+  document.body.dataset.activeTab = active;
+  document.querySelectorAll("[data-tab-target]").forEach((button) => {
+    const selected = button.dataset.tabTarget === active;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+  for (const chart of Object.values(chartInstances)) chart.resize();
+}
+
+document.querySelectorAll("[data-tab-target]").forEach((button) => {
+  button.addEventListener("click", () => activateTab(button.dataset.tabTarget));
+});
 $("pauseBtn").addEventListener("click", togglePause);
 $("refreshBtn").addEventListener("click", refreshWithBanner);
 window.addEventListener("resize", () => {

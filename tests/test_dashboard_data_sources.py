@@ -221,6 +221,103 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             ],
         },
     )
+    _write_json(
+        quant_root / "runtime" / "reports" / "candidate_scan_feature_matrix_smoke.json",
+        {
+            "status": "ok",
+            "lab": "vectorbt_candidate_scan",
+            "generated_at": generated_at,
+            "candidate_count": 2,
+            "payload": {
+                "candidate_summaries": [
+                    {
+                        "candidate_id": "funding_rate",
+                        "factor_names": ["funding_rate"],
+                        "row_count": 46,
+                        "summary": {
+                            "total_signals": 4,
+                            "signal_rate": 0.088889,
+                            "win_rate_like": 1.0,
+                            "avg_return_pct": 0.580943,
+                        },
+                        "authenticity": {
+                            "verdict": "suspect_false_positive",
+                            "reason_codes": ["high_win_rate_low_sample", "time_alignment_sensitive_factor"],
+                            "total_rows": 46,
+                            "total_signals": 4,
+                            "signal_day_count": 1,
+                            "single_day_signal_ratio": 1.0,
+                            "top_return_contribution_ratio": 0.84,
+                        },
+                    },
+                    {
+                        "candidate_id": "entry_timing_score+setup_strength",
+                        "factor_names": ["entry_timing_score", "setup_strength"],
+                        "row_count": 80,
+                        "summary": {
+                            "total_signals": 40,
+                            "signal_rate": 0.5,
+                            "win_rate_like": 0.55,
+                            "avg_return_pct": 0.012,
+                        },
+                        "authenticity": {
+                            "verdict": "candidate_watch",
+                            "reason_codes": [],
+                            "total_rows": 80,
+                            "total_signals": 40,
+                            "signal_day_count": 4,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "fresh_research" / "all_results.json",
+        {
+            "timestamp": "20260511_150606",
+            "results": [
+                {
+                    "candidate_id": "funding_rate",
+                    "total_triggers": 4,
+                    "avg_return_pct": 0.580943,
+                    "win_rate": 1.0,
+                    "source_scan_generated_at": "2026-05-11T15:06:06",
+                    "candidate_review_status": "review_candidate",
+                    "live_candidate_status": "not_live_ready",
+                    "live_block_reasons": ["scan_row_count_below_live_minimum"],
+                    "walk_forward_quality_passed_folds": 0,
+                    "walk_forward_passed_trade_share": 0.0,
+                },
+                {
+                    "candidate_id": "entry_timing_score+setup_strength",
+                    "total_triggers": 40,
+                    "avg_return_pct": 0.012,
+                    "win_rate": 0.55,
+                    "source_scan_generated_at": "2026-05-11T15:07:06",
+                    "candidate_review_status": "qualified_candidate",
+                    "live_candidate_status": "live_candidate",
+                    "live_block_reasons": [],
+                    "walk_forward_quality_passed_folds": 3,
+                    "walk_forward_passed_trade_share": 0.72,
+                },
+            ],
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "fresh_research" / "producer_output_latest.json",
+        {
+            "issues": [],
+            "metadata": {
+                "generated_at": "2026-05-11T15:08:06",
+                "valid_for_live_decision": True,
+                "review_candidate_count": 1,
+                "qualified_candidate_count": 1,
+                "live_candidate_count": 1,
+                "candidate_count": 2,
+            },
+        },
+    )
     _write_json(quant_root / "runtime" / "analysis" / "factor_ingest_latest.json", {"generated_at": generated_at})
     _write_json(
         quant_root / "runtime" / "cycles" / "latest_strict_live" / "execution_handoff.json",
@@ -287,6 +384,22 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["factor"]["governance"]["rows"][0]["factor_lifecycle"] == "watch"
     assert snapshot["factor"]["governance"]["rows"][0]["factor_effect"] == "neutral"
     assert snapshot["factor"]["governance"]["rows"][0]["net_expectancy_pct"] == 0.0
+    assert snapshot["factor"]["candidate_authenticity"]["status"] == "needs_review"
+    assert snapshot["factor"]["candidate_authenticity"]["suspect_count"] == 1
+    assert snapshot["factor"]["candidate_authenticity"]["watch_count"] == 1
+    assert snapshot["factor"]["candidate_authenticity"]["top_candidates"][0]["candidate_id"] == "funding_rate"
+    assert snapshot["factor"]["candidate_authenticity"]["top_candidates"][0]["verdict"] == "suspect_false_positive"
+    assert snapshot["factor"]["candidate_authenticity"]["top_candidates"][0]["reason_codes"] == [
+        "high_win_rate_low_sample",
+        "time_alignment_sensitive_factor",
+    ]
+    assert snapshot["factor"]["candidate_promotion"]["status"] == "live_candidate"
+    assert snapshot["factor"]["candidate_promotion"]["review_candidate_count"] == 1
+    assert snapshot["factor"]["candidate_promotion"]["qualified_candidate_count"] == 1
+    assert snapshot["factor"]["candidate_promotion"]["live_candidate_count"] == 1
+    assert snapshot["factor"]["candidate_promotion"]["latest_promotion_at"] == "2026-05-11T15:07:06"
+    assert snapshot["factor"]["candidate_promotion"]["top_candidates"][0]["candidate_id"] == "entry_timing_score+setup_strength"
+    assert snapshot["factor"]["candidate_promotion"]["top_candidates"][0]["live_candidate_status"] == "live_candidate"
     assert snapshot["factor"]["db_available"] is False
     assert snapshot["factor"]["sample_growth"]["bot_scheduler_samples"] == 1
     assert snapshot["performance"]["account_equity"] == 88.25
@@ -304,6 +417,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["execution_layer_reasoning"] == "higher_timeframe_not_ready"
     assert snapshot["quant"]["execution_opportunity_status"] == "blocked"
     assert snapshot["quant"]["risk_reason_codes"] == ["market_data_restricted_two_source", "edge_estimate_missing"]
+    assert snapshot["quant"]["thesis_score"] == 0.58
     assert snapshot["quant"]["data_health_score"] == 65.0
     assert snapshot["quant"]["market_data_mode"] == "restricted_two_source"
     assert snapshot["quant"]["consensus_quality"] == "degraded"
@@ -663,7 +777,7 @@ def test_dashboard_performance_ignores_binance_runtime_snapshot(tmp_path: Path) 
     assert snapshot["performance"]["ignored_source"] == "binance_usdt_perp"
 
 
-def test_load_dashboard_snapshot_uses_latest_blocked_scheduler_status(tmp_path: Path) -> None:
+def test_load_dashboard_snapshot_does_not_treat_non_entry_cycle_as_scheduler_failure(tmp_path: Path) -> None:
     bot_root = tmp_path / "eth_trading_bot"
     quant_root = tmp_path / "quant_system_rebuild"
     old_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -690,9 +804,48 @@ def test_load_dashboard_snapshot_uses_latest_blocked_scheduler_status(tmp_path: 
 
     snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
 
-    assert snapshot["runtime"]["quant_scheduler"]["label"] == "BLOCKED"
+    assert snapshot["runtime"]["quant_scheduler"]["label"] == "RUNNING"
     assert snapshot["runtime"]["quant_scheduler"]["age_sec"] is not None
     assert snapshot["quant"]["action"] == "wait"
+
+
+def test_candidate_promotion_tolerates_missing_return_metrics(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        quant_root / "runtime" / "fresh_research" / "all_results.json",
+        {
+            "timestamp": generated_at,
+            "results": [
+                {
+                    "candidate_id": "sparse_candidate",
+                    "candidate_review_status": "review_candidate",
+                    "live_candidate_status": "not_live_ready",
+                    "total_triggers": 3,
+                    "live_block_reasons": ["walk_forward_evidence_missing"],
+                },
+                {
+                    "candidate_id": "qualified_candidate",
+                    "candidate_review_status": "qualified_candidate",
+                    "live_candidate_status": "not_live_ready",
+                    "source_scan_generated_at": generated_at,
+                    "avg_return_pct": 0.04,
+                    "total_triggers": 20,
+                    "live_block_reasons": ["scan_row_count_below_live_minimum"],
+                },
+            ],
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    promotion = snapshot["factor"]["candidate_promotion"]
+    assert promotion["status"] == "qualified_candidate"
+    assert promotion["qualified_candidate_count"] == 1
+    assert promotion["latest_promotion_at"] == generated_at
+    assert promotion["top_candidates"][0]["candidate_id"] == "qualified_candidate"
+    assert promotion["top_candidates"][1]["candidate_id"] == "sparse_candidate"
 
 
 def test_load_dashboard_snapshot_prefers_complete_scheduler_cycle_over_newer_snapshot_cycle(tmp_path: Path) -> None:
@@ -822,9 +975,11 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "ETH 运行观察面板" in html
     assert "只读观察自动化实盘链路" in html
     assert "样本采集与因子治理" in html
+    assert "候选晋升状态" in html
     assert "量化市场判断" in html
     assert "机器人下单链路" in html
     assert "决策审查报告" in html
+    assert "主要原因" in html
     assert "运行状态时间线" in html
     assert '<script src="/vendor/echarts.min.js"></script>' in html
     assert (static_root / "vendor" / "echarts.min.js").exists()
@@ -835,16 +990,33 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "severityForReason" in app_js
     assert "buildNoTradeSummary" in app_js
     assert "renderTriggerWatch" in app_js
+    assert "renderCandidatePromotion" in app_js
     assert "renderProbeDiagnostics" in app_js
+    assert "renderDecisionBrief" in app_js
+    assert "function executionModeText(runtime)" in app_js
+    assert 'blocked: "未放行"' in app_js
+    assert 'if (raw === "blocked") return "yellow";' in app_js
+    assert 'function cycleStatusLabel(status)' in app_js
+    assert 'if (raw === "blocked") return "未入场";' in app_js
+    assert "cycleStatusLabel(item.status)" in app_js
+    assert '["未入场", "快照未完成", "降级", "正常"]' in app_js
+    assert "试探仓未放行" in app_js
+    assert "执行未放行原因" in app_js
+    assert "硬拦截" in app_js
+    assert '.replace(/\\bblocked\\b/gi, "未放行")' in app_js
     assert '["预检错误", cycle.preflight_error || "ok"]' in app_js
     assert {"runtimeGrid", "factorDetails", "quantDetails", "auditEvents"} <= html_ids
+    assert {"candidatePromotionBadge", "candidatePromotionSummary", "candidatePromotionRows"} <= html_ids
     assert {"triggerWatchBadge", "triggerWatchSummary", "triggerWatchStats", "triggerWatchRows"} <= html_ids
     assert {"cycleStatusChart", "quantMetricsChart", "reasonCodesChart", "consensusChart"} <= html_ids
     assert {"researchBadge", "researchDetails", "researchReasons", "quantReasons"} <= html_ids
     assert {"probeDiagnosticBadge", "probeDiagnosticSummary", "probeDiagnosticFacts", "probeDiagnosticReasons"} <= html_ids
     assert {"marketDataBadge", "marketDataDetails", "edgeCostBadge", "edgeCostDetails"} <= html_ids
+    assert {"degradeFlags", "riskCodes"} <= html_ids
     assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
+    assert {"decisionBriefBadge", "decisionBriefTitle", "decisionBriefText", "decisionBriefMode", "decisionBriefGate", "decisionBriefResearch"} <= html_ids
     assert {"pauseBtn", "modeNotice"} <= html_ids
+    assert "历史样本原因统计" in html
     assert 'class="ops-grid"' in html
     assert 'class="execution-grid"' in html
     assert referenced_ids <= html_ids
@@ -860,8 +1032,19 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert '.replace(/\\bunavailable\\b/gi, "不可用")' in app_js
     assert '.replace(/\\bwaiting\\b/gi, "等待")' in app_js
     assert 'appendText(chip, "small", displayCode(row.code))' not in app_js
-    assert "chip.title = `原始代码：${row.code}`" in app_js
+    assert "function reasonChipTitle(row, context = \"\")" in app_js
+    assert "chip.title = reasonChipTitle(row, options.context || \"\")" in app_js
+    assert "原始代码：${code}" in app_js
     assert "renderQuality(review.data_source_quality || {})" in app_js
+    assert "function reviewStatusText(status)" in app_js
+    assert "$(\"summaryReview\").textContent = reviewStatusText(review.review_status)" in app_js
+    assert 'labelKey === "review_status" ? reviewStatusText(label)' in app_js
+    assert 'setBadge($("reviewStatusBadge"), reviewStatusText(reviewStatus), levelForStatus(reviewStatus))' in app_js
+    assert 'setText("reviewStatus", reviewStatusText(reviewStatus))' in app_js
+    assert '.replace(/\\b(research|execution|risk|real_order|automation)_gate\\b/gi, "$1 闸门")' in app_js
+    assert '.replace(/\\bgate\\b/gi, "闸门")' not in app_js
+    assert 'monitor: "观察 / 等待确认"' in app_js
+    assert 'block_long: "阻断多头"' in app_js
     assert "renderOptionalWorkers(data.optional_workers || {})" in app_js
     assert "renderCharts(data.charts || {})" in app_js
     assert "echarts.init" in app_js
@@ -870,7 +1053,15 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "trigger_watch" in app_js
     assert "strong_momentum_probe: \"强动量试探仓\"" in app_js
     assert "capped_by_strong_momentum_probe: \"强动量试探仓上限压制\"" in app_js
+    assert 'suspect_false_positive: "疑似假阳性"' in app_js
+    assert 'authenticity_missing: "报告未含候选诊断"' in app_js
+    assert 'scan_row_count_below_live_minimum: "扫描样本数未达 live 门槛"' in app_js
+    assert "最近晋升 暂无 qualified/live" in app_js
+    assert "这是研究诊断，不参与自动下单" in app_js
     assert ".probe-diagnostic" in styles_css
+    assert ".promotion-table" in styles_css
+    assert ".diagnostic-list" in styles_css
+    assert ".decision-brief" in styles_css
     assert "submitted_all_accepted" in app_js
     assert "partial_failed" in app_js
     assert "color-scheme: dark" in styles_css

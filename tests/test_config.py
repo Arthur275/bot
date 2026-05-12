@@ -2,7 +2,18 @@ from pathlib import Path
 
 import pytest
 
-from bot.config import BotConfig, EngineMode, RuntimeMode
+from bot.config import (
+    DEFAULT_KILL_SWITCH_PATH,
+    BotConfig,
+    EngineMode,
+    RuntimeMode,
+    bot_runtime_scheduler_root,
+    candidate_execution_package_path,
+    kill_switch_path,
+    real_order_worker_audit_path,
+    real_order_worker_lock_path,
+    runtime_root_for_repo,
+)
 
 
 def test_bot_config_enforces_eth_only_scope() -> None:
@@ -39,6 +50,16 @@ def test_bot_config_accepts_shadow_strict_live_defaults(tmp_path: Path) -> None:
     assert config.require_execution_allowed is True
     assert config.manual_entry_confirmation_required is True
     assert config.manual_entry_confirmation_token == ""
+
+
+def test_runtime_path_helpers_keep_existing_layout(tmp_path: Path) -> None:
+    assert runtime_root_for_repo(tmp_path) == tmp_path / "runtime"
+    assert bot_runtime_scheduler_root(tmp_path) == tmp_path / "runtime" / "bot_runtime_scheduler"
+    assert candidate_execution_package_path(tmp_path) == tmp_path / "runtime" / "bot_runtime_scheduler" / "latest_candidate_execution_package.json"
+    assert real_order_worker_audit_path(tmp_path) == tmp_path / "runtime" / "real_order_worker" / "audit.jsonl"
+    assert real_order_worker_lock_path(tmp_path) == tmp_path / "runtime" / "locks" / "real_order_worker.lock"
+    assert DEFAULT_KILL_SWITCH_PATH == Path("runtime/controls/disable_real_execution.flag")
+    assert kill_switch_path(tmp_path) == tmp_path / "runtime" / "controls" / "disable_real_execution.flag"
 
 
 def test_bot_config_accepts_legacy_binance_scope(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action_enums import PositionAction
+from .config import DEFAULT_KILL_SWITCH_PATH
 from .risk_filter_contract import risk_filter_allows_real_entry
 
 ENTRY_ACTIONS = {
@@ -16,8 +17,6 @@ ENTRY_ACTIONS = {
 HIGH_RISK_ACTIONS = {PositionAction.REDUCE.value, PositionAction.EXIT.value}
 PROTECT_ACTIONS = {"protective_stop_repair", "protect", "maintain_protective_stop"}
 POST_ENTRY_RISK_TARGETS = {"advance_breakeven_stop", "advance_trailing_stop"}
-DEFAULT_KILL_SWITCH_PATH = Path("runtime/controls/disable_real_execution.flag")
-
 
 class RealOrderGateDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")

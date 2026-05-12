@@ -18,7 +18,7 @@ if (-not (Test-Path $Python)) {
 }
 
 $ArgsList = @(
-    (Join-Path $RepoRoot "scripts\real_order_worker.py"),
+    (Join-Path $RepoRoot "scripts\ops\real_order_worker.py"),
     "run-once"
 )
 

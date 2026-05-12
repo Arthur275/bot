@@ -13,6 +13,13 @@ from .exchange_adapter import AdapterCapabilities, AdapterRuntimeSnapshot, Excha
 from .exchange_adapter import CommandExecutionResult, ExecutionCommand
 from .execution_summary import summarize_execution_results
 from .network_guard import NetworkGuard
+from .orchestrator_reporting import (
+    summarize_action,
+    summarize_command_results,
+    summarize_commands,
+    summarize_execution_overview,
+    summarize_runtime_overview,
+)
 from .position_manager import PositionManager
 from .state_store import StateStore
 
@@ -433,16 +440,13 @@ class ShadowOrchestrator:
         guard,
         reconciliation: ReconciliationResult,
     ) -> dict[str, object]:
-        return {
-            "requested_action": requested_action,
-            "effective_action": effective_action,
-            "plan_reason": plan_reason,
-            "blocked": guard.blocked,
-            "degraded": guard.degraded,
-            "guard_reason_codes": list(guard.reason_codes),
-            "reconciliation_in_sync": reconciliation.in_sync,
-            "reconciliation_reason_codes": list(reconciliation.reason_codes),
-        }
+        return summarize_action(
+            requested_action=requested_action,
+            effective_action=effective_action,
+            plan_reason=plan_reason,
+            guard=guard,
+            reconciliation=reconciliation,
+        )
 
     @staticmethod
     def _summarize_execution_overview(
@@ -453,21 +457,13 @@ class ShadowOrchestrator:
         execution_results,
         execution_result_summary: dict[str, bool],
     ) -> dict[str, object]:
-        primary_targets = {"entry_order", "reduce_order", "exit_order"}
-        primary_command = next((command for command in execution_commands if command.target in primary_targets), None)
-        primary_result = next((result for result in execution_results if result.target in primary_targets), None)
-        auxiliary_targets = [command.target for command in execution_commands if command.target not in primary_targets]
-        return {
-            "requested_action": requested_action,
-            "effective_action": effective_action,
-            "primary_target": primary_command.target if primary_command else primary_result.target if primary_result else "",
-            "primary_reason": primary_command.reason if primary_command else primary_result.reason if primary_result else "",
-            "primary_status": primary_result.status if primary_result else "not_applicable",
-            "primary_accepted": primary_result.accepted if primary_result else False,
-            "has_primary_failure": execution_result_summary["primary_failed"],
-            "has_auxiliary_failure": execution_result_summary["auxiliary_failed"],
-            "auxiliary_targets": auxiliary_targets,
-        }
+        return summarize_execution_overview(
+            requested_action=requested_action,
+            effective_action=effective_action,
+            execution_commands=execution_commands,
+            execution_results=execution_results,
+            execution_result_summary=execution_result_summary,
+        )
 
     @staticmethod
     def _summarize_runtime_overview(
@@ -479,54 +475,22 @@ class ShadowOrchestrator:
         reconciliation: ReconciliationResult,
         updated_state,
     ) -> dict[str, object]:
-        return {
-            "expected_position_state": expected_position_state,
-            "expected_direction": expected_direction,
-            "expected_size_pct": expected_size_pct,
-            "runtime_position_state": runtime_snapshot.position.position_state,
-            "runtime_direction": runtime_snapshot.position.direction,
-            "runtime_size_pct": runtime_snapshot.position.size_pct,
-            "runtime_protective_stop_present": runtime_snapshot.protective_stop_present,
-            "observed_position_state": updated_state.observed_position_state,
-            "observed_direction": updated_state.observed_position_direction,
-            "observed_size_pct": updated_state.observed_position_size_pct,
-            "execution_state": updated_state.execution_state.value,
-            "pending_action": updated_state.pending_action,
-            "recovery_required": updated_state.recovery_required,
-            "reconciliation_required": updated_state.reconciliation_required,
-            "protective_stop_required": updated_state.protective_stop_required,
-            "reconciliation_in_sync": reconciliation.in_sync,
-            "reconciliation_reason_codes": list(reconciliation.reason_codes),
-            "recent_fill_summary": dict(updated_state.recent_fill_summary),
-        }
+        return summarize_runtime_overview(
+            expected_position_state=expected_position_state,
+            expected_direction=expected_direction,
+            expected_size_pct=expected_size_pct,
+            runtime_snapshot=runtime_snapshot,
+            reconciliation=reconciliation,
+            updated_state=updated_state,
+        )
 
     @staticmethod
     def _summarize_commands(execution_commands) -> list[dict[str, str]]:
-        return [
-            {
-                "target": command.target,
-                "reason": command.reason,
-                "operation": command.operation,
-            }
-            for command in execution_commands
-        ]
+        return summarize_commands(execution_commands)
 
     @staticmethod
     def _summarize_command_results(execution_results) -> list[dict[str, object]]:
-        return [
-            {
-                "target": result.target,
-                "reason": result.reason,
-                "status": result.status,
-                "accepted": result.accepted,
-                "simulated": result.simulated,
-                "idempotency_key": result.idempotency_key,
-                "client_order_id": result.client_order_id,
-                "exchange_order_id": result.exchange_order_id,
-                "error_kind": result.error_kind,
-            }
-            for result in execution_results
-        ]
+        return summarize_command_results(execution_results)
 
     def _apply_manual_entry_confirmation_gate(
         self,

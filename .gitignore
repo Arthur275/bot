@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 
 runtime/
+archive/runtime/
 debug_*/
 .tmp_pytest*/
 *.log

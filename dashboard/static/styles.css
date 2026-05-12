@@ -158,6 +158,75 @@ button:focus {
   clip: rect(0, 0, 0, 0);
 }
 
+.decision-brief {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(340px, 0.9fr);
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 10px;
+  padding: 12px;
+  border: 1px solid rgba(88, 166, 255, 0.28);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(12, 31, 49, 0.9), rgba(6, 17, 29, 0.98)),
+    var(--panel-soft);
+  box-shadow: var(--shadow);
+}
+
+.decision-brief-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.decision-brief-main h2 {
+  font-size: 18px;
+  line-height: 1.35;
+  margin-bottom: 4px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.decision-brief-main p {
+  font-size: 13px;
+  color: #b8c7d8;
+  overflow-wrap: anywhere;
+}
+
+.decision-brief-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.decision-brief-facts div {
+  min-height: 70px;
+  padding: 9px 10px;
+  border: 1px solid rgba(126, 166, 204, 0.14);
+  border-radius: 7px;
+  background: rgba(5, 12, 22, 0.45);
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.decision-brief-facts span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.decision-brief-facts strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
 .summary-bar {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -229,7 +298,8 @@ button:focus {
 }
 
 .trade-card .headline-value {
-  font-size: 22px;
+  font-size: 16px;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
 }
 
 .summary-profit .headline-value {
@@ -270,6 +340,40 @@ button:focus {
 
 .flow-section {
   margin-bottom: 8px;
+}
+
+.main-tabs {
+  position: sticky;
+  top: 57px;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(4, 10, 18, 0.92);
+  backdrop-filter: blur(12px);
+}
+
+.tab-button {
+  min-height: 40px;
+  border-color: rgba(126, 166, 204, 0.2);
+  background: rgba(8, 20, 34, 0.72);
+  color: var(--muted);
+}
+
+.tab-button.active {
+  border-color: rgba(88, 166, 255, 0.72);
+  background: rgba(88, 166, 255, 0.16);
+  color: var(--text);
+}
+
+body[data-active-tab="quant"] [data-tab-panel]:not([data-tab-panel~="quant"]),
+body[data-active-tab="bot"] [data-tab-panel]:not([data-tab-panel~="bot"]),
+body[data-active-tab="factor"] [data-tab-panel]:not([data-tab-panel~="factor"]) {
+  display: none;
 }
 
 .flow-grid {
@@ -420,6 +524,77 @@ button:focus {
 .edge-panel { grid-column: 2; }
 .factor-panel { grid-column: 1; }
 .bot-panel { grid-column: 2; }
+
+body[data-active-tab="quant"] .terminal-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+body[data-active-tab="quant"] .chart-a {
+  grid-column: span 5;
+}
+
+body[data-active-tab="quant"] .chart-b {
+  grid-column: span 4;
+}
+
+body[data-active-tab="quant"] .chart-d {
+  grid-column: span 3;
+}
+
+body[data-active-tab="quant"] .execution-grid,
+body[data-active-tab="quant"] .dashboard-grid,
+body[data-active-tab="bot"] .terminal-grid,
+body[data-active-tab="bot"] .ops-grid,
+body[data-active-tab="factor"] .dashboard-grid {
+  display: none;
+}
+
+body[data-active-tab="bot"] .execution-grid,
+body[data-active-tab="factor"] .terminal-grid,
+body[data-active-tab="factor"] .ops-grid,
+body[data-active-tab="factor"] .execution-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+body[data-active-tab="factor"] .chart-c {
+  grid-column: span 5;
+}
+
+body[data-active-tab="factor"] .edge-panel {
+  grid-column: span 7;
+  grid-row: auto;
+}
+
+body[data-active-tab="factor"] .factor-panel {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+body[data-active-tab="bot"] .bot-panel {
+  grid-column: span 5;
+  grid-row: auto;
+}
+
+body[data-active-tab="bot"] .review-panel {
+  grid-column: span 7;
+  grid-row: auto;
+}
+
+body[data-active-tab="bot"] .bot-panel {
+  display: block;
+}
+
+body[data-active-tab="bot"] .bot-strip {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body[data-active-tab="bot"] .review-terminal-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body[data-active-tab="bot"] .review-secondary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 
 .panel-head,
 .section-head {
@@ -1049,6 +1224,35 @@ button:focus {
   font-weight: 800;
 }
 
+.diagnostic-head,
+.promotion-head {
+  margin-top: 12px;
+}
+
+.diagnostic-list .signal-name {
+  color: var(--muted);
+}
+
+.promotion-table .promotion-row {
+  grid-template-columns:
+    minmax(120px, 1.35fr)
+    minmax(86px, 0.78fr)
+    minmax(82px, 0.72fr)
+    minmax(60px, 0.52fr)
+    minmax(80px, 0.7fr)
+    minmax(150px, 1.5fr);
+}
+
+.promotion-table .table-row:not(.table-head) {
+  min-height: 38px;
+  background: rgba(5, 14, 24, 0.46);
+}
+
+.promotion-table .table-row span:first-child {
+  color: var(--text);
+  font-weight: 800;
+}
+
 .quality-row {
   grid-template-columns: minmax(130px, 1fr) minmax(80px, 0.45fr);
 }
@@ -1391,6 +1595,9 @@ button:focus {
 
 @media (max-width: 1280px) {
   .shell { width: min(100%, 1680px); }
+  .decision-brief {
+    grid-template-columns: 1fr;
+  }
   .summary-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .terminal-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
   .ops-grid {
@@ -1417,6 +1624,9 @@ button:focus {
   }
   .toolbar {
     justify-content: flex-start;
+  }
+  .decision-brief-facts {
+    grid-template-columns: 1fr;
   }
   .summary-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .terminal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1485,6 +1695,9 @@ button:focus {
   .status-pill {
     white-space: normal;
     text-align: center;
+  }
+  .decision-brief-main {
+    grid-template-columns: 1fr;
   }
   .updated-at {
     justify-content: center;
@@ -1580,6 +1793,7 @@ button:focus {
 
   .metric-grid,
   .metric-grid.five,
+  .decision-brief-facts,
   .probe-diagnostic-facts,
   .factor-strip,
   .bot-strip,

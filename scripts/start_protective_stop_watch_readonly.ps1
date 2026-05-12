@@ -13,7 +13,7 @@ $env:PYTHONPATH = "$botRoot\src"
 
 Set-Location $botRoot
 
-& $pythonExe scripts\watch_protective_stop_replace.py `
+& $pythonExe scripts\diagnostics\watch_protective_stop_replace.py `
     --state-path "$botRoot\runtime\shared_state\bot_state.json" `
     --report-root "$botRoot\runtime\reports\protective_stop_replace" `
     --watch-report-root "$botRoot\runtime\reports\protective_stop_replace_watch" `

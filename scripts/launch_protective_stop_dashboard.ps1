@@ -17,7 +17,7 @@ $stdoutPath = Join-Path $watchRoot "watch_stdout.log"
 $stderrPath = Join-Path $watchRoot "watch_stderr.log"
 $latestPreview = Join-Path $replaceRoot "latest_preview.json"
 $pythonExe = Join-Path (Split-Path -Parent $botRoot) "quant_system_rebuild\.venv_win\Scripts\python.exe"
-$previewScript = Join-Path $botRoot "scripts\preview_protective_stop_replace.py"
+$previewScript = Join-Path $botRoot "scripts\diagnostics\preview_protective_stop_replace.py"
 
 function Write-Section([string]$Title) {
     Write-Host ""

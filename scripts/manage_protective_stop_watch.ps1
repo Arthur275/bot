@@ -103,7 +103,7 @@ $env:PYTHONDONTWRITEBYTECODE = "1"
 $env:PYTHONPATH = "$botRoot\src"
 
 $argsList = @(
-    "scripts\watch_protective_stop_replace.py",
+    "scripts\diagnostics\watch_protective_stop_replace.py",
     "--state-path", (Join-Path $botRoot "runtime\shared_state\bot_state.json"),
     "--report-root", (Join-Path $botRoot "runtime\reports\protective_stop_replace"),
     "--watch-report-root", $watchRoot,

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 SCRIPT_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.ps1"
 CMD_PATH = REPO_ROOT / "scripts" / "manage_runtime_stack.cmd"
 BOT_SCHEDULER_MANAGER_PATH = REPO_ROOT / "scripts" / "manage_bot_runtime_scheduler.ps1"
@@ -27,6 +32,27 @@ def _bot_scheduler_manager_script() -> str:
 
 def _launch_stack_script() -> str:
     return LAUNCH_STACK_PATH.read_text(encoding="utf-8")
+
+
+def test_runtime_stack_manager_script_parses_as_powershell() -> None:
+    parser = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            (
+                "$tokens=$null; $errors=$null; "
+                "[System.Management.Automation.Language.Parser]::ParseFile("
+                f"'{SCRIPT_PATH}', [ref]$tokens, [ref]$errors) | Out-Null; "
+                "if ($errors.Count -gt 0) { $errors | ForEach-Object { $_.ToString() }; exit 1 }"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert parser.returncode == 0, parser.stdout + parser.stderr
 
 
 def test_runtime_stack_manager_entrypoints_exist() -> None:
@@ -77,7 +103,8 @@ def test_runtime_stack_manager_runs_bot_scheduler_through_stable_powershell_wrap
     assert "bot_scheduler_child_stderr.log" in start_block
     assert "bot_scheduler run-once starting" in start_block
     assert "bot_scheduler run-once exit=`$LASTEXITCODE" in start_block
-    assert '"scripts\\bot_runtime_scheduler.py"' in script
+    assert '"scripts\\ops\\bot_runtime_scheduler.py"' in script
+    assert (REPO_ROOT / "scripts" / "bot_runtime_scheduler.py").exists()
     assert '"run-once"' in script
     assert "Start-Sleep -Seconds $IntervalSec" in start_block
     assert 'Start-ManagedProcess -Name "bot_scheduler" -FilePath "powershell.exe"' in start_block
@@ -157,9 +184,13 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
 
     required_signals = [
         "Get-ManagedProcess",
+        "Set-ManagedPid",
+        "Get-ListeningProcessId",
         "CommandLineMatches",
+        "PidSource",
         "Format-ProcessHealth",
         "command_mismatch",
+        "degraded",
         'status.status -like "incomplete_*"',
         "Remove-StalePid",
         "Get-HttpStatus",
@@ -202,6 +233,40 @@ def test_runtime_stack_manager_removes_reused_pid_when_command_mismatches() -> N
     assert "Remove-StalePid -Name $Name -Pattern $Pattern -FilePath $FilePath" in script
 
 
+def test_runtime_stack_manager_resolves_managed_processes_with_observed_health_before_pid_file() -> None:
+    script = _script()
+    managed_function = script[script.index("function Get-ManagedProcess") : script.index("function Remove-StalePid")]
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+
+    assert "Get-ListeningProcessId -Port $Port -HostName $PortHost" in managed_function
+    assert "Set-ManagedPid -Name $Name -ProcessId $portPid" in managed_function
+    assert '-PidSource "port"' in managed_function
+    assert "Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0" in managed_function
+    assert "Set-ManagedPid -Name $Name -ProcessId $patternPid" in managed_function
+    assert '-PidSource "command"' in managed_function
+    assert 'Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app" -Port $DashboardPort -PortHost $HostName' in status_function
+    assert '$dashboardState -eq "running" -and (-not $dashboard.PortListening -or $homeStatus -ne 200 -or $apiStatus -ne 200)' in status_function
+    assert '$dashboardState = "degraded"' in status_function
+
+
+def test_runtime_stack_manager_status_uses_unified_pid_resolution_for_all_services() -> None:
+    script = _script()
+    status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
+
+    assert 'Repair-PidFromCommandPattern -Name "bot_scheduler"' not in status_function
+    assert 'Repair-PidFromCommandPattern -Name "real_worker"' not in status_function
+    for service, pattern in [
+        ("dashboard", "dashboard.app"),
+        ("factor_ingest", "ingest-summary"),
+        ("quant_judgement", "run-cycle"),
+        ("research_health", "research-health"),
+        ("bot_scheduler", "bot_scheduler_loop.ps1"),
+        ("real_worker", "manage_real_order_worker.ps1"),
+        ("review_worker", "review_runtime_decisions.py"),
+    ]:
+        assert f'Get-ManagedProcess -Name "{service}" -Pattern "{pattern}' in status_function
+
+
 def test_runtime_stack_manager_records_scheduler_lock_pid_for_venv_launcher() -> None:
     script = _script()
 
@@ -228,6 +293,8 @@ def test_runtime_stack_manager_can_find_wrapper_process_by_command_pattern() -> 
     assert '$_.CommandLine -like "*$Pattern*"' in find_function
     assert "$_.ParentProcessId -eq $StartedPid" in find_function
     assert "$_.CommandLine -like \"*$BotRoot*\"" in find_function
+    assert '$_.CommandLine -like "*$QuantRoot*"' in find_function
+    assert '$_.CommandLine -like "*$WorkspaceRoot*"' in find_function
 
 
 def test_runtime_stack_manager_repairs_scheduler_pid_from_wrapper_process() -> None:
@@ -235,20 +302,19 @@ def test_runtime_stack_manager_repairs_scheduler_pid_from_wrapper_process() -> N
 
     repair_function = script[script.index("function Repair-PidFromCommandPattern") : script.index("function Write-ManagedWrapper")]
     assert "Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0" in repair_function
-    assert "Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$patternPid)" in repair_function
+    assert "Set-ManagedPid -Name $Name -ProcessId $patternPid" in repair_function
     start_function = script[script.index("function Start-ManagedProcess") : script.index("function Stop-ManagedProcess")]
     status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
     assert "Repair-PidFromCommandPattern -Name $Name -Pattern $Pattern" in start_function
-    assert 'Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"' in status_function
+    assert 'Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"' not in status_function
 
 
-def test_runtime_stack_manager_treats_fresh_bot_artifact_as_running_when_pid_visibility_fails() -> None:
+def test_runtime_stack_manager_does_not_treat_fresh_bot_artifact_as_running_when_pid_visibility_fails() -> None:
     script = _script()
     status_function = script[script.index("function Show-Status") : script.index("$DashboardArgs = @(")]
 
     assert '$botState = Format-ProcessHealth $bot' in status_function
-    assert '$botState -eq "stale_pid" -and (Test-BotReady)' in status_function
-    assert '$botState = "running"' in status_function
+    assert '$botState -eq "stale_pid" -and (Test-BotReady)' not in status_function
 
 
 def test_runtime_stack_manager_orders_quant_cycles_by_artifact_timestamp_not_directory_mtime() -> None:
@@ -269,10 +335,14 @@ def test_runtime_stack_manager_keeps_scheduler_and_worker_locks_separate() -> No
 
     assert '$BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"' in script
 
-    worker_script = (REPO_ROOT / "scripts" / "real_order_worker.py").read_text(encoding="utf-8")
-    bot_scheduler_script = (REPO_ROOT / "scripts" / "bot_runtime_scheduler.py").read_text(encoding="utf-8")
-    assert 'locks" / "real_order_worker.lock"' in worker_script
+    bot_scheduler_script = (REPO_ROOT / "scripts" / "ops" / "bot_runtime_scheduler.py").read_text(encoding="utf-8")
     assert 'Path(args.runtime_root) / "scheduler.lock"' in bot_scheduler_script
+
+    from scripts import real_order_worker
+
+    parser = real_order_worker.build_parser()
+    args = parser.parse_args(["run-once"])
+    assert Path(args.lock_path) == REPO_ROOT / "runtime" / "locks" / "real_order_worker.lock"
 
 
 def test_runtime_stack_manager_plan_matches_implemented_entrypoint() -> None:
@@ -378,8 +448,6 @@ def test_runtime_stack_manager_uses_wrapper_pattern_for_real_worker_status_start
     stop_block = script[script.index('if ($Action -eq "stop")') : script.index('Start-ManagedProcess -Name "dashboard"')]
     start_block = script[script.index('else {') : script.index('if ($EnableReviewWorker)')]
 
-    assert 'Repair-PidFromCommandPattern -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in status_function
-    assert 'Repair-PidFromCommandPattern -Name "real_worker" -Pattern "real_order_worker.py"' in status_function
     assert 'Get-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in status_function
     assert 'Get-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"' in status_function
     assert 'Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"' in stop_block

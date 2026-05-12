@@ -85,7 +85,7 @@ $env:PYTHONDONTWRITEBYTECODE = "1"
 $env:PYTHONPATH = "$botRoot\src"
 
 $argsList = @(
-    "scripts\bot_runtime_scheduler.py",
+    "scripts\ops\bot_runtime_scheduler.py",
     "loop",
     "--interval-sec", ([string]$IntervalSec),
     "--runtime-root", $RuntimeRoot,

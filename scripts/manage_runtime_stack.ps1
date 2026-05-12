@@ -206,72 +206,231 @@ function Get-PidPath {
     return Join-Path $PidRoot "$Name.pid"
 }
 
+function Set-ManagedPid {
+    param(
+        [string]$Name,
+        [int]$ProcessId
+    )
+    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$ProcessId) -Encoding ASCII
+}
+
+function Test-CommandLineMatches {
+    param(
+        [int]$ProcessId,
+        [string]$Pattern
+    )
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        $cmdLine = [string]$cim.CommandLine
+        return [pscustomobject]@{
+            Available = $true
+            Matches = ($cmdLine -like "*$Pattern*")
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            Matches = $null
+        }
+    }
+}
+
+function Get-ListeningProcessId {
+    param(
+        [int]$Port,
+        [string]$HostName = ""
+    )
+    if ($Port -le 0) {
+        return $null
+    }
+
+    try {
+        $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
+        if (-not [string]::IsNullOrWhiteSpace($HostName)) {
+            $connections = @($connections | Where-Object {
+                $_.LocalAddress -eq $HostName -or $_.LocalAddress -eq "0.0.0.0" -or $_.LocalAddress -eq "::"
+            })
+        }
+        if (@($connections).Count -gt 0) {
+            return [int]@($connections | Sort-Object OwningProcess | Select-Object -First 1).OwningProcess
+        }
+    }
+    catch {
+    }
+
+    try {
+        $pattern = ":{0}\s+" -f $Port
+        $lines = @(netstat -ano -p tcp | Select-String -Pattern $pattern)
+        foreach ($line in $lines) {
+            $parts = @(([string]$line.Line).Trim() -split "\s+")
+            if (@($parts).Count -lt 5) {
+                continue
+            }
+            $local = [string]$parts[1]
+            $state = [string]$parts[3]
+            $owner = [string]$parts[4]
+            if ($local -notmatch (":{0}$" -f $Port)) {
+                continue
+            }
+            if ($state -ne "LISTENING") {
+                continue
+            }
+            $ownerPid = 0
+            if ([int]::TryParse($owner, [ref]$ownerPid)) {
+                return $ownerPid
+            }
+        }
+    }
+    catch {
+    }
+    return $null
+}
+
+function New-ManagedProcessState {
+    param(
+        [string]$Name,
+        $ManagedPid,
+        [bool]$Alive,
+        [bool]$StalePid,
+        $CommandLineMatches,
+        [bool]$CommandLineAvailable,
+        $Process,
+        [int]$Port = 0,
+        $PortPid = $null,
+        [bool]$PortListening = $false,
+        [string]$PidSource = "pid_file"
+    )
+    return [pscustomobject]@{
+        Name = $Name
+        Pid = $ManagedPid
+        Alive = $Alive
+        StalePid = $StalePid
+        CommandLineMatches = $CommandLineMatches
+        CommandLineAvailable = $CommandLineAvailable
+        Process = $Process
+        Port = $Port
+        PortPid = $PortPid
+        PortListening = $PortListening
+        PidSource = $PidSource
+    }
+}
+
 function Get-ManagedProcess {
     param(
         [string]$Name,
-        [string]$Pattern
+        [string]$Pattern,
+        [int]$Port = 0,
+        [string]$PortHost = ""
     )
+    $portPid = Get-ListeningProcessId -Port $Port -HostName $PortHost
+    if ($null -ne $portPid) {
+        $portProc = Get-Process -Id $portPid -ErrorAction SilentlyContinue
+        if ($null -ne $portProc) {
+            $cmd = Test-CommandLineMatches -ProcessId $portPid -Pattern $Pattern
+            Set-ManagedPid -Name $Name -ProcessId $portPid
+            return New-ManagedProcessState `
+                -Name $Name `
+                -ManagedPid $portPid `
+                -Alive $true `
+                -StalePid $false `
+                -CommandLineMatches $cmd.Matches `
+                -CommandLineAvailable $cmd.Available `
+                -Process $portProc `
+                -Port $Port `
+                -PortPid $portPid `
+                -PortListening $true `
+                -PidSource "port"
+        }
+    }
+
     $pidPath = Get-PidPath $Name
     if (-not (Test-Path -LiteralPath $pidPath)) {
-        return [pscustomobject]@{
-            Name = $Name
-            Pid = $null
-            Alive = $false
-            StalePid = $false
-            CommandLineMatches = $false
-            CommandLineAvailable = $true
-            Process = $null
+        $patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0
+        if ($null -ne $patternPid) {
+            $patternProc = Get-Process -Id $patternPid -ErrorAction SilentlyContinue
+            if ($null -ne $patternProc) {
+                Set-ManagedPid -Name $Name -ProcessId $patternPid
+                return New-ManagedProcessState `
+                    -Name $Name `
+                    -ManagedPid $patternPid `
+                    -Alive $true `
+                    -StalePid $false `
+                    -CommandLineMatches $true `
+                    -CommandLineAvailable $true `
+                    -Process $patternProc `
+                    -Port $Port `
+                    -PortPid $portPid `
+                    -PortListening ($null -ne $portPid) `
+                    -PidSource "command"
+            }
         }
+        return New-ManagedProcessState -Name $Name -ManagedPid $null -Alive $false -StalePid $false -CommandLineMatches $false -CommandLineAvailable $true -Process $null -Port $Port -PortPid $portPid -PortListening ($null -ne $portPid)
     }
 
     $rawPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
     $processId = 0
     if (-not [int]::TryParse([string]$rawPid, [ref]$processId)) {
-        return [pscustomobject]@{
-            Name = $Name
-            Pid = $rawPid
-            Alive = $false
-            StalePid = $true
-            CommandLineMatches = $false
-            CommandLineAvailable = $true
-            Process = $null
-        }
+        return New-ManagedProcessState -Name $Name -ManagedPid $rawPid -Alive $false -StalePid $true -CommandLineMatches $false -CommandLineAvailable $true -Process $null -Port $Port -PortPid $portPid -PortListening ($null -ne $portPid)
     }
 
     $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if ($null -eq $proc) {
-        return [pscustomobject]@{
-            Name = $Name
-            Pid = $processId
-            Alive = $false
-            StalePid = $true
-            CommandLineMatches = $false
-            CommandLineAvailable = $true
-            Process = $null
+        $patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0
+        if ($null -ne $patternPid) {
+            $patternProc = Get-Process -Id $patternPid -ErrorAction SilentlyContinue
+            if ($null -ne $patternProc) {
+                Set-ManagedPid -Name $Name -ProcessId $patternPid
+                return New-ManagedProcessState `
+                    -Name $Name `
+                    -ManagedPid $patternPid `
+                    -Alive $true `
+                    -StalePid $false `
+                    -CommandLineMatches $true `
+                    -CommandLineAvailable $true `
+                    -Process $patternProc `
+                    -Port $Port `
+                    -PortPid $portPid `
+                    -PortListening ($null -ne $portPid) `
+                    -PidSource "command"
+            }
+        }
+        return New-ManagedProcessState -Name $Name -ManagedPid $processId -Alive $false -StalePid $true -CommandLineMatches $false -CommandLineAvailable $true -Process $null -Port $Port -PortPid $portPid -PortListening ($null -ne $portPid)
+    }
+
+    $cmd = Test-CommandLineMatches -ProcessId $processId -Pattern $Pattern
+    if ($cmd.Available -and $cmd.Matches -eq $false) {
+        $patternPid = Find-ProcessIdByCommandPattern -Pattern $Pattern -StartedPid 0
+        if ($null -ne $patternPid) {
+            $patternProc = Get-Process -Id $patternPid -ErrorAction SilentlyContinue
+            if ($null -ne $patternProc) {
+                Set-ManagedPid -Name $Name -ProcessId $patternPid
+                return New-ManagedProcessState `
+                    -Name $Name `
+                    -ManagedPid $patternPid `
+                    -Alive $true `
+                    -StalePid $false `
+                    -CommandLineMatches $true `
+                    -CommandLineAvailable $true `
+                    -Process $patternProc `
+                    -Port $Port `
+                    -PortPid $portPid `
+                    -PortListening ($null -ne $portPid) `
+                    -PidSource "command"
+            }
         }
     }
 
-    $cmdAvailable = $true
-    $cmdMatches = $true
-    try {
-        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
-        $cmdLine = [string]$cim.CommandLine
-        $cmdMatches = $cmdLine -like "*$Pattern*"
-    }
-    catch {
-        $cmdAvailable = $false
-        $cmdMatches = $null
-    }
-
-    return [pscustomobject]@{
-        Name = $Name
-        Pid = $processId
-        Alive = $true
-        StalePid = $false
-        CommandLineMatches = $cmdMatches
-        CommandLineAvailable = $cmdAvailable
-        Process = $proc
-    }
+    return New-ManagedProcessState `
+        -Name $Name `
+        -ManagedPid $processId `
+        -Alive $true `
+        -StalePid $false `
+        -CommandLineMatches $cmd.Matches `
+        -CommandLineAvailable $cmd.Available `
+        -Process $proc `
+        -Port $Port `
+        -PortPid $portPid `
+        -PortListening ($null -ne $portPid)
 }
 
 function Remove-StalePid {
@@ -328,7 +487,11 @@ function Find-ProcessIdByCommandPattern {
         $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop |
             Where-Object {
                 $_.CommandLine -like "*$Pattern*" -and (
-                    $_.ProcessId -eq $StartedPid -or $_.ParentProcessId -eq $StartedPid -or $_.CommandLine -like "*$BotRoot*"
+                    $_.ProcessId -eq $StartedPid `
+                    -or $_.ParentProcessId -eq $StartedPid `
+                    -or $_.CommandLine -like "*$BotRoot*" `
+                    -or $_.CommandLine -like "*$QuantRoot*" `
+                    -or $_.CommandLine -like "*$WorkspaceRoot*"
                 )
             } |
             Sort-Object CreationDate -Descending)
@@ -351,7 +514,7 @@ function Repair-PidFromCommandPattern {
     if ($null -eq $patternPid) {
         return $false
     }
-    Set-Content -LiteralPath (Get-PidPath $Name) -Value ([string]$patternPid) -Encoding ASCII
+    Set-ManagedPid -Name $Name -ProcessId $patternPid
     return $true
 }
 
@@ -534,12 +697,9 @@ function Wait-ForCondition {
 }
 
 function Show-Status {
-    Repair-PidFromCommandPattern -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1" | Out-Null
-    Repair-PidFromCommandPattern -Name "real_worker" -Pattern "manage_real_order_worker.ps1" | Out-Null
-    Repair-PidFromCommandPattern -Name "real_worker" -Pattern "real_order_worker.py" | Out-Null
-    $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
-    $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
-    $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    $dashboard = Get-ManagedProcess -Name "dashboard" -Pattern "dashboard.app" -Port $DashboardPort -PortHost $HostName
+    $factor = Get-ManagedProcess -Name "factor_ingest" -Pattern "ingest-summary"
+    $quant = Get-ManagedProcess -Name "quant_judgement" -Pattern "run-cycle"
     $research = Get-ManagedProcess -Name "research_health" -Pattern "research-health"
     $bot = Get-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
     $worker = Get-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
@@ -551,6 +711,9 @@ function Show-Status {
     $homeStatus = Get-HttpStatus -Uri ("http://{0}:{1}/" -f $HostName, $DashboardPort)
     $apiStatus = Get-HttpStatus -Uri ("http://{0}:{1}/api/overview" -f $HostName, $DashboardPort)
     $dashboardState = Format-ProcessHealth $dashboard
+    if ($dashboardState -eq "running" -and (-not $dashboard.PortListening -or $homeStatus -ne 200 -or $apiStatus -ne 200)) {
+        $dashboardState = "degraded"
+    }
     Write-Output ("dashboard: {0} pid={1} http={2} api={3} log={4}" -f $dashboardState, $dashboard.Pid, $homeStatus, $apiStatus, (Get-LogErrorSummary "dashboard"))
 
     $factorIngest = Get-JsonFile (Join-Path $QuantRoot "runtime\analysis\factor_ingest_latest.json")
@@ -620,9 +783,6 @@ function Show-Status {
         $botAge = Get-AgeSeconds ($botCycle.finished_at)
     }
     $botState = Format-ProcessHealth $bot
-    if ($botState -eq "stale_pid" -and (Test-BotReady)) {
-        $botState = "running"
-    }
     Write-Output ("bot_scheduler: {0} pid={1} age={2} latest_sample={3} log={4}" -f $botState, $bot.Pid, (Format-Age $botAge), $botCycle.sample_id, (Get-LogErrorSummary "bot_scheduler"))
 
     $candidate = Get-JsonFile (Join-Path $BotRuntimeRoot "latest_candidate_execution_package.json")
@@ -681,9 +841,9 @@ if ($Action -eq "stop") {
     Stop-ManagedProcess -Name "real_worker" -Pattern "manage_real_order_worker.ps1"
     Stop-ManagedProcess -Name "real_worker" -Pattern "real_order_worker.py"
     Stop-ManagedProcess -Name "bot_scheduler" -Pattern "bot_scheduler_loop.ps1"
-    Stop-ManagedProcess -Name "quant_judgement" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "quant_judgement" -Pattern "run-cycle"
     Stop-ManagedProcess -Name "research_health" -Pattern "research-health"
-    Stop-ManagedProcess -Name "factor_ingest" -Pattern "quant_runtime_scheduler.py"
+    Stop-ManagedProcess -Name "factor_ingest" -Pattern "ingest-summary"
     Stop-ManagedProcess -Name "dashboard" -Pattern "dashboard.app"
     exit 0
 }
@@ -752,7 +912,7 @@ if ($DisableCoinglassOverlay) {
     $QuantArgs += "--no-include-coinglass-overlay"
 }
 $BotArgs = @(
-    "scripts\bot_runtime_scheduler.py",
+    "scripts\ops\bot_runtime_scheduler.py",
     "run-once",
     "--runtime-root",
     $BotRuntimeRoot,
@@ -804,7 +964,7 @@ while (`$true) {
 "@
 $WorkerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $WorkerLoopCommand)
 $ReviewArgs = @(
-    "scripts\review_runtime_decisions.py",
+    "scripts\diagnostics\review_runtime_decisions.py",
     "--loop",
     "--interval-sec",
     ([string]$ReviewIntervalSec),
@@ -815,9 +975,9 @@ $ReviewArgs = @(
 )
 
 Start-ManagedProcess -Name "dashboard" -FilePath $Python -ArgumentList $DashboardArgs -WorkingDirectory $BotRoot -Pattern "dashboard.app"
-Start-ManagedProcess -Name "factor_ingest" -FilePath $Python -ArgumentList $FactorArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
+Start-ManagedProcess -Name "factor_ingest" -FilePath $Python -ArgumentList $FactorArgs -WorkingDirectory $QuantRoot -Pattern "ingest-summary"
 Start-ManagedProcess -Name "research_health" -FilePath $Python -ArgumentList $ResearchHealthArgs -WorkingDirectory $QuantRoot -Pattern "research-health"
-Start-ManagedProcess -Name "quant_judgement" -FilePath $Python -ArgumentList $QuantArgs -WorkingDirectory $QuantRoot -Pattern "quant_runtime_scheduler.py"
+Start-ManagedProcess -Name "quant_judgement" -FilePath $Python -ArgumentList $QuantArgs -WorkingDirectory $QuantRoot -Pattern "run-cycle"
 Wait-ForCondition -Name "quant_judgement" -Condition { Test-QuantReady } -TimeoutSec $DependencyWaitSec | Out-Null
 Clear-StaleBotSchedulerLock
 Start-ManagedProcess -Name "bot_scheduler" -FilePath "powershell.exe" -ArgumentList $BotSchedulerArgs -WorkingDirectory $BotRoot -Pattern "bot_scheduler_loop.ps1"

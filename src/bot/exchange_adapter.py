@@ -3,9 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from hashlib import sha256
-from typing import Any, Protocol
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Any
 
 from .binance_transport import (
     BinanceRequestConfigError,
@@ -15,244 +13,46 @@ from .binance_transport import (
     TransportResponse,
 )
 from .config import RuntimeMode
+from .exchange_command_builder import (
+    build_execution_commands,
+    build_idempotency_key,
+    build_take_profit_commands,
+    first_list,
+    optional_float,
+    resolve_entry_size_pct,
+    resolve_execution_warnings,
+    resolve_handoff_direction,
+    resolve_primary_command_reason,
+    resolve_take_profit_payloads,
+)
+from .exchange_models import (
+    AdapterAction,
+    AdapterCapabilities,
+    AdapterCredentials,
+    AdapterRuntimeSnapshot,
+    BinanceRequestMappingError,
+    BreakevenPayload,
+    CommandExecutionResult,
+    EntryOrderPayload,
+    ExchangeAdapterProtocol,
+    ExchangeRequestConfigError,
+    ExchangeTransportError,
+    ExecutionCommand,
+    ExitOrderPayload,
+    OrderSnapshot,
+    PositionSnapshot,
+    PreparedAdapterRequest,
+    ProtectiveStopPayload,
+    RecentFillsPayload,
+    ReconciliationPayload,
+    ReconciliationResult,
+    ReduceOrderPayload,
+    TakeProfitOrderPayload,
+    TrailingStopPayload,
+)
+from .exchange_reconciliation import assess_runtime_reconciliation
 from .okx_transport import OkxRequestConfigError, OkxRequestSigner, OkxTransport, OkxTransportError
 from .position_manager import ExecutionPlan
-
-
-class PositionSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    position_state: str = "FLAT"
-    direction: str = "neutral"
-    size_pct: float = 0.0
-    position_amt: float | None = None
-    entry_price: float | None = None
-    mark_price: float | None = None
-    leverage: int | None = None
-    unrealized_pnl_usd: float | None = None
-    unrealized_pnl_pct_on_margin: float | None = None
-    price_vs_entry_pct: float | None = None
-
-
-class OrderSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    order_id: str = ""
-    client_order_id: str = ""
-    order_type: str
-    status: str = "open"
-    side: str = ""
-    reduce_only: bool = False
-    quantity: float | None = None
-    price: float | None = None
-    trigger_price: float | None = None
-
-
-class AdapterRuntimeSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    fetched_at: datetime | None = None
-    mark_price_fetched_at: datetime | None = None
-    position: PositionSnapshot = Field(default_factory=PositionSnapshot)
-    open_orders: list[OrderSnapshot] = Field(default_factory=list)
-    protective_stop_present: bool = False
-    snapshot_valid: bool = True
-    account_equity: float | None = None
-    account_equity_source: str = ""
-    error_endpoint: str = ""
-    error_kind: str = ""
-    error_message: str = ""
-    error_http_status: int | None = None
-    error_payload: Any = None
-
-
-class ReconciliationResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    in_sync: bool = True
-    protective_stop_present: bool = False
-    needs_position_sync: bool = False
-    needs_order_sync: bool = False
-    reason_codes: list[str] = Field(default_factory=list)
-
-
-class ExchangeAdapterProtocol(Protocol):
-    def plan_actions(self, *, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> list["AdapterAction"]: ...
-
-    def build_commands(self, *, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> list["ExecutionCommand"]: ...
-
-    def execute_commands(self, *, commands: list["ExecutionCommand"], runtime_mode: RuntimeMode) -> list["CommandExecutionResult"]: ...
-
-    def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot: ...
-
-    def assess_reconciliation(
-        self,
-        *,
-        runtime_snapshot: AdapterRuntimeSnapshot,
-        expected_position_state: str,
-        expected_direction: str,
-        expected_size_pct: float,
-    ) -> ReconciliationResult: ...
-
-    def get_capabilities(self) -> "AdapterCapabilities": ...
-
-
-class AdapterAction(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action_type: str
-    accepted: bool = True
-    reason: str = ""
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
-class EntryOrderPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: str
-    direction: str = ""
-    initial_stop_loss: float | None = None
-    position_size_pct: float = Field(ge=0.0, le=1.0, default=0.0)
-    execution_warnings: list[str] = Field(default_factory=list)
-
-
-class ReduceOrderPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: str
-    direction: str = ""
-    reduce_conditions: list[str] = Field(default_factory=list)
-
-
-class ExitOrderPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: str
-    direction: str = ""
-
-
-class ProtectiveStopPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    direction: str = ""
-    initial_stop_loss: float | None = None
-    breakeven_trigger: float | None = None
-    trailing_rule: str = ""
-    tp_ladder: list[float] = Field(default_factory=list)
-
-
-class TakeProfitOrderPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    direction: str = ""
-    price_ratio: float = Field(gt=0.0)
-    reduce_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
-    reduce_qty: float | None = Field(default=None, gt=0.0)
-    level: int = Field(ge=1)
-
-    @model_validator(mode="after")
-    def validate_size_contract(self) -> "TakeProfitOrderPayload":
-        if (self.reduce_fraction is None) == (self.reduce_qty is None):
-            raise ValueError("take_profit_requires_exactly_one_size_contract")
-        return self
-
-
-class ReconciliationPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    recovery_action: str = ""
-
-
-class BreakevenPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    direction: str = ""
-    breakeven_trigger: float | None = None
-    trailing_rule: str = ""
-
-
-class TrailingStopPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    direction: str = ""
-    trailing_rule: str = ""
-    trailing_activation_ratio: float | None = None
-    trailing_callback_rate_pct: float | None = None
-    tp_ladder: list[float] = Field(default_factory=list)
-
-
-class RecentFillsPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: str = "sync_recent_fills"
-
-
-class ExecutionCommand(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    command_type: str
-    operation: str
-    target: str
-    idempotency_key: str = ""
-    reason: str = ""
-    payload: EntryOrderPayload | ReduceOrderPayload | ExitOrderPayload | ProtectiveStopPayload | TakeProfitOrderPayload | ReconciliationPayload | BreakevenPayload | TrailingStopPayload | RecentFillsPayload
-
-
-class CommandExecutionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target: str
-    status: str
-    accepted: bool = True
-    simulated: bool = True
-    reason: str = ""
-    details: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str = ""
-    client_order_id: str = ""
-    exchange_order_id: str = ""
-    error_kind: str = ""
-
-
-class AdapterCredentials(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    venue: str
-    api_key_env: str
-    api_secret_env: str
-    api_passphrase_env: str = ""
-    recv_window_ms: int = Field(default=60000, gt=0)
-    timeout_sec: float = Field(default=15.0, gt=0.0)
-    proxy_url: str | None = None
-    api_base_url: str = "https://fapi.binance.com"
-
-
-class AdapterCapabilities(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    supports_real_execution: bool = False
-    supports_recent_fill_sync: bool = False
-    supports_trailing_stop_update: bool = False
-    supports_breakeven_update: bool = False
-    supports_take_profit_orders: bool = False
-
-
-class BinanceRequestMappingError(RuntimeError):
-    pass
-
-
-ExchangeRequestConfigError = BinanceRequestConfigError | OkxRequestConfigError
-ExchangeTransportError = BinanceTransportError | OkxTransportError
-
-
-class PreparedAdapterRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    method: str
-    path: str
-    requires_auth: bool = True
-    params: dict[str, Any] = Field(default_factory=dict)
-    body: Any = Field(default_factory=dict)
-    idempotency_key: str = ""
 
 
 class BaseExchangeAdapter:
@@ -274,219 +74,29 @@ class BaseExchangeAdapter:
         return actions
 
     def build_commands(self, *, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> list[ExecutionCommand]:
-        commands: list[ExecutionCommand] = []
-        resolved_direction = self._resolve_handoff_direction(handoff)
-        if execution_plan.place_entry_order:
-            commands.append(
-                ExecutionCommand(
-                    command_type="order",
-                    operation="place",
-                    target="entry_order",
-                    idempotency_key=self._build_idempotency_key(target="entry_order", handoff=handoff),
-                    reason=self._resolve_primary_command_reason(execution_plan),
-                    payload=EntryOrderPayload(
-                        action=execution_plan.effective_action,
-                        direction=resolved_direction,
-                        initial_stop_loss=(handoff or {}).get("initial_stop_loss"),
-                        position_size_pct=self._resolve_entry_size_pct(execution_plan=execution_plan, handoff=handoff),
-                        execution_warnings=self._resolve_execution_warnings(handoff),
-                    ),
-                )
-            )
-        if execution_plan.place_reduce_order:
-            commands.append(
-                ExecutionCommand(
-                    command_type="order",
-                    operation="place",
-                    target="reduce_order",
-                    idempotency_key=self._build_idempotency_key(target="reduce_order", handoff=handoff),
-                    reason=self._resolve_primary_command_reason(execution_plan),
-                    payload=ReduceOrderPayload(
-                        action=execution_plan.effective_action,
-                        direction=resolved_direction,
-                        reduce_conditions=list((handoff or {}).get("reduce_conditions", [])),
-                    ),
-                )
-            )
-        if execution_plan.place_exit_order:
-            commands.append(
-                ExecutionCommand(
-                    command_type="order",
-                    operation="place",
-                    target="exit_order",
-                    idempotency_key=self._build_idempotency_key(target="exit_order", handoff=handoff),
-                    reason=self._resolve_primary_command_reason(execution_plan),
-                    payload=ExitOrderPayload(
-                        action=execution_plan.effective_action,
-                        direction=resolved_direction,
-                    ),
-                )
-            )
-        if execution_plan.maintain_protective_stop:
-            commands.append(
-                ExecutionCommand(
-                    command_type="order",
-                    operation="upsert",
-                    target="maintain_protective_stop",
-                    idempotency_key=self._build_idempotency_key(target="maintain_protective_stop", handoff=handoff),
-                    reason="protective_stop_required",
-                    payload=ProtectiveStopPayload(
-                        direction=resolved_direction,
-                        initial_stop_loss=(handoff or {}).get("initial_stop_loss"),
-                        breakeven_trigger=(handoff or {}).get("breakeven_trigger"),
-                        trailing_rule=(handoff or {}).get("trailing_rule") or "",
-                        tp_ladder=list((handoff or {}).get("tp_ladder", [])),
-                    ),
-                )
-            )
-        if execution_plan.place_take_profit_orders:
-            commands.extend(self._build_take_profit_commands(handoff=handoff, direction=resolved_direction))
-        if execution_plan.advance_breakeven:
-            commands.append(
-                ExecutionCommand(
-                    command_type="risk",
-                    operation="tighten",
-                    target="advance_breakeven_stop",
-                    idempotency_key=self._build_idempotency_key(target="advance_breakeven_stop", handoff=handoff),
-                    reason="breakeven_ready",
-                    payload=BreakevenPayload(
-                        direction=resolved_direction,
-                        breakeven_trigger=(handoff or {}).get("breakeven_trigger"),
-                        trailing_rule=(handoff or {}).get("trailing_rule") or "",
-                    ),
-                )
-            )
-        if execution_plan.advance_trailing_stop:
-            commands.append(
-                ExecutionCommand(
-                    command_type="risk",
-                    operation="tighten",
-                    target="advance_trailing_stop",
-                    idempotency_key=self._build_idempotency_key(target="advance_trailing_stop", handoff=handoff),
-                    reason="trailing_ready",
-                    payload=TrailingStopPayload(
-                        direction=resolved_direction,
-                        trailing_rule=(handoff or {}).get("trailing_rule") or "",
-                        trailing_activation_ratio=(handoff or {}).get("trailing_activation_ratio"),
-                        trailing_callback_rate_pct=(handoff or {}).get("trailing_callback_rate_pct"),
-                        tp_ladder=list((handoff or {}).get("tp_ladder", [])),
-                    ),
-                )
-            )
-        if execution_plan.sync_recent_fills:
-            commands.append(
-                ExecutionCommand(
-                    command_type="sync",
-                    operation="query",
-                    target="sync_recent_fills",
-                    idempotency_key=self._build_idempotency_key(target="sync_recent_fills", handoff=handoff),
-                    reason="recent_fill_sync_required",
-                    payload=RecentFillsPayload(),
-                )
-            )
-        if execution_plan.needs_reconciliation:
-            commands.append(
-                ExecutionCommand(
-                    command_type="sync",
-                    operation="query",
-                    target="reconcile_position_and_orders",
-                    idempotency_key=self._build_idempotency_key(target="reconcile_position_and_orders", handoff=handoff),
-                    reason="reconciliation_required",
-                    payload=ReconciliationPayload(recovery_action=execution_plan.recovery_action),
-                )
-            )
-        return commands
+        return build_execution_commands(execution_plan=execution_plan, handoff=handoff)
 
     def _build_take_profit_commands(self, *, handoff: dict[str, Any] | None, direction: str) -> list[ExecutionCommand]:
-        commands: list[ExecutionCommand] = []
-        for index, payload in enumerate(self._resolve_take_profit_payloads(handoff=handoff, direction=direction), start=1):
-            commands.append(
-                ExecutionCommand(
-                    command_type="order",
-                    operation="place",
-                    target="take_profit_order",
-                    idempotency_key=self._build_idempotency_key(target=f"take_profit_order:{index}", handoff=handoff),
-                    reason=f"take_profit_level:{index}",
-                    payload=payload,
-                )
-            )
-        return commands
+        return build_take_profit_commands(handoff=handoff, direction=direction)
 
     def _resolve_take_profit_payloads(self, *, handoff: dict[str, Any] | None, direction: str) -> list[TakeProfitOrderPayload]:
-        handoff = handoff or {}
-        direct_orders = handoff.get("take_profit_orders")
-        if isinstance(direct_orders, list) and direct_orders:
-            payloads: list[TakeProfitOrderPayload] = []
-            for index, item in enumerate(direct_orders, start=1):
-                if not isinstance(item, dict):
-                    continue
-                price_ratio = item.get("price_ratio") or item.get("target_ratio") or item.get("ratio")
-                payloads.append(
-                    TakeProfitOrderPayload(
-                        direction=direction,
-                        price_ratio=float(price_ratio),
-                        reduce_fraction=self._optional_float(item.get("reduce_fraction")),
-                        reduce_qty=self._optional_float(item.get("reduce_qty")),
-                        level=int(item.get("level") or index),
-                    )
-                )
-            return payloads
-        ladder = handoff.get("tp_ladder")
-        if not isinstance(ladder, list) or not ladder:
-            return []
-        fractions = self._first_list(handoff, "tp_reduce_fractions", "take_profit_reduce_fractions")
-        qtys = self._first_list(handoff, "tp_reduce_qtys", "take_profit_reduce_qtys")
-        if (fractions is None) == (qtys is None):
-            return []
-        if fractions is not None:
-            if len(fractions) != len(ladder):
-                return []
-            return [
-                TakeProfitOrderPayload(
-                    direction=direction,
-                    price_ratio=float(price_ratio),
-                    reduce_fraction=float(fractions[index]),
-                    level=index + 1,
-                )
-                for index, price_ratio in enumerate(ladder)
-            ]
-        if len(qtys) != len(ladder):
-            return []
-        return [
-            TakeProfitOrderPayload(
-                direction=direction,
-                price_ratio=float(price_ratio),
-                reduce_qty=float(qtys[index]),
-                level=index + 1,
-            )
-            for index, price_ratio in enumerate(ladder)
-        ]
+        return resolve_take_profit_payloads(handoff=handoff, direction=direction)
 
     @staticmethod
     def _resolve_primary_command_reason(execution_plan: ExecutionPlan) -> str:
-        action = execution_plan.effective_action or execution_plan.requested_action or "wait"
-        return f"effective_action:{action}"
+        return resolve_primary_command_reason(execution_plan)
 
     @staticmethod
     def _resolve_entry_size_pct(*, execution_plan: ExecutionPlan, handoff: dict[str, Any] | None) -> float:
-        if execution_plan.executable_size_pct is not None:
-            return float(execution_plan.executable_size_pct or 0.0)
-        handoff = handoff or {}
-        return float(handoff.get("executable_size_pct") or handoff.get("position_size_pct") or 0.0)
+        return resolve_entry_size_pct(execution_plan=execution_plan, handoff=handoff)
 
     @staticmethod
     def _first_list(handoff: dict[str, Any], *keys: str) -> list[Any] | None:
-        for key in keys:
-            value = handoff.get(key)
-            if isinstance(value, list):
-                return value
-        return None
+        return first_list(handoff, *keys)
 
     @staticmethod
     def _optional_float(value: Any) -> float | None:
-        if value in (None, ""):
-            return None
-        return float(value)
+        return optional_float(value)
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
         return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
@@ -499,43 +109,12 @@ class BaseExchangeAdapter:
         expected_direction: str,
         expected_size_pct: float,
     ) -> ReconciliationResult:
-        if not runtime_snapshot.snapshot_valid:
-            if not self.get_capabilities().supports_real_execution:
-                return ReconciliationResult(
-                    in_sync=True,
-                    protective_stop_present=False,
-                )
-            return ReconciliationResult(
-                in_sync=False,
-                protective_stop_present=False,
-                needs_position_sync=True,
-                needs_order_sync=False,
-                reason_codes=["runtime_snapshot_unavailable"],
-            )
-        reason_codes: list[str] = []
-        needs_position_sync = False
-        needs_order_sync = False
-
-        position = runtime_snapshot.position
-        if position.position_state != expected_position_state:
-            needs_position_sync = True
-            reason_codes.append("position_state_mismatch")
-        if position.direction != expected_direction:
-            needs_position_sync = True
-            reason_codes.append("position_direction_mismatch")
-        if abs(float(position.size_pct) - float(expected_size_pct)) > 1e-9:
-            needs_position_sync = True
-            reason_codes.append("position_size_mismatch")
-        if expected_size_pct > 0.0 and not runtime_snapshot.protective_stop_present:
-            needs_order_sync = True
-            reason_codes.append("protective_stop_missing")
-
-        return ReconciliationResult(
-            in_sync=not (needs_position_sync or needs_order_sync),
-            protective_stop_present=runtime_snapshot.protective_stop_present,
-            needs_position_sync=needs_position_sync,
-            needs_order_sync=needs_order_sync,
-            reason_codes=reason_codes,
+        return assess_runtime_reconciliation(
+            runtime_snapshot=runtime_snapshot,
+            expected_position_state=expected_position_state,
+            expected_direction=expected_direction,
+            expected_size_pct=expected_size_pct,
+            supports_real_execution=self.get_capabilities().supports_real_execution,
         )
 
     def get_capabilities(self) -> AdapterCapabilities:
@@ -543,45 +122,15 @@ class BaseExchangeAdapter:
 
     @staticmethod
     def _resolve_handoff_direction(handoff: dict[str, Any] | None) -> str:
-        primary = str((handoff or {}).get("direction") or "")
-        fallback = str((handoff or {}).get("current_position_direction") or "")
-        if primary in {"long", "short"}:
-            return primary
-        if fallback in {"long", "short"}:
-            return fallback
-        return primary or fallback
+        return resolve_handoff_direction(handoff)
 
     @staticmethod
     def _build_idempotency_key(*, target: str, handoff: dict[str, Any] | None) -> str:
-        generated_at = str((handoff or {}).get("generated_at") or "")
-        action = str((handoff or {}).get("action") or "wait")
-        direction = BaseExchangeAdapter._resolve_handoff_direction(handoff) or "neutral"
-        package_scope = str(
-            (handoff or {}).get("source_run_id")
-            or (handoff or {}).get("handoff_id")
-            or (handoff or {}).get("package_id")
-            or ""
-        )
-        if package_scope:
-            return f"{target}:{package_scope}:{generated_at}:{action}:{direction}"
-        return f"{target}:{generated_at}:{action}:{direction}"
+        return build_idempotency_key(target=target, handoff=handoff)
 
     @staticmethod
     def _resolve_execution_warnings(handoff: dict[str, Any] | None) -> list[str]:
-        value = (handoff or {}).get("execution_warnings")
-        if value in (None, ""):
-            return []
-        if isinstance(value, str):
-            candidates = value.split(",")
-        elif isinstance(value, list):
-            candidates = value
-        else:
-            candidates = [value]
-        return [
-            warning
-            for warning in (str(candidate).strip() for candidate in candidates)
-            if warning
-        ]
+        return resolve_execution_warnings(handoff)
 
 
 class ExchangeAdapter(BaseExchangeAdapter):

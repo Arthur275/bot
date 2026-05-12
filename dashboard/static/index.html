@@ -9,7 +9,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
+  <body data-active-tab="quant">
     <header class="topbar">
       <div class="brand-block">
         <span class="eth-mark" aria-hidden="true"></span>
@@ -30,6 +30,20 @@
     <main class="shell">
       <div id="errorBanner" class="error-banner" hidden></div>
       <div id="modeNotice" class="mode-notice" aria-live="polite">当前模式加载中；审查报告只读，不参与自动下单。</div>
+      <section class="decision-brief" aria-label="当前决策解释">
+        <div class="decision-brief-main">
+          <span id="decisionBriefBadge" class="badge gray">等待数据</span>
+          <div>
+            <h2 id="decisionBriefTitle">正在读取最新决策</h2>
+            <p id="decisionBriefText">等待运行链路返回最新状态。</p>
+          </div>
+        </div>
+        <div class="decision-brief-facts">
+          <div><span>执行模式</span><strong id="decisionBriefMode">未知</strong></div>
+          <div><span>关键条件</span><strong id="decisionBriefGate">暂无</strong></div>
+          <div><span>研究状态</span><strong id="decisionBriefResearch">暂无</strong></div>
+        </div>
+      </section>
 
       <section class="summary-bar" aria-label="当前链路摘要">
         <article class="summary-card trade-card">
@@ -73,8 +87,14 @@
         <div id="runtimeGrid" class="flow-grid"></div>
       </section>
 
+      <nav class="main-tabs" aria-label="主视图切换">
+        <button class="tab-button active" type="button" data-tab-target="quant" aria-selected="true">量化</button>
+        <button class="tab-button" type="button" data-tab-target="bot" aria-selected="false">Bot</button>
+        <button class="tab-button" type="button" data-tab-target="factor" aria-selected="false">因子</button>
+      </nav>
+
       <section class="terminal-grid" aria-label="运行监控主面板">
-        <article class="panel chart-panel chart-a">
+        <article class="panel chart-panel chart-a" data-tab-panel="quant">
           <div class="panel-head">
             <div>
               <h2>一）运行状态时间线</h2>
@@ -88,7 +108,7 @@
           </div>
         </article>
 
-        <article class="panel chart-panel chart-b">
+        <article class="panel chart-panel chart-b" data-tab-panel="quant">
           <div class="panel-head">
             <div>
               <h2>二）量化指标</h2>
@@ -100,7 +120,7 @@
           <p id="quantMetricsNote" class="source-note">等待量化指标。</p>
         </article>
 
-        <article class="panel chart-panel chart-c">
+        <article class="panel chart-panel chart-c factor-history-panel" data-tab-panel="factor">
           <div class="panel-head">
             <div>
               <h2>三）主要原因代码</h2>
@@ -110,7 +130,20 @@
           <div id="reasonCodesChart" class="chart-box"></div>
         </article>
 
-        <article class="panel chart-panel chart-d">
+        <article class="panel detail-panel edge-panel factor-history-panel" data-tab-panel="factor">
+          <div class="panel-head compact-head">
+            <div>
+              <h2>优势 / 成本</h2>
+              <p>净优势、滑点和手续费</p>
+            </div>
+            <span id="edgeCostBadge" class="badge gray">未知</span>
+          </div>
+          <dl id="edgeCostDetails" class="kv-grid compact"></dl>
+          <div class="section-head"><h3>历史样本原因统计</h3></div>
+          <ul id="riskCodes" class="signal-list"></ul>
+        </article>
+
+        <article class="panel chart-panel chart-d" data-tab-panel="quant">
           <div class="panel-head">
             <div>
               <h2>四）市场数据共识</h2>
@@ -123,7 +156,7 @@
       </section>
 
       <section class="ops-grid" aria-label="量化与执行详情">
-        <article class="panel detail-panel quant-panel">
+        <article class="panel detail-panel quant-panel" data-tab-panel="quant">
           <div class="panel-head compact-head">
             <div>
               <h2>量化市场判断</h2>
@@ -181,7 +214,7 @@
           </div>
         </article>
 
-        <article class="panel detail-panel market-panel">
+        <article class="panel detail-panel market-panel" data-tab-panel="quant">
           <div class="panel-head compact-head">
             <div>
               <h2>市场数据 / 共识状态</h2>
@@ -196,26 +229,13 @@
           </div>
           <dl id="researchDetails" class="kv-grid compact"></dl>
           <div id="researchReasons" class="chip-grid reason-chips"></div>
-        </article>
-
-        <article class="panel detail-panel edge-panel">
-          <div class="panel-head compact-head">
-            <div>
-              <h2>优势 / 成本</h2>
-              <p>净优势、滑点和手续费</p>
-            </div>
-            <span id="edgeCostBadge" class="badge gray">未知</span>
-          </div>
-          <dl id="edgeCostDetails" class="kv-grid compact"></dl>
-          <div class="section-head"><h3>风险代码</h3></div>
-          <ul id="riskCodes" class="signal-list"></ul>
-          <div class="section-head"><h3>降级标记</h3></div>
-          <ul id="degradeFlags" class="signal-list"></ul>
+          <div class="section-head diagnostic-head"><h3>研究 / 量化诊断</h3></div>
+          <ul id="degradeFlags" class="signal-list diagnostic-list"></ul>
         </article>
       </section>
 
       <section class="execution-grid" aria-label="样本治理与机器人链路">
-        <article class="panel detail-panel factor-panel">
+        <article class="panel detail-panel factor-panel" data-tab-panel="factor">
           <div class="panel-head compact-head">
             <div>
               <h2>样本采集与因子治理</h2>
@@ -236,9 +256,15 @@
             <span id="factorGovernanceBadge" class="badge gray">未知</span>
           </div>
           <div id="factorGovernanceRows" class="compact-table governance-table"></div>
+          <div class="section-head promotion-head">
+            <h3>候选晋升状态</h3>
+            <span id="candidatePromotionBadge" class="badge gray">未知</span>
+          </div>
+          <p id="candidatePromotionSummary" class="source-note">暂无候选晋升状态。</p>
+          <div id="candidatePromotionRows" class="compact-table promotion-table"></div>
         </article>
 
-        <article class="panel detail-panel bot-panel">
+        <article class="panel detail-panel bot-panel" data-tab-panel="bot">
           <div class="panel-head compact-head">
             <div>
               <h2>机器人下单链路</h2>
@@ -272,10 +298,8 @@
             <div id="auditEvents" class="audit-list"></div>
           </section>
         </article>
-      </section>
 
-      <section class="dashboard-grid">
-        <article class="panel review-panel">
+        <article class="panel review-panel" data-tab-panel="bot">
           <div class="panel-head compact-head">
             <div>
               <h2>决策审查报告（为什么等待）</h2>
@@ -288,7 +312,7 @@
           </div>
           <div class="review-terminal-grid">
             <section>
-              <h3>阻断原因</h3>
+              <h3>主要原因</h3>
               <div id="reviewRiskFindings" class="finding-list"></div>
             </section>
             <section>
@@ -316,11 +340,11 @@
               <div id="reviewSourceQuality" class="compact-table quality-table"></div>
             </section>
             <section>
-              <h3>多头理由</h3>
+              <h3>方向证据</h3>
               <div id="reviewBullCase" class="finding-list"></div>
             </section>
             <section>
-              <h3>空头理由</h3>
+              <h3>执行阻碍</h3>
               <div id="reviewBearCase" class="finding-list"></div>
             </section>
             <section>

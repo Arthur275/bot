@@ -11,6 +11,7 @@ from typing import Any
 
 from .decision_review import load_decision_review
 from .reason_text import enrich_reason_codes, load_reason_code_text_map
+from .runtime_reader import RuntimeSnapshotReader, json_read_status, jsonl_count, mtime_iso, read_json, tail_jsonl
 from .status_rules import kill_switch_status, lookup_status, runtime_status
 
 
@@ -36,11 +37,12 @@ class DashboardPaths:
 
 def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, Any]:
     paths = paths or DashboardPaths.from_env()
-    bot_runtime = paths.bot_root / "runtime"
-    quant_runtime = paths.quant_root / "runtime"
-    bot_scheduler_root = bot_runtime / "bot_runtime_scheduler"
-    quant_analysis_root = quant_runtime / "analysis"
-    quant_scheduler_root = quant_runtime / "scheduler"
+    reader = RuntimeSnapshotReader(bot_root=paths.bot_root, quant_root=paths.quant_root)
+    bot_runtime = reader.bot_runtime
+    quant_runtime = reader.quant_runtime
+    bot_scheduler_root = reader.bot_scheduler_root
+    quant_analysis_root = reader.quant_analysis_root
+    quant_scheduler_root = reader.quant_scheduler_root
 
     bot_heartbeat = _read_json(bot_scheduler_root / "heartbeat.json")
     bot_cycle = _read_json(bot_scheduler_root / "latest_cycle.json")
@@ -56,6 +58,8 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
         "quant_factor_summary": _json_read_status(quant_analysis_root / "factor_summary.json"),
         "quant_factor_ingest": _json_read_status(quant_analysis_root / "factor_ingest_latest.json"),
         "quant_factor_governance": _json_read_status(quant_analysis_root / "factor_governance_summary.json"),
+        "quant_candidate_scan": _json_read_status(quant_runtime / "reports" / "candidate_scan_feature_matrix_smoke.json"),
+        "quant_parameter_scan": _json_read_status(quant_runtime / "reports" / "parameter_scan_feature_matrix_smoke.json"),
     }
     worker_audit = _tail_jsonl(bot_runtime / "real_order_worker" / "audit.jsonl", limit=8)
     bot_samples = _jsonl_count(bot_scheduler_root / "samples.jsonl")
@@ -71,6 +75,8 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     factor_ingest = _read_json(quant_analysis_root / "factor_ingest_latest.json")
     factor_lookup = _read_latest_lookup(paths.quant_root)
     factor_governance = _read_json(quant_analysis_root / "factor_governance_summary.json")
+    candidate_scan = _read_json(quant_runtime / "reports" / "candidate_scan_feature_matrix_smoke.json")
+    parameter_scan = _read_json(quant_runtime / "reports" / "parameter_scan_feature_matrix_smoke.json")
     quant_handoff = _read_latest_handoff(paths.quant_root)
     quant_cycle = _read_latest_quant_cycle(paths.quant_root)
     quant_incomplete_cycle = _read_latest_incomplete_quant_cycle(paths.quant_root)
@@ -95,7 +101,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
         bot_latest_cycle=bot_cycle,
     )
 
-    kill_switch_path = bot_runtime / "controls" / "disable_real_execution.flag"
+    kill_switch_path = reader.kill_switch_path
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "paths": {
@@ -120,7 +126,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             ),
             "quant_scheduler": runtime_status(
                 generated_at=quant_scheduler_status.get("generated_at") or quant_heartbeat.get("generated_at") or quant_cycle.get("generated_at") or quant_handoff.get("generated_at"),
-                ok=str(quant_scheduler_status.get("status") or quant_heartbeat.get("status") or "ok") not in {"error", "blocked"},
+                ok=str(quant_scheduler_status.get("status") or quant_heartbeat.get("status") or "ok") not in {"error", "failed"},
                 stale_after_sec=30 * 60,
                 error=str(quant_scheduler_status.get("error") or quant_heartbeat.get("error") or ""),
             ),
@@ -156,6 +162,11 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             },
             "db_available": bool(quant_db_counts),
             "governance": _factor_governance_summary(factor_governance),
+            "candidate_authenticity": _candidate_authenticity_summary(candidate_scan, parameter_scan),
+            "candidate_promotion": _candidate_promotion_summary(
+                _read_json(quant_runtime / "fresh_research" / "all_results.json"),
+                _read_json(quant_runtime / "fresh_research" / "producer_output_latest.json"),
+            ),
         },
         "quant": {
             "requested_action": bot_cycle.get("requested_action") or quant_decision.get("action") or quant_handoff.get("action") or "",
@@ -163,6 +174,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "direction": bot_cycle.get("direction") or quant_decision.get("direction") or quant_handoff.get("direction") or "",
             "risk_filter_status": bot_cycle.get("risk_filter_status") or quant_risk.get("risk_filter_status") or quant_handoff.get("risk_filter_status") or "",
             "confidence": bot_cycle.get("confidence") or quant_decision.get("confidence") or quant_handoff.get("confidence"),
+            "thesis_score": bot_cycle.get("thesis_score") or quant_decision.get("thesis_score") or quant_handoff.get("thesis_score"),
             "sizing_tier": bot_cycle.get("sizing_tier") or quant_decision.get("sizing_tier") or _nested(quant_decision, "sizing_decision", "sizing_tier") or quant_handoff.get("sizing_tier") or "",
             "reasoning_summary": bot_cycle.get("reasoning_summary") or quant_decision.get("reasoning_summary") or quant_handoff.get("reasoning_summary") or "",
             "execution_block_reason": bot_cycle.get("execution_block_reason") or quant_handoff.get("execution_block_reason") or "",
@@ -318,6 +330,190 @@ def _factor_governance_summary(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict)
         ],
     }
+
+
+def _candidate_authenticity_summary(*scan_payloads: dict[str, Any]) -> dict[str, Any]:
+    reports = [_candidate_authenticity_report(payload) for payload in scan_payloads if payload]
+    reports = [report for report in reports if report["candidate_count"] or report["top_candidates"]]
+    if not reports:
+        return {
+            "status": "missing",
+            "label": "暂无扫描",
+            "generated_at": "",
+            "source": "",
+            "source_count": 0,
+            "candidate_count": 0,
+            "suspect_count": 0,
+            "research_only_count": 0,
+            "watch_count": 0,
+            "missing_authenticity_count": 0,
+            "top_candidates": [],
+        }
+
+    top_candidates = sorted(
+        [candidate for report in reports for candidate in report["top_candidates"]],
+        key=lambda item: (_candidate_authenticity_rank(item), -float(item.get("avg_return_pct") or 0.0)),
+    )[:8]
+    suspect_count = sum(_int(report.get("suspect_count")) for report in reports)
+    research_only_count = sum(_int(report.get("research_only_count")) for report in reports)
+    watch_count = sum(_int(report.get("watch_count")) for report in reports)
+    missing_authenticity_count = sum(_int(report.get("missing_authenticity_count")) for report in reports)
+    if suspect_count:
+        status = "needs_review"
+        label = "需复核"
+    elif research_only_count or missing_authenticity_count:
+        status = "research_only"
+        label = "仅研究"
+    elif watch_count:
+        status = "candidate_watch"
+        label = "可观察"
+    else:
+        status = "not_promising"
+        label = "暂不看好"
+
+    return {
+        "status": status,
+        "label": label,
+        "generated_at": max((str(report.get("generated_at") or "") for report in reports), default=""),
+        "source": "+".join(str(report.get("source") or "") for report in reports if report.get("source")),
+        "source_count": len(reports),
+        "candidate_count": sum(_int(report.get("candidate_count")) for report in reports),
+        "suspect_count": suspect_count,
+        "research_only_count": research_only_count,
+        "watch_count": watch_count,
+        "missing_authenticity_count": missing_authenticity_count,
+        "top_candidates": top_candidates,
+    }
+
+
+def _candidate_promotion_summary(all_results: dict[str, Any], producer_output: dict[str, Any]) -> dict[str, Any]:
+    results = all_results.get("results") if isinstance(all_results, dict) else []
+    results = [row for row in results if isinstance(row, dict)] if isinstance(results, list) else []
+    metadata = producer_output.get("metadata") if isinstance(producer_output, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    review_count = sum(1 for row in results if str(row.get("candidate_review_status") or "") == "review_candidate")
+    qualified_count = sum(1 for row in results if str(row.get("candidate_review_status") or "") == "qualified_candidate")
+    live_count = sum(1 for row in results if str(row.get("live_candidate_status") or "") == "live_candidate")
+    review_count = _int(metadata.get("review_candidate_count"), fallback=review_count)
+    qualified_count = _int(metadata.get("qualified_candidate_count"), fallback=qualified_count)
+    live_count = _int(metadata.get("live_candidate_count"), fallback=live_count)
+    candidate_count = _int(metadata.get("candidate_count"), fallback=len(results))
+    generated_at = str(metadata.get("generated_at") or all_results.get("timestamp") or "")
+    promoted_rows = [
+        row
+        for row in results
+        if str(row.get("candidate_review_status") or "") == "qualified_candidate"
+        or str(row.get("live_candidate_status") or "") == "live_candidate"
+    ]
+    latest_promotion_at = max(
+        (
+            str(
+                row.get("promoted_at")
+                or row.get("qualified_at")
+                or row.get("live_candidate_at")
+                or row.get("source_scan_generated_at")
+                or generated_at
+            )
+            for row in promoted_rows
+        ),
+        default="",
+    )
+    top_candidates = sorted(
+        results,
+        key=lambda row: (
+            0 if str(row.get("live_candidate_status") or "") == "live_candidate" else 1,
+            0 if str(row.get("candidate_review_status") or "") == "qualified_candidate" else 1,
+            -(_float(row.get("avg_return_pct")) or 0.0),
+        ),
+    )[:8]
+    if live_count:
+        status = "live_candidate"
+        label = "已有 live 候选"
+    elif qualified_count:
+        status = "qualified_candidate"
+        label = "已有合格候选"
+    elif candidate_count:
+        status = "review_candidate"
+        label = "仅研究候选"
+    else:
+        status = "missing"
+        label = "暂无候选"
+    return {
+        "status": status,
+        "label": label,
+        "generated_at": generated_at,
+        "candidate_count": candidate_count,
+        "review_candidate_count": review_count,
+        "qualified_candidate_count": qualified_count,
+        "live_candidate_count": live_count,
+        "latest_promotion_at": latest_promotion_at,
+        "valid_for_live_decision": bool(metadata.get("valid_for_live_decision")),
+        "issues": _list(producer_output.get("issues")) if isinstance(producer_output, dict) else [],
+        "top_candidates": [
+            {
+                "candidate_id": str(row.get("candidate_id") or row.get("metric_name") or ""),
+                "candidate_review_status": str(row.get("candidate_review_status") or "review_candidate"),
+                "live_candidate_status": str(row.get("live_candidate_status") or "not_live_ready"),
+                "total_triggers": _int(row.get("total_triggers")),
+                "win_rate": _float(row.get("win_rate")),
+                "avg_return_pct": _float(row.get("avg_return_pct")),
+                "walk_forward_quality_passed_folds": _int(row.get("walk_forward_quality_passed_folds")),
+                "walk_forward_passed_trade_share": _float(row.get("walk_forward_passed_trade_share")),
+                "live_block_reasons": _list(row.get("live_block_reasons"))[:5],
+            }
+            for row in top_candidates
+        ],
+    }
+
+
+def _candidate_authenticity_report(payload: dict[str, Any]) -> dict[str, Any]:
+    payload_candidates = _nested(payload, "payload", "candidate_summaries")
+    candidates = payload_candidates if isinstance(payload_candidates, list) and payload_candidates else payload.get("top_candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    rows = [_candidate_authenticity_row(candidate) for candidate in candidates if isinstance(candidate, dict)]
+    return {
+        "source": str(payload.get("lab") or ""),
+        "generated_at": str(payload.get("generated_at") or ""),
+        "candidate_count": _int(payload.get("candidate_count"), fallback=len(rows)),
+        "suspect_count": sum(1 for row in rows if row["verdict"] == "suspect_false_positive"),
+        "research_only_count": sum(1 for row in rows if row["verdict"] == "research_only"),
+        "watch_count": sum(1 for row in rows if row["verdict"] == "candidate_watch"),
+        "missing_authenticity_count": sum(1 for row in rows if not row["has_authenticity"]),
+        "top_candidates": rows[:8],
+    }
+
+
+def _candidate_authenticity_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else candidate
+    authenticity = candidate.get("authenticity") if isinstance(candidate.get("authenticity"), dict) else {}
+    reason_codes = _list(authenticity.get("reason_codes"))
+    return {
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "factor_names": [str(item) for item in _list(candidate.get("factor_names"))][:6],
+        "verdict": str(authenticity.get("verdict") or "authenticity_missing"),
+        "has_authenticity": bool(authenticity),
+        "reason_codes": [str(item) for item in reason_codes[:8]],
+        "total_rows": _int(authenticity.get("total_rows"), fallback=candidate.get("row_count")),
+        "total_signals": _int(authenticity.get("total_signals"), fallback=summary.get("total_signals")),
+        "signal_day_count": _int(authenticity.get("signal_day_count")),
+        "single_day_signal_ratio": _float(authenticity.get("single_day_signal_ratio")),
+        "top_return_contribution_ratio": _float(authenticity.get("top_return_contribution_ratio")),
+        "win_rate_like": _float(summary.get("win_rate_like")),
+        "avg_return_pct": _float(summary.get("avg_return_pct")),
+        "signal_rate": _float(summary.get("signal_rate")),
+        "factor_value_repetition": _list(authenticity.get("factor_value_repetition"))[:3],
+    }
+
+
+def _candidate_authenticity_rank(candidate: dict[str, Any]) -> int:
+    verdict = str(candidate.get("verdict") or "")
+    return {
+        "suspect_false_positive": 0,
+        "authenticity_missing": 1,
+        "research_only": 2,
+        "candidate_watch": 3,
+        "not_promising": 4,
+    }.get(verdict, 5)
 
 
 def _worker_status(*, worker_audit: list[dict[str, Any]], candidate: dict[str, Any]) -> dict[str, Any]:
@@ -1326,58 +1522,23 @@ def _duckdb_table_exists(conn: Any, table: str) -> bool:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    status = _json_read_status(path)
-    return status["payload"] if isinstance(status.get("payload"), dict) else {}
+    return read_json(path)
 
 
 def _json_read_status(path: Path) -> dict[str, Any]:
-    try:
-        if not path.exists():
-            return {"status": "missing", "path": str(path), "payload": {}}
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return {"status": "read_error", "path": str(path), "error": str(exc), "payload": {}}
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return {"status": "invalid_json", "path": str(path), "error": str(exc), "payload": {}}
-    if not isinstance(payload, dict):
-        return {"status": "not_object", "path": str(path), "payload": {}}
-    return {"status": "ok", "path": str(path), "payload": payload}
+    return json_read_status(path)
 
 
 def _tail_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
-    except OSError:
-        return []
-    events: list[dict[str, Any]] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            events.append(payload)
-    return events
+    return tail_jsonl(path, limit=limit)
 
 
 def _jsonl_count(path: Path) -> int:
-    try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except OSError:
-        return 0
+    return jsonl_count(path)
 
 
 def _mtime_iso(path: Path) -> str:
-    try:
-        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
-    except OSError:
-        return ""
+    return mtime_iso(path)
 
 
 def _int(value: Any, *, fallback: Any = 0) -> int:
