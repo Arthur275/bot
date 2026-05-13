@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from bot.config import BotConfig
+from bot.exchange_adapter import AdapterCredentials, OkxUsdtSwapAdapter
 from bot import live_stack_runtime
 
 
@@ -52,3 +54,46 @@ def test_runtime_resource_loads_state_payload() -> None:
     )
 
     assert runtime.load_state_payload() == {"mode": "json", "execution_state": "idle"}
+
+
+def test_build_exchange_adapter_uses_okx_adapter_for_default_bot_config() -> None:
+    config = BotConfig()
+    credentials = AdapterCredentials(
+        venue=config.exchange_venue,
+        api_key_env=config.exchange_api_key_env,
+        api_secret_env=config.exchange_api_secret_env,
+        api_passphrase_env=config.exchange_api_passphrase_env,
+        recv_window_ms=config.recv_window_ms,
+        timeout_sec=config.timeout_sec,
+        proxy_url=config.proxy_url,
+        api_base_url=config.exchange_api_base_url,
+    )
+
+    adapter = live_stack_runtime._build_exchange_adapter(config, credentials)
+
+    assert isinstance(adapter, OkxUsdtSwapAdapter)
+
+
+def test_build_bot_runtime_passes_okx_passphrase_env_to_credentials(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeOkxAdapter:
+        def __init__(self, credentials) -> None:
+            captured["credentials"] = credentials
+
+    monkeypatch.setattr(live_stack_runtime, "OkxUsdtSwapAdapter", FakeOkxAdapter)
+
+    runtime = live_stack_runtime.build_bot_runtime(
+        paths={
+            "bot_state_path": tmp_path / "state.json",
+            "bot_audit_path": tmp_path / "audit.jsonl",
+            "bot_artifacts_dir": tmp_path / "artifacts",
+        },
+        proxy_url=None,
+        run_live_judgement_fn=lambda **_: {"status": "blocked"},
+        build_execution_handoff_fn=lambda envelope: {},
+        decision_envelope_factory=lambda payload: payload,
+    )
+
+    assert runtime.adapter is captured["credentials"] or isinstance(runtime.adapter, FakeOkxAdapter)
+    assert captured["credentials"].api_passphrase_env == "OKX_TRADE_PASSPHRASE"

@@ -70,7 +70,7 @@ def test_engine_client_returns_handoff_when_judgement_is_ok(tmp_path) -> None:
     assert observed_calls["symbol"] == "ETH"
     assert observed_calls["consensus_mode"] == "auto"
     assert observed_calls["consensus_min_sources"] == 3
-    assert observed_calls["consensus_request_timeout_sec"] == 10.0
+    assert observed_calls["consensus_request_timeout_sec"] == 15.0
 
 
 def test_engine_client_skips_handoff_when_judgement_is_blocked(tmp_path) -> None:

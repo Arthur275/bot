@@ -100,7 +100,7 @@ class BotConfig(BaseModel):
     timeout_sec: float = Field(default=15.0, gt=0.0)
     consensus_mode: str = "auto"
     consensus_min_sources: int = Field(default=3, gt=0)
-    consensus_request_timeout_sec: float = Field(default=10.0, gt=0.0)
+    consensus_request_timeout_sec: float = Field(default=15.0, gt=0.0)
     artifacts_root: Path = DEFAULT_RUNTIME_ROOT
     audit_log_path: Path = DEFAULT_AUDIT_LOG_PATH
     state_store_path: Path = DEFAULT_STATE_STORE_PATH

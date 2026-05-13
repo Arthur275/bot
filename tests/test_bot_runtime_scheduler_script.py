@@ -20,7 +20,7 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         proxy_url="",
         include_okx_overlay=False,
         include_coinglass_overlay=None,
-        consensus_request_timeout_sec=10.0,
+        consensus_request_timeout_sec=15.0,
         research_sync_request_path=None,
         research_dispatch_request_path=str(tmp_path / "quant" / "runtime" / "fresh_research" / "dispatch_request.json"),
         api_key_env=None,
@@ -44,7 +44,7 @@ def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_pa
         assert args.api_key_env is None
         assert args.api_secret_env is None
         assert args.api_passphrase_env is None
-        assert args.consensus_request_timeout_sec == 10.0
+        assert args.consensus_request_timeout_sec == 15.0
         assert args.research_dispatch_request_path.endswith("dispatch_request.json")
         captured["include_coinglass_overlay"] = args.include_coinglass_overlay
         return {

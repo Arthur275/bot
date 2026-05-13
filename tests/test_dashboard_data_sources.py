@@ -12,7 +12,7 @@ import dashboard.app as dashboard_app
 from dashboard.app import DashboardHandler, OverviewSnapshotCache
 from dashboard.data_sources import DashboardPaths, load_dashboard_snapshot
 from dashboard.decision_review import build_daily_review, build_decision_review, normalize_decision_review, write_governance_suggestions
-from dashboard.status_rules import kill_switch_status, lookup_status, runtime_status
+from dashboard.status_rules import age_seconds, kill_switch_status, lookup_status, runtime_status
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +39,13 @@ def test_runtime_status_marks_running_stale_and_error() -> None:
     assert error["label"] == "ERROR"
     assert kill_switch_status(enabled=True)["level"] == "red"
     assert lookup_status(generated_at=now.isoformat())["label"] == "FRESH"
+
+
+def test_age_seconds_treats_naive_timestamps_as_local_time() -> None:
+    local_now = datetime.now().replace(microsecond=0)
+    utc_now = local_now.astimezone(timezone.utc)
+
+    assert age_seconds(local_now.isoformat(), now=utc_now) == 0
 
 
 def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Path) -> None:

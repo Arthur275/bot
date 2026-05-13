@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--proxy-url", default="http://127.0.0.1:7897")
         subparser.add_argument("--include-okx-overlay", action=argparse.BooleanOptionalAction, default=True)
         subparser.add_argument("--include-coinglass-overlay", action=argparse.BooleanOptionalAction, default=None)
-        subparser.add_argument("--consensus-request-timeout-sec", type=float, default=10.0)
+        subparser.add_argument("--consensus-request-timeout-sec", type=float, default=15.0)
         subparser.add_argument("--research-sync-request", dest="research_sync_request_path", default=None)
         subparser.add_argument("--research-dispatch-request", dest="research_dispatch_request_path", default=None)
         subparser.add_argument("--api-key-env", default=None)
@@ -283,7 +283,7 @@ def _build_cycle_args(args: argparse.Namespace, output_root: Path) -> ParsedArgs
     cycle_args.proxy_url = args.proxy_url
     cycle_args.include_okx_overlay = bool(args.include_okx_overlay)
     cycle_args.include_coinglass_overlay = args.include_coinglass_overlay
-    cycle_args.consensus_request_timeout_sec = float(getattr(args, "consensus_request_timeout_sec", 10.0) or 10.0)
+    cycle_args.consensus_request_timeout_sec = float(getattr(args, "consensus_request_timeout_sec", 15.0) or 15.0)
     cycle_args.research_sync_request_path = getattr(args, "research_sync_request_path", None)
     cycle_args.research_dispatch_request_path = getattr(args, "research_dispatch_request_path", None)
     cycle_args.api_key_env = args.api_key_env

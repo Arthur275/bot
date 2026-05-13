@@ -9,7 +9,7 @@ param(
     [int]$ReviewIntervalSec = 300,
     [int]$ResearchHealthIntervalSec = 3600,
     [int]$ResearchRefreshEvery = 12,
-    [double]$ConsensusRequestTimeoutSec = 10.0,
+    [double]$ConsensusRequestTimeoutSec = 15.0,
     [int]$DependencyWaitSec = 30,
     [string]$ProxyUrl = "http://127.0.0.1:7897",
     [switch]$EnableRealOrders,

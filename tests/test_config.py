@@ -47,6 +47,7 @@ def test_bot_config_accepts_shadow_strict_live_defaults(tmp_path: Path) -> None:
     assert config.max_account_risk_pct_per_trade == 0.01
     assert config.max_probe_account_risk_pct == 0.002
     assert config.max_probe_size_pct == 0.02
+    assert config.consensus_request_timeout_sec == 15.0
     assert config.require_execution_allowed is True
     assert config.manual_entry_confirmation_required is True
     assert config.manual_entry_confirmation_token == ""

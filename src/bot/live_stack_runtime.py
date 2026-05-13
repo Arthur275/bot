@@ -8,7 +8,7 @@ from typing import Any
 
 from .config import BotConfig, EngineMode, RuntimeMode
 from .engine_client import EngineClient, EngineCyclePayload
-from .exchange_adapter import AdapterCredentials, BinancePerpAdapter
+from .exchange_adapter import AdapterCredentials, BinancePerpAdapter, OkxUsdtSwapAdapter
 from .orchestrator import ShadowOrchestrator
 from .state_store import StateStore
 
@@ -28,7 +28,7 @@ class StaticEngineClient:
 @dataclass
 class BotRuntimeResources:
     config: BotConfig
-    adapter: BinancePerpAdapter
+    adapter: BinancePerpAdapter | OkxUsdtSwapAdapter
     state_store: StateStore
     engine_client: EngineClient
 
@@ -61,6 +61,12 @@ class BotRuntimeResources:
         return state.model_dump(mode="json") if hasattr(state, "model_dump") else dict(state)
 
 
+def _build_exchange_adapter(config: BotConfig, credentials: AdapterCredentials) -> BinancePerpAdapter | OkxUsdtSwapAdapter:
+    if config.exchange_venue == "okx_usdt_swap":
+        return OkxUsdtSwapAdapter(credentials)
+    return BinancePerpAdapter(credentials)
+
+
 def build_bot_runtime(
     *,
     paths: Mapping[str, Path],
@@ -81,6 +87,7 @@ def build_bot_runtime(
         venue=config.exchange_venue,
         api_key_env=config.exchange_api_key_env,
         api_secret_env=config.exchange_api_secret_env,
+        api_passphrase_env=config.exchange_api_passphrase_env,
         recv_window_ms=config.recv_window_ms,
         timeout_sec=config.timeout_sec,
         proxy_url=config.proxy_url,
@@ -88,7 +95,7 @@ def build_bot_runtime(
     )
     return BotRuntimeResources(
         config=config,
-        adapter=BinancePerpAdapter(credentials),
+        adapter=_build_exchange_adapter(config, credentials),
         state_store=StateStore(config.state_store_path),
         engine_client=EngineClient(
             config,

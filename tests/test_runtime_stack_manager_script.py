@@ -68,7 +68,7 @@ def test_runtime_stack_manager_entrypoints_exist() -> None:
     assert "[int]$ResearchHealthIntervalSec = 3600" in script
     assert "[int]$ResearchRefreshEvery = 12" in script
     assert "[int]$ReviewIntervalSec = 300" in script
-    assert "[double]$ConsensusRequestTimeoutSec = 10.0" in script
+    assert "[double]$ConsensusRequestTimeoutSec = 15.0" in script
     assert "manage_runtime_stack.ps1" in cmd
 
 
