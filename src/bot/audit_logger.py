@@ -18,8 +18,16 @@ class AuditEvent(BaseModel):
 
 class AuditLogger:
     _REDACTED = "<redacted>"
-    _SENSITIVE_HEADER_KEYS = {"X-MBX-APIKEY", "Authorization", "Proxy-Authorization"}
-    _SENSITIVE_PARAM_KEYS = {"signature", "timestamp", "recvWindow"}
+    _SENSITIVE_HEADER_KEYS = {
+        "authorization",
+        "ok-access-key",
+        "ok-access-passphrase",
+        "ok-access-sign",
+        "ok-access-timestamp",
+        "proxy-authorization",
+        "x-mbx-apikey",
+    }
+    _SENSITIVE_PARAM_KEYS = {"recvwindow", "signature", "timestamp"}
     _SENSITIVE_TOP_LEVEL_KEYS = {"signed_request"}
 
     def __init__(self, output_path: str | Path) -> None:
@@ -85,12 +93,16 @@ class AuditLogger:
     def _sanitize_headers(cls, headers: dict[str, Any]) -> dict[str, Any]:
         sanitized: dict[str, Any] = {}
         for key, value in headers.items():
-            sanitized[key] = cls._REDACTED if key in cls._SENSITIVE_HEADER_KEYS else cls._sanitize_value(value)
+            sanitized[key] = cls._REDACTED if cls._normalize_key(key) in cls._SENSITIVE_HEADER_KEYS else cls._sanitize_value(value)
         return sanitized
 
     @classmethod
     def _sanitize_params(cls, params: dict[str, Any]) -> dict[str, Any]:
         sanitized: dict[str, Any] = {}
         for key, value in params.items():
-            sanitized[key] = cls._REDACTED if key in cls._SENSITIVE_PARAM_KEYS else cls._sanitize_value(value)
+            sanitized[key] = cls._REDACTED if cls._normalize_key(key) in cls._SENSITIVE_PARAM_KEYS else cls._sanitize_value(value)
         return sanitized
+
+    @staticmethod
+    def _normalize_key(key: Any) -> str:
+        return str(key).lower()

@@ -32,7 +32,15 @@ def test_audit_logger_redacts_signed_request_secrets(tmp_path: Path) -> None:
                         "signed_request": {
                             "method": "GET",
                             "url": "https://fapi.binance.com/fapi/v2/positionRisk",
-                            "headers": {"X-MBX-APIKEY": "secret-key"},
+                            "headers": {
+                                "Authorization": "bearer-token",
+                                "OK-ACCESS-KEY": "okx-key",
+                                "OK-ACCESS-PASSPHRASE": "okx-passphrase",
+                                "OK-ACCESS-SIGN": "okx-signature",
+                                "OK-ACCESS-TIMESTAMP": "2026-05-13T14:21:25.234Z",
+                                "User-Agent": "eth-trading-bot/1.0",
+                                "X-MBX-APIKEY": "secret-key",
+                            },
                             "params": {
                                 "symbol": "ETHUSDT",
                                 "timestamp": 1777373493070,
@@ -49,7 +57,15 @@ def test_audit_logger_redacts_signed_request_secrets(tmp_path: Path) -> None:
     audit_event = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     signed_request = audit_event["payload"]["execution_results"][0]["details"]["signed_request"]
 
-    assert signed_request["headers"] == {"X-MBX-APIKEY": "<redacted>"}
+    assert signed_request["headers"] == {
+        "Authorization": "<redacted>",
+        "OK-ACCESS-KEY": "<redacted>",
+        "OK-ACCESS-PASSPHRASE": "<redacted>",
+        "OK-ACCESS-SIGN": "<redacted>",
+        "OK-ACCESS-TIMESTAMP": "<redacted>",
+        "User-Agent": "eth-trading-bot/1.0",
+        "X-MBX-APIKEY": "<redacted>",
+    }
     assert signed_request["params"]["symbol"] == "ETHUSDT"
     assert signed_request["params"]["timestamp"] == "<redacted>"
     assert signed_request["params"]["recvWindow"] == "<redacted>"
