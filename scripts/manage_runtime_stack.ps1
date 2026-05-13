@@ -709,7 +709,7 @@ function Show-Status {
     $review = Get-ManagedProcess -Name "review_worker" -Pattern "review_runtime_decisions.py"
 
     $homeStatus = Get-HttpStatus -Uri ("http://{0}:{1}/" -f $HostName, $DashboardPort)
-    $apiStatus = Get-HttpStatus -Uri ("http://{0}:{1}/api/overview" -f $HostName, $DashboardPort)
+    $apiStatus = Get-HttpStatus -Uri ("http://{0}:{1}/api/health" -f $HostName, $DashboardPort)
     $dashboardState = Format-ProcessHealth $dashboard
     if ($dashboardState -eq "running" -and (-not $dashboard.PortListening -or $homeStatus -ne 200 -or $apiStatus -ne 200)) {
         $dashboardState = "degraded"

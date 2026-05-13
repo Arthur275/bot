@@ -1121,6 +1121,12 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         assert response.status == 200
         assert "function render(data)" in body
 
+        conn.request("GET", "/api/health")
+        response = conn.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert payload == {"status": "ok"}
+
         conn.request("GET", "/api/overview")
         response = conn.getresponse()
         payload = json.loads(response.read().decode("utf-8"))

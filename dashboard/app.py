@@ -96,6 +96,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/health":
+            self._send_json({"status": "ok"})
+            return
         if parsed.path == "/api/overview":
             self._send_json(OVERVIEW_CACHE.get(DashboardPaths.from_env()))
             return

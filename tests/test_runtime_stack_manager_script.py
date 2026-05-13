@@ -194,7 +194,7 @@ def test_runtime_stack_manager_status_covers_plan_health_signals() -> None:
         'status.status -like "incomplete_*"',
         "Remove-StalePid",
         "Get-HttpStatus",
-        "/api/overview",
+        "/api/health",
         "Test-FreshJsonArtifact",
         "Get-FileAgeSeconds",
         "factor_ingest_latest.json",
