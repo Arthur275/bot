@@ -53,6 +53,7 @@ from .exchange_models import (
 from .exchange_reconciliation import assess_runtime_reconciliation
 from .okx_transport import OkxRequestConfigError, OkxRequestSigner, OkxTransport, OkxTransportError
 from .position_manager import ExecutionPlan
+from .time_utils import parse_datetime_utc, utc_now
 
 
 class BaseExchangeAdapter:
@@ -99,7 +100,7 @@ class BaseExchangeAdapter:
         return optional_float(value)
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
-        return AdapterRuntimeSnapshot(fetched_at=datetime.now().replace(microsecond=0), snapshot_valid=False)
+        return AdapterRuntimeSnapshot(fetched_at=utc_now(), snapshot_valid=False)
 
     def assess_reconciliation(
         self,
@@ -216,7 +217,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         results: list[CommandExecutionResult] = []
         prepared_requests = self.prepare_requests(commands=commands)
         runtime_snapshot: AdapterRuntimeSnapshot | None = None
-        for command, prepared in zip(commands, prepared_requests, strict=False):
+        for command, prepared in zip(commands, prepared_requests, strict=True):
             real_validation_mode = runtime_mode in {RuntimeMode.REAL, RuntimeMode.SIMULATED_REAL}
             if real_validation_mode and self._has_route_c_missing_warning(command):
                 results.append(
@@ -432,7 +433,7 @@ class RealExchangeAdapter(BaseExchangeAdapter):
         results: list[CommandExecutionResult] = []
         prepared_requests = self.prepare_requests(commands=commands)
         runtime_snapshot: AdapterRuntimeSnapshot | None = None
-        for command, prepared in zip(commands, prepared_requests, strict=False):
+        for command, prepared in zip(commands, prepared_requests, strict=True):
             current_runtime_snapshot = runtime_snapshot
             if self._requires_runtime_snapshot(command):
                 if current_runtime_snapshot is None:
@@ -800,7 +801,7 @@ class BinancePerpAdapter(RealExchangeAdapter):
     ENTRY_MARK_PRICE_MAX_AGE_SEC = 15.0
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
-        fetched_at = datetime.now().replace(microsecond=0)
+        fetched_at = utc_now()
         try:
             position_request = PreparedAdapterRequest(
                 method="GET",
@@ -1383,12 +1384,10 @@ class BinancePerpAdapter(RealExchangeAdapter):
     def _mark_price_age_sec(mark_price_timestamp: datetime | None) -> float | None:
         if mark_price_timestamp is None:
             return None
-        now = (
-            datetime.now(mark_price_timestamp.tzinfo).replace(microsecond=0)
-            if mark_price_timestamp.tzinfo is not None
-            else datetime.now().replace(microsecond=0)
-        )
-        return max(0.0, (now - mark_price_timestamp.replace(microsecond=0)).total_seconds())
+        normalized_timestamp = parse_datetime_utc(mark_price_timestamp)
+        if normalized_timestamp is None:
+            return None
+        return max(0.0, (utc_now() - normalized_timestamp).total_seconds())
 
     def _fetch_account_equity_for_entry(self) -> Decimal:
         account_response = self._transport.send(
@@ -1984,7 +1983,7 @@ class OkxUsdtSwapAdapter(RealExchangeAdapter):
         self._transport = transport or OkxTransport(credentials)
 
     def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
-        fetched_at = datetime.now().replace(microsecond=0)
+        fetched_at = utc_now()
         try:
             positions_response = self._send_snapshot_request(
                 PreparedAdapterRequest(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
@@ -50,7 +50,7 @@ def run(*, args: argparse.Namespace) -> dict[str, Any]:
     from bot.exchange_adapter import AdapterCredentials
     from bot.state_store import StateStore
 
-    now = datetime.now().replace(microsecond=0)
+    now = datetime.now(UTC).replace(microsecond=0)
     report_root = Path(args.report_root)
     report_root.mkdir(parents=True, exist_ok=True)
     state_path = Path(args.state_path)
@@ -269,7 +269,7 @@ def _validate_snapshot_and_candidate(
 ) -> dict[str, Any]:
     blocked: list[str] = []
     checks: dict[str, Any] = {"blocked_reasons": blocked}
-    fetched_at = snapshot.fetched_at
+    fetched_at = _ensure_utc(snapshot.fetched_at)
     snapshot_age_sec = (now - fetched_at).total_seconds() if fetched_at else None
     checks["snapshot_age_sec"] = snapshot_age_sec
     checks["snapshot_fresh"] = snapshot_age_sec is not None and snapshot_age_sec <= max_snapshot_age_sec
@@ -466,7 +466,7 @@ def _write_report(*, payload: dict[str, Any], report_root: Path) -> None:
     report_root.mkdir(parents=True, exist_ok=True)
     name = "latest_preview.json" if payload.get("mode") == "preview" else "latest_confirm.json"
     (report_root / name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    timestamp = str(payload.get("created_at") or datetime.now().isoformat()).replace(":", "").replace("-", "")
+    timestamp = str(payload.get("created_at") or datetime.now(UTC).replace(microsecond=0).isoformat()).replace(":", "").replace("-", "")
     (report_root / f"adopt_{payload.get('mode')}_{timestamp}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -507,9 +507,17 @@ def _to_bool(value: Any) -> bool:
 
 def _parse_datetime(value: Any) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
     except (TypeError, ValueError):
         return None
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _normalize_optional(value: Any) -> str:

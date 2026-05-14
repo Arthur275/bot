@@ -15,6 +15,7 @@ from .automation_state import AutomationState, coerce_automation_state_for_execu
 from .exchange_adapter import AdapterRuntimeSnapshot, CommandExecutionResult
 from .execution_summary import summarize_execution_results
 from .network_guard import GuardDecision
+from .time_utils import parse_datetime_utc, utc_now
 
 
 class ExecutionLayerState(str, Enum):
@@ -97,7 +98,7 @@ class StateStore:
     ) -> BotRuntimeState:
         next_state = (state or self.load()).model_copy(deep=True)
         next_state.consecutive_api_failure_count += 1
-        next_state.last_api_failure_at = (failed_at or datetime.now().replace(microsecond=0)).isoformat()
+        next_state.last_api_failure_at = (parse_datetime_utc(failed_at) or utc_now()).isoformat()
         if reason_code and reason_code not in next_state.last_reason_codes:
             next_state.last_reason_codes = [*next_state.last_reason_codes, reason_code]
         if next_state.consecutive_api_failure_count >= max(1, int(degraded_threshold)):
@@ -264,7 +265,7 @@ class StateStore:
     def _handoff_fallback_skip_reason(*, handoff: dict[str, Any], judgement: dict[str, Any]) -> str:
         expires_at = StateStore._parse_datetime(handoff.get("expires_at"))
         if expires_at is not None:
-            reference_time = StateStore._judgement_reference_time(judgement) or datetime.now().replace(microsecond=0)
+            reference_time = StateStore._judgement_reference_time(judgement) or utc_now()
             if expires_at <= reference_time:
                 return "handoff_expired"
         handoff_run_id = StateStore._handoff_run_id(handoff)
@@ -486,7 +487,7 @@ class StateStore:
             next_state.metadata = metadata
             return
         handoff = handoff or {}
-        started_at = StateStore._parse_datetime(handoff.get("generated_at")) or datetime.now().replace(microsecond=0)
+        started_at = StateStore._parse_datetime(handoff.get("generated_at")) or utc_now()
         expiry_bars = int(handoff.get("probe_expiry_bars") or 0)
         expiry_timeframe = str(handoff.get("probe_expiry_timeframe") or "")
         expires_at = StateStore._probe_expiry_timestamp(
@@ -545,15 +546,7 @@ class StateStore:
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
-            return None
+        return parse_datetime_utc(value)
 
     @staticmethod
     def _probe_expiry_timestamp(*, started_at: datetime, bars: int, timeframe: str) -> datetime | None:

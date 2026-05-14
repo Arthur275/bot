@@ -1259,6 +1259,7 @@ def test_real_order_worker_clears_stale_lock(tmp_path: Path) -> None:
         assert lock_path.exists()
 
     assert not lock_path.exists()
+    assert list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
 
 
 def test_real_order_worker_keeps_stale_lock_when_worker_pid_is_live(tmp_path: Path) -> None:
@@ -1308,3 +1309,11 @@ def test_real_order_worker_clears_stale_non_worker_lock_even_if_pid_is_live(tmp_
         assert lock_path.exists()
 
     assert not lock_path.exists()
+
+
+def test_real_order_worker_does_not_release_replaced_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "real_order_worker.lock"
+    with real_order_worker.WorkerLock(lock_path=lock_path, stale_after_sec=900):
+        lock_path.write_text(json.dumps({"pid": 12345, "lock_token": "other"}), encoding="utf-8")
+
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["lock_token"] == "other"

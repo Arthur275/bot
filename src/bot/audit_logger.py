@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .time_utils import parse_datetime_utc, utc_now
+
 
 class AuditEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -46,7 +48,7 @@ class AuditLogger:
     ) -> AuditEvent:
         event = AuditEvent(
             event_type=event_type,
-            generated_at=generated_at or datetime.now().replace(microsecond=0),
+            generated_at=parse_datetime_utc(generated_at) or utc_now(),
             payload=self._sanitize_value(payload),
         )
         self._output_path.parent.mkdir(parents=True, exist_ok=True)

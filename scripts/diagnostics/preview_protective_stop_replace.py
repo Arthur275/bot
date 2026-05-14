@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hashlib import sha256
 from pathlib import Path
@@ -84,7 +84,7 @@ def run(*, args: argparse.Namespace) -> dict[str, Any]:
     from bot.exchange_adapter import AdapterCredentials
     from bot.state_store import StateStore
 
-    now = datetime.now().replace(microsecond=0)
+    now = datetime.now(UTC).replace(microsecond=0)
     report_root = Path(args.report_root)
     report_root.mkdir(parents=True, exist_ok=True)
     state_path = Path(args.state_path)
@@ -358,7 +358,7 @@ def _validate_recorded_order(
 ) -> dict[str, Any]:
     blocked: list[str] = []
     checks: dict[str, Any] = {"blocked_reasons": blocked}
-    fetched_at = snapshot.fetched_at
+    fetched_at = _ensure_utc(snapshot.fetched_at)
     snapshot_age_sec = (now - fetched_at).total_seconds() if fetched_at else None
     checks["snapshot_age_sec"] = snapshot_age_sec
     checks["snapshot_fresh"] = snapshot_age_sec is not None and snapshot_age_sec <= snapshot_max_age_sec
@@ -564,7 +564,7 @@ def _build_request_preview(
     quantity = str(_order_quantity(candidate or {}) or recorded.get("quantity") or abs(float(position.position_amt or 0.0)))
     previous_place = ((previous_preview or {}).get("request_preview") or {}).get("place") or {}
     previous_params = previous_place.get("params") or {}
-    client_algo_id = str(previous_params.get("algoClOrdId") or previous_params.get("clientAlgoId") or f"ethbotpsreplace{datetime.now().strftime('%Y%m%d%H%M%S')}")
+    client_algo_id = str(previous_params.get("algoClOrdId") or previous_params.get("clientAlgoId") or f"ethbotpsreplace{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
     symbol = str((candidate or {}).get("instId") or (candidate or {}).get("symbol") or recorded.get("symbol") or "ETH-USDT-SWAP")
     is_okx = symbol == "ETH-USDT-SWAP"
     payload: dict[str, Any] = {
@@ -1109,7 +1109,7 @@ def _write_report(*, payload: dict[str, Any], report_root: Path) -> None:
     (report_root / "latest_preview.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if payload.get("mode") == "confirm":
         (report_root / "latest_confirm.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    timestamp = str(payload.get("created_at") or datetime.now().isoformat()).replace(":", "").replace("-", "")
+    timestamp = str(payload.get("created_at") or datetime.now(UTC).replace(microsecond=0).isoformat()).replace(":", "").replace("-", "")
     (report_root / f"replace_preview_{timestamp}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1148,9 +1148,17 @@ def _check(value: Any) -> str:
 
 def _parse_datetime(value: Any) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
     except (TypeError, ValueError):
         return None
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _stable_json(value: Any) -> str:

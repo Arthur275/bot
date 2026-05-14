@@ -5,7 +5,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -109,7 +109,7 @@ def summarize_samples(
         if "route_c_missing" in _as_string_list(record.get("execution_warnings"))
     )
     return {
-        "generated_at": datetime.now().replace(microsecond=0).isoformat(),
+        "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "source_path": str(Path(source_path)),
         "total_samples": total,
         "malformed_line_count": len(malformed_lines or []),

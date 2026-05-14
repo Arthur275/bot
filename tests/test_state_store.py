@@ -772,8 +772,8 @@ def test_state_store_records_active_contrarian_probe_metadata(tmp_path: Path) ->
 
     assert updated.observed_position_state == "ENTERED"
     assert updated.metadata["active_probe_source"] == "contrarian_short_probe"
-    assert updated.metadata["active_probe_started_at"] == "2026-05-02T03:00:00"
-    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T04:00:00"
+    assert updated.metadata["active_probe_started_at"] == "2026-05-02T03:00:00+00:00"
+    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T04:00:00+00:00"
     assert updated.metadata["active_probe_expiry_bars"] == 4
     assert updated.metadata["active_probe_expiry_timeframe"] == "15m"
     assert updated.metadata["active_probe_invalid_if_no_followthrough"] is True
@@ -860,8 +860,8 @@ def test_state_store_rolls_active_contrarian_probe_expiry_without_new_entry_orde
         execution_results=[],
     )
 
-    assert updated.metadata["active_probe_started_at"] == "2026-05-02T04:01:00"
-    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T05:01:00"
+    assert updated.metadata["active_probe_started_at"] == "2026-05-02T04:01:00+00:00"
+    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T05:01:00+00:00"
 
 
 def test_state_store_prefers_recent_fill_response_summary(tmp_path: Path) -> None:

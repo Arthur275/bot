@@ -87,6 +87,17 @@ def _okx_credentials() -> AdapterCredentials:
     )
 
 
+class MismatchedPreparedRequestAdapter(RealExchangeAdapter):
+    def fetch_runtime_snapshot(self) -> AdapterRuntimeSnapshot:
+        return AdapterRuntimeSnapshot(snapshot_valid=True)
+
+    def prepare_requests(self, *, commands):
+        return []
+
+    def _requires_runtime_snapshot(self, command) -> bool:
+        return False
+
+
 def test_exchange_adapter_builds_entry_and_stop_actions() -> None:
     actions = ExchangeAdapter().plan_actions(
         execution_plan=ExecutionPlan(
@@ -110,6 +121,31 @@ def test_exchange_adapter_builds_entry_and_stop_actions() -> None:
     assert actions[1].reason == "protective_stop_required"
     assert actions[0].payload["command_type"] == "order"
     assert actions[0].payload["operation"] == "place"
+
+
+def test_real_exchange_adapter_rejects_command_prepared_request_length_mismatch() -> None:
+    adapter = MismatchedPreparedRequestAdapter(_credentials())
+    commands = ExchangeAdapter().build_commands(
+        execution_plan=ExecutionPlan(
+            requested_action="entry_long",
+            effective_action="entry_long",
+            plan_reason="quant_action_passthrough",
+            place_entry_order=True,
+        ),
+        handoff={
+            "generated_at": "2026-04-26T13:00:00",
+            "action": "entry_long",
+            "direction": "long",
+            "initial_stop_loss": 0.97,
+            "position_size_pct": 0.15,
+        },
+    )
+
+    with pytest.raises(ValueError, match="zip\\(\\) argument 2 is shorter"):
+        adapter.execute_commands(commands=commands, runtime_mode=RuntimeMode.SIMULATED_REAL)
+
+    with pytest.raises(ValueError, match="zip\\(\\) argument 2 is shorter"):
+        adapter.preflight_commands(commands=commands)
 
 
 def test_exchange_adapter_builds_reconcile_action() -> None:

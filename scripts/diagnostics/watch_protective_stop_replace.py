@@ -4,7 +4,7 @@ import argparse
 from argparse import Namespace
 import json
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -109,7 +109,7 @@ def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: An
     iteration = 0
     while True:
         iteration += 1
-        now = datetime.now().replace(microsecond=0)
+        now = datetime.now(UTC).replace(microsecond=0)
         result = evaluate_once(
             adapter=adapter,
             state_store=state_store,
@@ -363,14 +363,14 @@ def auto_confirm_replace(*, args: argparse.Namespace) -> dict[str, Any]:
     except FileExistsError:
         payload = {
             "mode": "auto_confirm",
-            "created_at": datetime.now().replace(microsecond=0).isoformat(),
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "state_written": False,
             "blocked_reasons": ["auto_replace_lock_exists"],
         }
         _write_watch_report(payload=payload, watch_report_root=Path(args.watch_report_root))
         return payload
     with lock_handle:
-        lock_handle.write(datetime.now().replace(microsecond=0).isoformat())
+        lock_handle.write(datetime.now(UTC).replace(microsecond=0).isoformat())
     try:
         return _auto_confirm_replace_locked(args=args)
     finally:
@@ -384,7 +384,7 @@ def _auto_confirm_replace_locked(*, args: argparse.Namespace) -> dict[str, Any]:
     if not bool(args.accept_gap_risk):
         payload = {
             "mode": "auto_confirm",
-            "created_at": datetime.now().replace(microsecond=0).isoformat(),
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "state_written": False,
             "blocked_reasons": ["gap_risk_not_accepted"],
         }
@@ -395,7 +395,7 @@ def _auto_confirm_replace_locked(*, args: argparse.Namespace) -> dict[str, Any]:
     if not preview.get("replace_ready"):
         payload = {
             "mode": "auto_confirm",
-            "created_at": datetime.now().replace(microsecond=0).isoformat(),
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "state_written": False,
             "preview": preview,
             "blocked_reasons": list(preview.get("blocked_reasons") or ["preview_not_ready"]),
@@ -411,7 +411,7 @@ def _auto_confirm_replace_locked(*, args: argparse.Namespace) -> dict[str, Any]:
     confirmed = run_replace_preview(args=confirm_args)
     payload = {
         "mode": "auto_confirm",
-        "created_at": datetime.now().replace(microsecond=0).isoformat(),
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "state_written": bool(confirmed.get("state_written")),
         "preview": preview,
         "confirm": confirmed,
@@ -466,7 +466,7 @@ def _write_watch_report(*, payload: dict[str, Any], watch_report_root: Path) -> 
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    timestamp = str(payload.get("created_at") or datetime.now().isoformat()).replace(":", "").replace("-", "")
+    timestamp = str(payload.get("created_at") or datetime.now(UTC).replace(microsecond=0).isoformat()).replace(":", "").replace("-", "")
     (watch_report_root / f"auto_confirm_{timestamp}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .action_enums import PositionAction
 from .execution_risk_gate import ExecutionRiskGate
 from .network_guard import GuardDecision
+from .time_utils import parse_datetime_utc
 
 
 class ExecutionPlan(BaseModel):
@@ -270,12 +271,4 @@ class PositionManager:
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
-            return None
+        return parse_datetime_utc(value)

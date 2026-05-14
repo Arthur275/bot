@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +52,7 @@ def run(*, args: argparse.Namespace, adapter: Any | None = None, state_store: An
     from bot.network_guard import GuardDecision
     from bot.state_store import StateStore
 
-    now = datetime.now().replace(microsecond=0)
+    now = datetime.now(UTC).replace(microsecond=0)
     report_root = Path(args.report_root)
     report_root.mkdir(parents=True, exist_ok=True)
     state_path = Path(args.state_path)
@@ -302,7 +302,7 @@ def render_panel(payload: dict[str, Any]) -> str:
 def _write_report(*, payload: dict[str, Any], report_root: Path) -> None:
     report_root.mkdir(parents=True, exist_ok=True)
     (report_root / "latest_preview.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     (report_root / f"high_risk_preview_{timestamp}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

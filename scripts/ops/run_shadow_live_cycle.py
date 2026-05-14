@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from scripts.path_utils import repo_root_from_script
@@ -35,6 +34,7 @@ def main() -> int:
     from bot.config import BotConfig
     from bot.engine_client import EngineClient
     from bot.orchestrator import ShadowOrchestrator
+    from bot.time_utils import utc_now
 
     output_root = Path(args.output_root)
     if not output_root.is_absolute():
@@ -55,9 +55,7 @@ def main() -> int:
         build_execution_handoff_fn=contracts.build_execution_handoff,
         decision_envelope_factory=contracts.decision_envelope_factory,
     )
-    report = ShadowOrchestrator(config, engine_client=client).run_cycle(
-        generated_at=datetime.now().replace(microsecond=0)
-    )
+    report = ShadowOrchestrator(config, engine_client=client).run_cycle(generated_at=utc_now())
 
     payload = {
         "runtime_mode": report.runtime_mode,

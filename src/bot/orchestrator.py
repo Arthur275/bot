@@ -22,6 +22,7 @@ from .orchestrator_reporting import (
 )
 from .position_manager import PositionManager
 from .state_store import StateStore
+from .time_utils import parse_datetime_utc, utc_now
 
 
 class ShadowCycleReport(BaseModel):
@@ -118,7 +119,18 @@ class ShadowOrchestrator:
             raise RuntimeError("RuntimeMode.REAL 和 RuntimeMode.SIMULATED_REAL 必须显式注入支持 runtime snapshot 的 exchange adapter")
 
     def run_cycle(self, *, generated_at: datetime | None = None) -> ShadowCycleReport:
-        cycle_generated_at = generated_at or datetime.now().replace(microsecond=0)
+        cycle_generated_at = parse_datetime_utc(generated_at) or utc_now()
+        try:
+            return self._run_cycle_unchecked(cycle_generated_at=cycle_generated_at)
+        except Exception as exc:
+            self._audit_cycle_exception(
+                event_type="shadow_cycle_exception",
+                generated_at=cycle_generated_at,
+                exc=exc,
+            )
+            raise
+
+    def _run_cycle_unchecked(self, *, cycle_generated_at: datetime) -> ShadowCycleReport:
         state = self._state_store.load()
         cycle = self._engine_client.fetch_cycle(
             current_state=state.observed_position_state,
@@ -267,7 +279,18 @@ class ShadowOrchestrator:
         )
 
     def run_risk_assist_cycle(self, *, generated_at: datetime | None = None) -> RiskAssistCycleReport:
-        cycle_generated_at = generated_at or datetime.now().replace(microsecond=0)
+        cycle_generated_at = parse_datetime_utc(generated_at) or utc_now()
+        try:
+            return self._run_risk_assist_cycle_unchecked(cycle_generated_at=cycle_generated_at)
+        except Exception as exc:
+            self._audit_cycle_exception(
+                event_type="risk_assist_cycle_exception",
+                generated_at=cycle_generated_at,
+                exc=exc,
+            )
+            raise
+
+    def _run_risk_assist_cycle_unchecked(self, *, cycle_generated_at: datetime) -> RiskAssistCycleReport:
         state = self._state_store.load()
         if not self._is_risk_cycle_eligible(state):
             self._audit_logger.append(
@@ -583,6 +606,18 @@ class ShadowOrchestrator:
             and str(result.status).lower() == "accepted"
         )
 
+    def _audit_cycle_exception(self, *, event_type: str, generated_at: datetime, exc: Exception) -> None:
+        self._audit_logger.append(
+            event_type=event_type,
+            generated_at=generated_at,
+            payload={
+                "runtime_mode": self._config.runtime_mode.value,
+                "engine_mode": self._config.engine_mode.value,
+                "error_type": exc.__class__.__name__,
+                "error_message": str(exc),
+            },
+        )
+
     @staticmethod
     def _is_risk_cycle_eligible(state) -> bool:
         return bool(
@@ -606,7 +641,7 @@ class ShadowOrchestrator:
         reconciliation: ReconciliationResult,
     ) -> dict[str, object]:
         payload = state.model_dump(mode="json")
-        payload["runtime_now"] = datetime.now().replace(microsecond=0).isoformat()
+        payload["runtime_now"] = utc_now().isoformat()
         runtime_snapshot_valid = ShadowOrchestrator._is_runtime_snapshot_valid(runtime_snapshot)
         runtime_position = runtime_snapshot.position
         runtime_position_state = str(runtime_position.position_state or "") if runtime_snapshot_valid else ""

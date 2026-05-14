@@ -83,6 +83,14 @@ class FakeEngineClient:
         return self._payload
 
 
+class FailingEngineClient:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def fetch_cycle(self, **_: object) -> EngineCyclePayload:
+        raise self._exc
+
+
 class FakeExchangeAdapter:
     def __init__(
         self,
@@ -480,6 +488,64 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
     assert audit_event["payload"]["runtime_snapshot_after"] == audit_event["payload"]["runtime_snapshot"]
     assert audit_event["payload"]["reason_codes"] == []
     assert audit_event["payload"]["recent_fill_summary"] == {}
+
+
+def test_shadow_orchestrator_audits_run_cycle_exception(tmp_path: Path) -> None:
+    config = BotConfig(
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=FailingEngineClient(RuntimeError("engine unavailable")),
+        network_guard=NetworkGuard(),
+        state_store=StateStore(config.state_store_path),
+        exchange_adapter=FakeExchangeAdapter(),
+    )
+
+    with pytest.raises(RuntimeError, match="engine unavailable"):
+        orchestrator.run_cycle(generated_at=datetime(2026, 4, 26, 12, 0, 0))
+
+    audit_event = json.loads(config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit_event["event_type"] == "shadow_cycle_exception"
+    assert audit_event["payload"]["error_type"] == "RuntimeError"
+    assert audit_event["payload"]["error_message"] == "engine unavailable"
+
+
+def test_shadow_orchestrator_audits_risk_assist_cycle_exception(tmp_path: Path) -> None:
+    config = BotConfig(
+        runtime_mode=RuntimeMode.SIMULATED_REAL,
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    state_store = StateStore(config.state_store_path)
+    state = state_store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_size_pct = 0.2
+    state_store.save(state)
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=FailingEngineClient(RuntimeError("risk engine unavailable")),
+        network_guard=NetworkGuard(),
+        state_store=state_store,
+        exchange_adapter=FakeExchangeAdapter(
+            capabilities=AdapterCapabilities(supports_real_execution=True),
+            snapshot=AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.2),
+                protective_stop_present=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="risk engine unavailable"):
+        orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 4, 26, 12, 5, 0))
+
+    audit_event = json.loads(config.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit_event["event_type"] == "risk_assist_cycle_exception"
+    assert audit_event["payload"]["error_type"] == "RuntimeError"
+    assert audit_event["payload"]["error_message"] == "risk engine unavailable"
 
 
 def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mode(tmp_path: Path) -> None:

@@ -558,6 +558,7 @@ def test_bot_runtime_scheduler_clears_stale_lock(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert not lock_path.exists()
+    assert list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
 
 
 def test_bot_runtime_scheduler_clears_dead_pid_lock_even_when_fresh(tmp_path: Path, monkeypatch) -> None:
@@ -576,6 +577,38 @@ def test_bot_runtime_scheduler_clears_dead_pid_lock_even_when_fresh(tmp_path: Pa
 
     assert exit_code == 0
     assert not lock_path.exists()
+
+
+def test_bot_runtime_scheduler_does_not_release_replaced_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    with bot_runtime_scheduler.SchedulerLock(lock_path=lock_path, stale_after_sec=900):
+        lock_path.write_text(json.dumps({"pid": 12345, "lock_token": "other"}), encoding="utf-8")
+
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["lock_token"] == "other"
+
+
+def test_bot_runtime_scheduler_reports_race_after_stale_lock_claim(tmp_path: Path, monkeypatch) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.write_text("stale", encoding="utf-8")
+    old_time = time.time() - 3600
+    os.utime(lock_path, (old_time, old_time))
+    original_open = os.open
+    call_count = {"open": 0}
+
+    def racing_open(path, flags, *args, **kwargs):
+        call_count["open"] += 1
+        if call_count["open"] == 2:
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "lock_token": "other"}), encoding="utf-8")
+            raise FileExistsError
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing_open)
+
+    with pytest.raises(RuntimeError, match="already running"):
+        with bot_runtime_scheduler.SchedulerLock(lock_path=lock_path, stale_after_sec=1):
+            pass
+
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["lock_token"] == "other"
 
 
 def test_bot_runtime_scheduler_console_output_is_ascii_safe_for_windows_redirect() -> None:

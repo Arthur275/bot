@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .config import EngineMode, RuntimeMode
 from .network_guard import GuardDecision
 from .risk_filter_contract import classify_risk_filter_status, risk_filter_reason_code
+from .time_utils import parse_datetime_utc, utc_now
 
 
 HighRiskAction = Literal["trailing", "reduce", "exit"]
@@ -52,7 +53,7 @@ class HighRiskHandoff(BaseModel):
     exchange_symbol: str = "ETH-USDT-SWAP"
     direction: Literal["long", "short"]
     position_state: str = "ENTERED"
-    risk_filter_status: str = "pass"
+    risk_filter_status: str
     reduce_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
     reduce_qty: float | None = Field(default=None, gt=0.0)
     trailing_rule: TrailingRule | None = None
@@ -101,7 +102,7 @@ class HighRiskGate:
         self._exchange_min_order_qty = float(exchange_min_order_qty)
         self._stale_after_sec = float(stale_after_sec)
         self._trailing_activation_min_distance_pct = float(trailing_activation_min_distance_pct)
-        self._now_fn = now_fn or (lambda: datetime.now().replace(microsecond=0))
+        self._now_fn = now_fn or utc_now
 
     def evaluate(
         self,
@@ -136,9 +137,11 @@ class HighRiskGate:
             blocked.append("high_risk_action_in_flight")
         if network_decision.blocked or network_decision.degraded:
             blocked.append("network_unhealthy")
-        now = self._now_fn()
-        generated_age_sec = (now - handoff.generated_at).total_seconds()
-        if handoff.expires_at <= now:
+        now = parse_datetime_utc(self._now_fn()) or utc_now()
+        handoff_generated_at = parse_datetime_utc(handoff.generated_at) or now
+        handoff_expires_at = parse_datetime_utc(handoff.expires_at) or now
+        generated_age_sec = (now - handoff_generated_at).total_seconds()
+        if handoff_expires_at <= now:
             blocked.append("handoff_expired")
         elif generated_age_sec > self._stale_after_sec:
             warnings.append("handoff_stale")
@@ -304,7 +307,7 @@ class HighRiskGate:
 def write_high_risk_lock(*, lock_path: str | Path, handoff_id: str, action: str, now: datetime | None = None) -> None:
     path = Path(lock_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = (now or datetime.now().replace(microsecond=0)).isoformat()
+    timestamp = (parse_datetime_utc(now) or utc_now()).isoformat()
     path.write_text(f"{timestamp}|{action}|{handoff_id}", encoding="utf-8")
 
 

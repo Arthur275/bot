@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from scripts.path_utils import repo_root_from_script
+from bot.time_utils import utc_now
 
 try:
     from .run_shadow_preflight_cycle import DEFAULT_QUANT_ROOT, ParsedArgs, default_output_root, run_cycle
@@ -43,7 +43,7 @@ def _summarize_sample(*, sample_id: int, payload: dict[str, Any], started_at: da
     summary = {
         "sample_id": sample_id,
         "started_at": started_at.isoformat(timespec="seconds"),
-        "finished_at": datetime.now().replace(microsecond=0).isoformat(),
+        "finished_at": utc_now().isoformat(),
         "status": status,
         "error": error,
         "requested_action": payload.get("requested_action"),
@@ -104,7 +104,7 @@ def main() -> int:
     bot_root = repo_root_from_script(__file__)
 
     for sample_id in range(1, max(1, args.samples) + 1):
-        started_at = datetime.now().replace(microsecond=0)
+        started_at = utc_now()
         cycle_output_root = Path(args.cycle_output_root) / f"sample_{sample_id:04d}"
         try:
             payload = run_cycle(args=_build_cycle_args(args, cycle_output_root), bot_root=bot_root)

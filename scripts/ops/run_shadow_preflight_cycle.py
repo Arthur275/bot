@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +140,7 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
     from bot.exchange_adapter import AdapterCredentials, ExchangeAdapter
     from bot.orchestrator import ShadowOrchestrator
     from bot.position_manager import ExecutionPlan
+    from bot.time_utils import utc_now
 
     output_root = Path(args.output_root)
     if not output_root.is_absolute():
@@ -190,7 +190,7 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         decision_envelope_factory=contracts.decision_envelope_factory,
     )
     report = ShadowOrchestrator(config, engine_client=client, exchange_adapter=real_adapter).run_cycle(
-        generated_at=datetime.now().replace(microsecond=0)
+        generated_at=utc_now()
     )
 
     audit_event = _load_latest_audit_event(config.audit_log_path)

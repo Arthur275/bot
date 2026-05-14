@@ -22,6 +22,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from bot.atomic_io import atomic_write_json
 from bot.config import bot_runtime_scheduler_root, kill_switch_path, repo_root_from_file
+from bot.lock_file import ExclusiveLock, process_exists
+from bot.time_utils import utc_now
 
 try:
     from .run_shadow_preflight_cycle import DEFAULT_QUANT_ROOT, ParsedArgs, default_output_root, run_cycle
@@ -97,7 +99,7 @@ def run_once(*, args: argparse.Namespace, bot_root: Path, cycle_runner: CycleRun
     runtime_root = Path(args.runtime_root)
     runtime_root.mkdir(parents=True, exist_ok=True)
     sample_id = _next_sample_id(runtime_root / "samples.jsonl")
-    started_at = datetime.now().replace(microsecond=0)
+    started_at = utc_now()
     cycle_output_root = Path(args.cycle_output_root) / f"bot_runtime_{sample_id:04d}"
     try:
         payload = cycle_runner(args=_build_cycle_args(args, cycle_output_root), bot_root=bot_root)
@@ -190,84 +192,29 @@ def _run_loop_unlocked(*, args: argparse.Namespace, bot_root: Path, cycle_runner
 
 class SchedulerLock:
     def __init__(self, *, lock_path: Path, stale_after_sec: int = 900) -> None:
-        self._lock_path = lock_path
-        self._stale_after_sec = stale_after_sec
-        self._handle: int | None = None
+        self._lock = ExclusiveLock(
+            lock_path=lock_path,
+            stale_after_sec=stale_after_sec,
+            owner="bot_runtime_scheduler",
+            process_check=_process_exists,
+        )
 
     def __enter__(self) -> "SchedulerLock":
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            self._handle = os.open(str(self._lock_path), flags)
-        except FileExistsError as exc:
-            if not self._try_clear_stale_lock():
-                raise RuntimeError(f"bot runtime scheduler already running: {self._lock_path}") from exc
-            self._handle = os.open(str(self._lock_path), flags)
-        payload = {
-            "pid": os.getpid(),
-            "created_at": datetime.now().replace(microsecond=0).isoformat(),
-        }
-        os.write(self._handle, json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        self._lock.__enter__()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is not None:
-            os.close(self._handle)
-            self._handle = None
-        try:
-            self._lock_path.unlink()
-        except FileNotFoundError:
-            pass
-
-    def _try_clear_stale_lock(self) -> bool:
-        try:
-            stat = self._lock_path.stat()
-        except FileNotFoundError:
-            return True
-        lock_pid = self._read_lock_pid()
-        if lock_pid is not None and not _process_exists(lock_pid):
-            try:
-                self._lock_path.unlink()
-            except FileNotFoundError:
-                return True
-            return True
-        age_sec = max(0.0, time.time() - stat.st_mtime)
-        if age_sec < self._stale_after_sec:
-            return False
-        try:
-            self._lock_path.unlink()
-        except FileNotFoundError:
-            return True
-        return True
-
-    def _read_lock_pid(self) -> int | None:
-        try:
-            payload = json.loads(self._lock_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        try:
-            pid = int(payload.get("pid"))
-        except (TypeError, ValueError):
-            return None
-        return pid if pid > 0 else None
+        self._lock.__exit__(exc_type, exc, tb)
 
 
 def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_exists(pid)
 
 
 def write_heartbeat(*, runtime_root: Path, status: str, mode: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     runtime_root.mkdir(parents=True, exist_ok=True)
     payload = {
-        "generated_at": datetime.now().replace(microsecond=0).isoformat(),
+        "generated_at": utc_now().isoformat(),
         "status": status,
         "mode": mode,
     }
@@ -344,7 +291,7 @@ def _write_candidate_execution_package(
             "status": "skipped",
             "reason": "candidate_execution_package_not_allowed",
         }
-    generated_at = datetime.now().replace(microsecond=0)
+    generated_at = utc_now()
     action = str(payload.get("effective_action") or payload.get("requested_action") or "")
     package_id = _build_package_id(generated_at=generated_at, action=action)
     package = {

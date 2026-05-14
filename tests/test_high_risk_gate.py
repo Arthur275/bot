@@ -189,6 +189,20 @@ def test_high_risk_gate_requires_explicit_version(tmp_path) -> None:
     assert "handoff_schema_invalid" in decision.blocked_reasons
 
 
+def test_high_risk_gate_requires_explicit_risk_filter_status(tmp_path) -> None:
+    handoff = _handoff()
+    handoff.pop("risk_filter_status")
+
+    decision = _gate(tmp_path).evaluate(
+        raw_handoff=handoff,
+        network_decision=_network(),
+        runtime_snapshot=_snapshot(),
+    )
+
+    assert decision.allowed is False
+    assert "handoff_schema_invalid" in decision.blocked_reasons
+
+
 def test_high_risk_gate_blocks_reduce_qty_above_position(tmp_path) -> None:
     decision = _gate(tmp_path).evaluate(
         raw_handoff=_handoff(reduce_fraction=None, reduce_qty=0.1),

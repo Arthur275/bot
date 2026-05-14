@@ -24,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 from bot.audit_logger import AuditLogger
 from bot.config import BotConfig, RuntimeMode, candidate_execution_package_path, kill_switch_path, real_order_worker_audit_path, real_order_worker_lock_path, repo_root_from_file, runtime_root_for_repo
 from bot.exchange_adapter import AdapterCredentials, AdapterRuntimeSnapshot, BinancePerpAdapter, CommandExecutionResult, ExecutionCommand, OkxUsdtSwapAdapter, OrderSnapshot
+from bot.lock_file import ExclusiveLock, coerce_positive_int, process_exists
 from bot.state_store import StateStore
 
 
@@ -228,79 +229,35 @@ def run_once(*, args: argparse.Namespace, adapter_factory: AdapterFactory | None
 
 class WorkerLock:
     def __init__(self, *, lock_path: Path, stale_after_sec: int = 900) -> None:
-        self._lock_path = lock_path
-        self._stale_after_sec = stale_after_sec
-        self._handle: int | None = None
+        self._lock = ExclusiveLock(
+            lock_path=lock_path,
+            stale_after_sec=stale_after_sec,
+            owner=WORKER_LOCK_OWNER,
+            extra_payload={"script_path": str(Path(__file__).resolve())},
+            process_check=_process_is_running,
+            protected_metadata=_has_live_worker_owner,
+            start_token_resolver=_process_start_token,
+        )
 
     def __enter__(self) -> "WorkerLock":
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            self._handle = os.open(str(self._lock_path), flags)
-        except FileExistsError as exc:
-            if not self._try_clear_stale_lock():
-                raise RuntimeError(f"real order worker already running: {self._lock_path}") from exc
-            self._handle = os.open(str(self._lock_path), flags)
-        os.write(
-            self._handle,
-            json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "owner": WORKER_LOCK_OWNER,
-                    "created_at": datetime.now().replace(microsecond=0).isoformat(),
-                    "process_start_token": _process_start_token(os.getpid()),
-                    "script_path": str(Path(__file__).resolve()),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8"),
-        )
+        self._lock.__enter__()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is not None:
-            os.close(self._handle)
-            self._handle = None
-        try:
-            self._lock_path.unlink()
-        except FileNotFoundError:
-            pass
+        self._lock.__exit__(exc_type, exc, tb)
 
-    def _try_clear_stale_lock(self) -> bool:
-        try:
-            stat = self._lock_path.stat()
-        except FileNotFoundError:
-            return True
-        metadata = self._read_lock_metadata()
-        if self._has_live_worker_owner(metadata):
-            return False
-        if max(0.0, time.time() - stat.st_mtime) < self._stale_after_sec:
-            return False
-        try:
-            self._lock_path.unlink()
-        except FileNotFoundError:
-            return True
+
+def _has_live_worker_owner(metadata: dict[str, Any]) -> bool:
+    if not _lock_metadata_matches_worker(metadata):
+        return False
+    pid = _coerce_positive_int(metadata.get("pid"))
+    if pid is None or not _process_is_running(pid):
+        return False
+    recorded_start_token = str(metadata.get("process_start_token") or "")
+    if not recorded_start_token:
         return True
-
-    def _read_lock_metadata(self) -> dict[str, Any]:
-        try:
-            payload = json.loads(self._lock_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _has_live_worker_owner(metadata: dict[str, Any]) -> bool:
-        if not _lock_metadata_matches_worker(metadata):
-            return False
-        pid = _coerce_positive_int(metadata.get("pid"))
-        if pid is None or not _process_is_running(pid):
-            return False
-        recorded_start_token = str(metadata.get("process_start_token") or "")
-        if not recorded_start_token:
-            return True
-        current_start_token = _process_start_token(pid)
-        return not current_start_token or current_start_token == recorded_start_token
+    current_start_token = _process_start_token(pid)
+    return not current_start_token or current_start_token == recorded_start_token
 
 
 def _lock_metadata_matches_worker(metadata: dict[str, Any]) -> bool:
@@ -312,11 +269,7 @@ def _lock_metadata_matches_worker(metadata: dict[str, Any]) -> bool:
 
 
 def _coerce_positive_int(value: object) -> int | None:
-    try:
-        candidate = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return candidate if candidate > 0 else None
+    return coerce_positive_int(value)
 
 
 def _process_is_running(pid: int) -> bool:
@@ -324,15 +277,7 @@ def _process_is_running(pid: int) -> bool:
         return True
     if os.name == "nt":
         return _windows_process_is_running(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_exists(pid)
 
 
 def _process_start_token(pid: int) -> str:
