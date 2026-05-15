@@ -124,7 +124,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write_response_body(body)
 
     def _send_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
@@ -139,7 +139,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store" if path.suffix == ".html" else "max-age=60")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write_response_body(body)
+
+    def _write_response_body(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            return
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:

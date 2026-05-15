@@ -1144,6 +1144,17 @@ def test_dashboard_http_serves_static_and_overview_api(tmp_path: Path, monkeypat
         server.server_close()
 
 
+def test_dashboard_write_response_body_ignores_client_disconnect() -> None:
+    class DisconnectingWriter:
+        def write(self, _body: bytes) -> None:
+            raise ConnectionAbortedError("client disconnected")
+
+    handler = object.__new__(DashboardHandler)
+    handler.wfile = DisconnectingWriter()
+
+    handler._write_response_body(b"{}")
+
+
 def test_dashboard_reports_invalid_json_source_quality(tmp_path: Path) -> None:
     bot_root = tmp_path / "bot"
     quant_root = tmp_path / "quant"
