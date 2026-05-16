@@ -122,6 +122,35 @@ def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_pa
     assert len(samples) == 1
 
 
+def test_bot_runtime_scheduler_summary_records_real_order_runtime_modes(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: {
+            "runtime_mode": "real",
+            "planning_runtime_mode": "simulated-real",
+            "real_order_submission_intent": True,
+            "engine_mode": "strict-live",
+            "requested_action": "observe_only",
+            "effective_action": "observe_only",
+            "blocked": False,
+            "degraded": False,
+            "handoff": {"action": "observe_only", "direction": "neutral"},
+            "execution_plan": {},
+            "runtime_snapshot": {"snapshot_valid": True, "position": {"position_state": "FLAT"}},
+            "audit_log_path": "",
+        },
+    )
+
+    assert payload["runtime_mode"] == "real"
+    assert payload["planning_runtime_mode"] == "simulated-real"
+    assert payload["real_order_submission_intent"] is True
+    assert payload["engine_mode"] == "strict-live"
+
+
 def test_bot_runtime_scheduler_write_json_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "runtime" / "latest_cycle.json"
     path.parent.mkdir(parents=True)
@@ -142,11 +171,11 @@ def test_bot_runtime_scheduler_write_json_is_atomic(tmp_path: Path, monkeypatch:
 def test_bot_runtime_scheduler_enable_real_orders_still_blocks_shadow_payload(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.enable_real_orders = True
+    captured = {}
 
-    payload = bot_runtime_scheduler.run_once(
-        args=args,
-        bot_root=Path(__file__).resolve().parents[1],
-        cycle_runner=lambda **_: {
+    def fake_cycle_runner(**kwargs):
+        captured["enable_real_orders"] = kwargs["args"].enable_real_orders
+        return {
             "runtime_mode": "shadow",
             "requested_action": "entry_long",
             "effective_action": "entry_long",
@@ -157,9 +186,15 @@ def test_bot_runtime_scheduler_enable_real_orders_still_blocks_shadow_payload(tm
                 {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
             ],
             "audit_log_path": "",
-        },
+        }
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=fake_cycle_runner,
     )
 
+    assert captured["enable_real_orders"] is True
     assert payload["real_order_gate"]["enabled"] is True
     assert payload["real_order_gate"]["allowed"] is False
     assert payload["automation_boundary"] == "real_order_submission_blocked"

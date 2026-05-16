@@ -69,6 +69,7 @@ def _args(*, quant_root: Path, output_root: Path) -> run_shadow_preflight_cycle.
     args.api_key_env = "OKX_API_KEY"
     args.api_secret_env = "OKX_API_SECRET"
     args.api_passphrase_env = "OKX_API_PASSPHRASE"
+    args.enable_real_orders = False
     return args
 
 
@@ -291,6 +292,55 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
     assert payload["preflight"][0]["side"] == "sell"
     assert payload["preflight"][0]["quantity"] == "0.031"
     assert payload["preflight"][0]["newClientOrderId"] == "entry_order:2026-05-01T01:05:00:small_probe:short"
+
+
+def test_shadow_preflight_real_order_intent_emits_real_payload_after_simulated_validation(monkeypatch, tmp_path: Path) -> None:
+    quant_root = tmp_path / "fake_quant_real_order_intent"
+    _write_fake_quant_modules(
+        quant_root / "src",
+        handoff_payload="{"
+        "'generated_at': '2026-05-01T01:05:00',"
+        "'action': 'small_probe',"
+        "'direction': 'short',"
+        "'execution_allowed': True,"
+        "'risk_filter_status': 'pass',"
+        "'position_size_pct': 0.2,"
+        "'executable_size_pct': 0.02,"
+        "'sizing_tier': 'probe',"
+        "'sizing_bias': 'conservative',"
+        "'max_account_risk_pct_per_trade': 0.01,"
+        "'initial_stop_loss': 1.018,"
+        "'stop_distance_pct': 0.018,"
+        "'tp_ladder': [],"
+        "'reduce_conditions': ['crowding_warning'],"
+        "'invalidate_conditions': ['setup_invalidated'],"
+        "'trailing_rule': 'trail_with_trigger'"
+        "}",
+    )
+    runtime_modes = []
+
+    class RecordingFakeOkxUsdtSwapAdapter(FakeOkxUsdtSwapAdapter):
+        def execute_commands(self, *, commands, runtime_mode):
+            runtime_modes.append(runtime_mode.value)
+            return super().execute_commands(commands=commands, runtime_mode=runtime_mode)
+
+    args = _args(quant_root=quant_root, output_root=tmp_path / "out_real_order_intent")
+    args.enable_real_orders = True
+    monkeypatch.setattr(run_shadow_preflight_cycle, "_load_real_adapter", lambda venue: RecordingFakeOkxUsdtSwapAdapter)
+
+    _clear_fake_quant_modules()
+    payload = run_shadow_preflight_cycle.run_cycle(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+    )
+
+    assert runtime_modes == ["simulated-real"]
+    assert payload["runtime_mode"] == "real"
+    assert payload["planning_runtime_mode"] == "simulated-real"
+    assert payload["real_order_submission_intent"] is True
+    assert payload["engine_mode"] == "strict-live"
+    assert payload["command_targets"] == ["entry_order", "maintain_protective_stop"]
+    assert payload["preflight_statuses"] == ["preflight_ready"]
 
 
 def test_shadow_preflight_script_blocks_entry_when_risk_filter_status_missing(monkeypatch, tmp_path: Path) -> None:

@@ -236,6 +236,7 @@ def _build_cycle_args(args: argparse.Namespace, output_root: Path) -> ParsedArgs
     cycle_args.api_key_env = args.api_key_env
     cycle_args.api_secret_env = args.api_secret_env
     cycle_args.api_passphrase_env = getattr(args, "api_passphrase_env", None)
+    cycle_args.enable_real_orders = bool(getattr(args, "enable_real_orders", False))
     return cycle_args
 
 

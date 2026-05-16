@@ -37,6 +37,7 @@ class ParsedArgs(argparse.Namespace):
     api_key_env: str | None
     api_secret_env: str | None
     api_passphrase_env: str | None
+    enable_real_orders: bool
 
 
 def default_output_root() -> str:
@@ -121,6 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-env", default=None)
     parser.add_argument("--api-secret-env", default=None)
     parser.add_argument("--api-passphrase-env", default=None)
+    parser.add_argument(
+        "--enable-real-orders",
+        action="store_true",
+        default=False,
+        help="Emit a real-order candidate payload after simulated-real validation; this script still does not submit orders.",
+    )
     return parser
 
 
@@ -135,7 +142,7 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
     quant_root = Path(args.quant_root)
     contracts = load_quant_runtime_contracts(bot_root=bot_root, quant_root=quant_root)
 
-    from bot.config import BotConfig
+    from bot.config import BotConfig, RuntimeMode
     from bot.engine_client import EngineClient
     from bot.exchange_adapter import AdapterCredentials, ExchangeAdapter
     from bot.orchestrator import ShadowOrchestrator
@@ -147,7 +154,10 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         output_root = bot_root / output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
+    real_order_submission_intent = bool(getattr(args, "enable_real_orders", False))
+    planning_runtime_mode = RuntimeMode.SIMULATED_REAL if real_order_submission_intent else RuntimeMode.SHADOW
     config = BotConfig(
+        runtime_mode=planning_runtime_mode,
         audit_log_path=output_root / "audit.jsonl",
         state_store_path=output_root / "state.json",
         artifacts_root=output_root / "artifacts",
@@ -211,9 +221,12 @@ def run_cycle(*, args: ParsedArgs, bot_root: Path) -> dict[str, Any]:
         preflight_error = "preflight_skipped_missing_api_env"
 
     payload = {
-        "runtime_mode": report.runtime_mode,
+        "runtime_mode": RuntimeMode.REAL.value if real_order_submission_intent else report.runtime_mode,
+        "planning_runtime_mode": report.runtime_mode,
+        "real_order_submission_intent": real_order_submission_intent,
         "exchange_venue": config.exchange_venue,
         "exchange_symbol": config.exchange_symbol,
+        "engine_mode": config.engine_mode.value,
         "adapter_capabilities": (real_adapter or ExchangeAdapter()).get_capabilities().model_dump(mode="json"),
         "requested_action": report.requested_action,
         "effective_action": report.effective_action,
