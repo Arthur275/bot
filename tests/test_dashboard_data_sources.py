@@ -117,6 +117,12 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
                 "position": {"position_state": "FLAT", "direction": "neutral", "size_pct": 0.0, "mark_price": 3450.0},
             },
             "automation_boundary": "real_order_submission_candidate",
+            "real_order_gate": {
+                "enabled": True,
+                "allowed": False,
+                "automation_boundary": "real_order_submission_blocked",
+                "reason_codes": ["runtime_mode_not_real"],
+            },
         },
     )
     _write_json(
@@ -486,6 +492,10 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["charts"]["consensus_quality_series"][0]["market_data_mode"] == "restricted_two_source"
     assert snapshot["bot"]["candidate_package"]["gate_allowed"] is True
     assert snapshot["bot"]["candidate_package"]["command_targets"] == ["entry_order", "maintain_protective_stop"]
+    assert snapshot["bot"]["real_order_gate"]["enabled"] is True
+    assert snapshot["bot"]["real_order_gate"]["allowed"] is False
+    assert snapshot["bot"]["real_order_gate"]["reason_codes"] == ["runtime_mode_not_real"]
+    assert snapshot["bot"]["latest_cycle"]["real_order_gate"]["enabled"] is True
     assert snapshot["bot"]["position_state"] == "FLAT"
     assert snapshot["bot"]["position_direction"] == "neutral"
     assert snapshot["bot"]["position_size_pct"] == 0.0
@@ -1000,7 +1010,19 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "renderCandidatePromotion" in app_js
     assert "renderProbeDiagnostics" in app_js
     assert "renderDecisionBrief" in app_js
-    assert "function executionModeText(runtime)" in app_js
+    assert "renderGateStack" in app_js
+    assert "buildGateStackRows" in app_js
+    assert "Gate Stack" in html
+    assert "真实提交开关" in html
+    assert "真实提交：未知" in html
+    assert "模式：未知" not in html
+    assert "真实提交：未启用" in app_js
+    assert "real_order_gate" in app_js
+    assert "real_order_gate" in (REPO_ROOT / "dashboard" / "data_sources.py").read_text(encoding="utf-8")
+    assert "真实订单闸门" in app_js
+    assert "SUBMIT OFF" in app_js
+    assert "模拟执行" not in app_js
+    assert "function executionModeText(runtime, bot = {})" in app_js
     assert 'blocked: "未放行"' in app_js
     assert 'if (raw === "blocked") return "yellow";' in app_js
     assert 'function cycleStatusLabel(status)' in app_js
@@ -1022,6 +1044,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert {"degradeFlags", "riskCodes"} <= html_ids
     assert {"reviewStatusBadge", "reviewSourceQuality", "reviewRiskFindings", "summaryAction", "summaryBlockReason"} <= html_ids
     assert {"decisionBriefBadge", "decisionBriefTitle", "decisionBriefText", "decisionBriefMode", "decisionBriefGate", "decisionBriefResearch"} <= html_ids
+    assert {"gateStackBadge", "gateStackSummary", "gateStackRows"} <= html_ids
     assert {"pauseBtn", "modeNotice"} <= html_ids
     assert "历史样本原因统计" in html
     assert 'class="ops-grid"' in html

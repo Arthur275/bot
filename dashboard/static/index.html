@@ -19,7 +19,7 @@
       </div>
       <div class="toolbar">
         <span id="refreshState" class="status-pill blue">刷新：等待</span>
-        <span id="orderModePill" class="status-pill gray">模式：未知</span>
+        <span id="orderModePill" class="status-pill gray">真实提交：未知</span>
         <span id="killSwitchPill" class="status-pill gray">熔断：未知</span>
         <span id="updatedAt" class="updated-at">最后更新：暂无</span>
         <button id="pauseBtn" type="button"><span aria-hidden="true">Ⅱ</span> 暂停</button>
@@ -39,10 +39,21 @@
           </div>
         </div>
         <div class="decision-brief-facts">
-          <div><span>执行模式</span><strong id="decisionBriefMode">未知</strong></div>
+          <div><span>真实提交开关</span><strong id="decisionBriefMode">未知</strong></div>
           <div><span>关键条件</span><strong id="decisionBriefGate">暂无</strong></div>
           <div><span>研究状态</span><strong id="decisionBriefResearch">暂无</strong></div>
         </div>
+      </section>
+
+      <section class="gate-stack-panel" aria-label="下单闸门主视图">
+        <div class="gate-stack-head">
+          <div>
+            <h2>Gate Stack</h2>
+            <p id="gateStackSummary">等待最新闸门状态。</p>
+          </div>
+          <span id="gateStackBadge" class="badge gray">等待数据</span>
+        </div>
+        <div id="gateStackRows" class="gate-stack-rows"></div>
       </section>
 
       <section class="summary-bar" aria-label="当前链路摘要">

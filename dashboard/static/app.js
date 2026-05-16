@@ -60,6 +60,7 @@ const valueLabels = {
   neutral: "中性",
   flat: "空仓",
   full: "完整",
+  open: "开放",
   "async full": "异步完整审查",
   pass: "通过",
   veto: "否决",
@@ -74,7 +75,7 @@ const valueLabels = {
   available: "可用",
   missing: "缺失",
   waiting: "等待",
-  dry_run: "模拟执行",
+  dry_run: "真实提交未启用",
   submit_enabled: "真实提交已启用",
   consensus_auto: "自动共识",
   unknown_neutral: "未知中性",
@@ -96,6 +97,20 @@ const valueLabels = {
   trigger_watch: "等待触发观察",
   shadow_observe: "影子观察",
   no_order_submission: "不提交订单",
+  real_order_submission_allowed: "真实提交已放行",
+  real_order_submission_blocked: "真实提交被阻断",
+  real_order_submission_candidate: "真实提交候选",
+  runtime_mode_not_real: "运行模式不是实盘",
+  cycle_blocked_or_degraded: "周期被阻断或降级",
+  take_profit_orders_not_planned: "止盈订单未规划",
+  action_not_executable: "动作不可执行",
+  execution_not_allowed: "执行闸门未放行",
+  execution_not_allowed_by_handoff: "交接包未允许执行",
+  risk_filter_not_pass: "风控未通过",
+  runtime_snapshot_invalid: "运行快照无效",
+  kill_switch_enabled: "熔断已开启",
+  kill_switch_enabled_before_submit: "提交前熔断已开启",
+  real_order_gate_not_allowed: "真实订单闸门未放行",
   shadow_preflight_only: "影子预检",
   candidate_execution_package_not_allowed: "候选执行包未放行",
   disabled_by_kill_switch: "熔断禁用",
@@ -279,6 +294,10 @@ const sourceLabels = {
 
 const $ = (id) => document.getElementById(id);
 let refreshPaused = false;
+const refreshRetryIntervalMs = 5000;
+let lastSuccessfulSnapshotAt = null;
+let lastRefreshError = "";
+let nextRetryAt = null;
 const chartInstances = {};
 const chartPalette = {
   text: "#e5edf7",
@@ -364,7 +383,7 @@ function humanizeCode(value) {
     .replace(/\bwait\b/gi, "等待")
     .replace(/\bentry\b/gi, "开仓")
     .replace(/\bexit\b/gi, "平仓")
-    .replace(/\bopen\b/gi, "打开")
+    .replace(/\bopen\b/gi, "开放")
     .replace(/\brun\b/gi, "运行")
     .replace(/\ball results\b/gi, "全结果")
     .replace(/\bfallback\b/gi, "降级回退")
@@ -697,9 +716,11 @@ function levelForDisplay(value, fallback = "") {
   const label = text(value, "").toLowerCase();
   const merged = `${raw} ${label}`;
   if (!raw && !label) return fallback;
+  if (/(真实提交[:：]\s*已启用|submit on|submit_enabled)/i.test(merged)) return "red";
   if (/(否决|错误|失败|不可用|缺失|过低|不合格|禁用|veto|error|failed|missing|unavailable)/i.test(merged)) return "red";
   if (/(阻断|未放行|降级|预警|接近过期|不足|拥挤|偏高|受限|观察|blocked|degraded|warning|stale|aging|insufficient|crowded|restricted|watch)/i.test(merged)) return "yellow";
   if (/(正常|运行中|通过|可用|新鲜|清晰|允许|存在|就绪|是|running|ok|pass|available|fresh|clear|allowed|present|ready|yes)/i.test(merged)) return "green";
+  if (/(真实提交[:：]\s*未启用|submit off|未启用)/i.test(merged)) return "gray";
   if (/(模拟|仅观察|等待|中性|参考|observe|wait|neutral|reference)/i.test(merged)) return "blue";
   return fallback;
 }
@@ -753,6 +774,47 @@ function setError(message = "") {
   const banner = $("errorBanner");
   banner.hidden = !message;
   banner.textContent = message;
+  banner.classList.toggle("api-unavailable", Boolean(message && document.body.dataset.apiState === "unavailable"));
+}
+
+function formatClock(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "时间未知";
+  return date.toLocaleTimeString([], { hour12: false });
+}
+
+function retryCountdownText() {
+  if (!nextRetryAt) return "等待下一次重试";
+  const seconds = Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000));
+  return `${seconds} 秒后重试`;
+}
+
+function apiUnavailableMessage() {
+  const errorText = lastRefreshError || "未知错误";
+  const retryText = retryCountdownText();
+  if (lastSuccessfulSnapshotAt) {
+    return `API 不可用：继续显示上次成功快照（${formatClock(lastSuccessfulSnapshotAt)}），数据可能已过期；${retryText}。错误：${errorText}`;
+  }
+  return `API 不可用：首次加载未能读取 /api/overview；${retryText}。错误：${errorText}`;
+}
+
+function updateApiUnavailableBanner() {
+  if (document.body.dataset.apiState !== "unavailable") return;
+  setError(apiUnavailableMessage());
+}
+
+function setApiUnavailableState(error) {
+  document.body.dataset.apiState = "unavailable";
+  lastRefreshError = String(error?.message || error || "未知错误");
+  nextRetryAt = Date.now() + refreshRetryIntervalMs;
+  setPill($("refreshState"), lastSuccessfulSnapshotAt ? "刷新：失败 / 显示旧快照" : "刷新：API 不可用", "red");
+  updateApiUnavailableBanner();
+}
+
+function clearApiUnavailableState() {
+  document.body.dataset.apiState = "ok";
+  lastRefreshError = "";
+  nextRetryAt = null;
+  setError("");
 }
 
 function clearElement(el) {
@@ -887,6 +949,18 @@ function compactPct(value) {
   return `${scaled.toFixed(2)}%`;
 }
 
+function scoreValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.abs(n) > 1 ? n / 100 : n;
+}
+
+function scoreRatio(value) {
+  const n = scoreValue(value);
+  if (n === null) return "暂无";
+  return n.toFixed(3);
+}
+
 function probeStatus(quant) {
   if (!quant?.probe_source) return { label: "未启用试探仓", level: "gray" };
   if (quant.execution_allowed === false) return { label: "试探仓未放行", level: "yellow" };
@@ -894,8 +968,9 @@ function probeStatus(quant) {
   return { label: "试探仓观察", level: isStrongMomentumProbe(quant) ? "blue" : "gray" };
 }
 
-function executionModeText(runtime) {
-  return runtime?.real_worker?.mode === "submit_enabled" ? "真实下单已启用" : "模拟执行";
+function executionModeText(runtime, bot = {}) {
+  const realOrderGate = bot.real_order_gate || bot.latest_cycle?.real_order_gate || runtime?.real_order_gate || {};
+  return realOrderGate.enabled === true ? "真实提交：已启用" : "真实提交：未启用";
 }
 
 function uniqueReasonRows(...groups) {
@@ -1015,7 +1090,7 @@ function buildDecisionBrief(data) {
   const research = quant.research || {};
   const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
   const direction = text(quant.direction || bot.position_direction);
-  const modeText = executionModeText(runtime);
+  const modeText = executionModeText(runtime, bot);
   const confidence = pct(quant.confidence);
   const thesis = pct(quant.thesis_score);
   const setup = ratio(quant.setup_strength);
@@ -1036,7 +1111,7 @@ function buildDecisionBrief(data) {
       badge: "可执行候选",
       level: "green",
       title: `当前可执行：${text(action)} ${direction}`,
-      text: `候选执行包已生成，执行闸门已放行。当前执行模式：${modeText}。`,
+      text: `候选执行包已生成，执行闸门已放行。${modeText}。`,
       mode: modeText,
       gate: `信心 ${confidence} / 论证 ${thesis}`,
       research: `${text(research.status || research.decision)}，${text(research.freshness)}`,
@@ -1067,6 +1142,143 @@ function renderDecisionBrief(data) {
   applyValueLevel($("decisionBriefMode"), brief.mode);
   applyValueLevel($("decisionBriefGate"), brief.gate, brief.level);
   applyValueLevel($("decisionBriefResearch"), brief.research, brief.level);
+}
+
+function gateStateFromBool(value, passLabel = "PASS", blockLabel = "BLOCK") {
+  if (value === true) return { status: passLabel, level: "green" };
+  if (value === false) return { status: blockLabel, level: "red" };
+  return { status: "UNKNOWN", level: "gray" };
+}
+
+function gateStateFromThreshold(value, threshold, passWhen = "gte") {
+  const normalized = scoreValue(value);
+  if (normalized === null) return { status: "UNKNOWN", level: "gray" };
+  const passed = passWhen === "lte" ? normalized <= threshold : normalized >= threshold;
+  return { status: passed ? "PASS" : "BLOCK", level: passed ? "green" : "red" };
+}
+
+function gateStackValue(value, threshold = null, formatter = scoreRatio) {
+  const display = formatter(value);
+  if (threshold === null || threshold === undefined) return display;
+  return `${display} / ${formatter(threshold)}`;
+}
+
+function buildGateStackRows(data) {
+  const quant = data.quant || {};
+  const bot = data.bot || {};
+  const runtime = data.runtime || {};
+  const candidate = bot.candidate_package || {};
+  const research = quant.research || {};
+  const realOrderGate = bot.real_order_gate || bot.latest_cycle?.real_order_gate || {};
+  const action = String(quant.action || bot.latest_cycle?.effective_action || "").toLowerCase();
+  const entryAction = action.startsWith("entry") || action === "small_probe";
+  const realSubmitEnabled = realOrderGate.enabled === true;
+  const realOrderAllowed = realOrderGate.allowed === true;
+  const researchGateStatus = String(quant.research_gate_status || "").toLowerCase();
+  const researchHealthStatus = String(research.status || research.decision || "").toLowerCase();
+  const researchDisplayStatus = quant.research_gate_status || research.status || research.decision || "unknown";
+  const researchCombinedStatus = `${researchGateStatus} ${researchHealthStatus}`;
+  const researchBlocked = ["blocked", "veto", "unavailable", "research_unavailable"].some((status) => researchCombinedStatus.includes(status));
+  const researchWarn = ["degraded", "stale", "aging", "needs_attention"].some((status) => researchCombinedStatus.includes(status));
+  const thesisFloor = 0.55;
+  const triggerFloor = 0.9;
+
+  return [
+    {
+      label: "方向",
+      value: text(quant.direction || bot.position_direction),
+      state: quant.direction && String(quant.direction).toLowerCase() !== "neutral"
+        ? { status: "SET", level: "blue" }
+        : { status: "WAIT", level: "gray" },
+      note: text(action || "wait"),
+    },
+    {
+      label: "触发器",
+      value: `${boolText(quant.trigger_ready)} · ${gateStackValue(quant.entry_timing_score, triggerFloor)}`,
+      state: gateStateFromBool(quant.trigger_ready),
+      note: `${text(quant.trigger_direction || "unknown")} / ${text(quant.setup_direction || "unknown")}`,
+    },
+    {
+      label: "论证分",
+      value: gateStackValue(quant.thesis_score, thesisFloor),
+      state: gateStateFromThreshold(quant.thesis_score, thesisFloor),
+      note: "显示阈值用于诊断，不改策略",
+    },
+    {
+      label: "研究闸门",
+      value: text(researchDisplayStatus),
+      state: researchBlocked
+        ? { status: "BLOCK", level: "red" }
+        : researchWarn
+          ? { status: "WARN", level: "yellow" }
+          : { status: researchCombinedStatus.trim() ? "PASS" : "UNKNOWN", level: researchCombinedStatus.trim() ? "green" : "gray" },
+      note: (quant.research_gate_reasons || research.reason_codes || []).slice(0, 3).map((code) => text(code)).join("，") || `${text(research.status || research.decision || "unknown")} / ${text(research.freshness || "unknown")}`,
+    },
+    {
+      label: "执行闸门",
+      value: boolText(quant.execution_allowed),
+      state: gateStateFromBool(quant.execution_allowed),
+      note: text(quant.execution_block_reason || quant.execution_layer_reasoning || "unknown"),
+    },
+    {
+      label: "候选包",
+      value: candidate.present ? text(candidate.action || action) : "缺失",
+      state: candidate.present ? gateStateFromBool(candidate.gate_allowed) : { status: "MISSING", level: "gray" },
+      note: candidate.present ? text(candidate.direction || quant.direction) : "未生成候选执行包",
+    },
+    {
+      label: "真实提交开关",
+      value: executionModeText(runtime, bot),
+      state: realSubmitEnabled ? { status: "SUBMIT ON", level: "red" } : { status: "SUBMIT OFF", level: "gray" },
+      note: text(realOrderGate.automation_boundary || bot.automation_boundary || quant.automation_boundary || "unknown"),
+    },
+    {
+      label: "真实订单闸门",
+      value: realSubmitEnabled ? boolText(realOrderAllowed) : "未启用",
+      state: realSubmitEnabled
+        ? gateStateFromBool(realOrderAllowed)
+        : { status: "DISABLED", level: "gray" },
+      note: (realOrderGate.reason_codes || []).slice(0, 3).map((code) => text(code)).join("，") || text(realOrderGate.action || action || "unknown"),
+    },
+    {
+      label: "入场动作",
+      value: text(action || "wait"),
+      state: entryAction ? { status: "ENTRY", level: "blue" } : { status: "WAIT", level: "gray" },
+      note: bot.latest_cycle?.requested_action ? `请求 ${text(bot.latest_cycle.requested_action)}` : text(quant.requested_action || "unknown"),
+    },
+  ];
+}
+
+function gateStackSummary(rows) {
+  const blockers = rows.filter((row) => row.state.status === "BLOCK").map((row) => row.label);
+  if (blockers.length) {
+    const extra = blockers.length > 3 ? `（另有 ${blockers.length - 3} 项）` : "";
+    return `当前主要阻断：${blockers.slice(0, 3).join("、")}${extra}。`;
+  }
+  const waiting = rows.filter((row) => row.state.level === "gray").map((row) => row.label);
+  if (waiting.length) return `没有硬阻断，但仍在等待：${waiting.slice(0, 3).join("、")}。`;
+  return "核心闸门均未显示阻断；仍以执行链路和风控结果为准。";
+}
+
+function renderGateStack(data) {
+  const rows = buildGateStackRows(data);
+  const wrap = $("gateStackRows");
+  clearElement(wrap);
+  const hasHardBlock = rows.some((row) => row.state.status === "BLOCK");
+  const hasWait = rows.some((row) => row.state.level === "gray");
+  setBadge($("gateStackBadge"), hasHardBlock ? "BLOCK" : hasWait ? "WAIT" : "PASS", hasHardBlock ? "red" : hasWait ? "gray" : "green");
+  $("gateStackSummary").textContent = gateStackSummary(rows);
+
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = `gate-stack-row ${row.state.level}`;
+    appendText(item, "span", row.label, "gate-stack-label");
+    appendText(item, "strong", row.value, "gate-stack-value");
+    appendText(item, "em", row.state.status, `gate-stack-state ${row.state.level}`);
+    const note = appendText(item, "small", row.note || "暂无", "gate-stack-note");
+    note.title = row.note || "暂无";
+    wrap.appendChild(item);
+  }
 }
 
 function renderTriggerWatch(triggerWatch) {
@@ -1392,7 +1604,7 @@ function renderSummary(data) {
   $("summaryBundleGenerated").textContent = compactDateTime(candidate.generated_at);
   $("summaryReview").textContent = reviewStatusText(review.review_status);
   $("summaryReview").className = `headline-value ${levelForStatus(review.review_status || "unavailable")}`;
-  $("summaryRealWorker").textContent = text(runtime.real_worker?.mode || runtime.real_worker?.label || "unknown");
+  $("summaryRealWorker").textContent = text(runtime.real_worker?.label || "unknown");
   $("summaryLastReview").textContent = review.generated_at ? compactDateTime(review.generated_at) : fmtAge(review.source_handoff_age_sec);
   $("summaryLatestCycle").textContent = latestCycleLabel(quant, bot);
   const noTrade = buildNoTradeSummary(quant, bot);
@@ -1644,11 +1856,13 @@ function updateExecutionStepper(runtime, review) {
 
 function renderTopbar(data) {
   const runtime = data.runtime || {};
+  const bot = data.bot || {};
   const killSwitch = runtime.kill_switch || {};
+  const realOrderGate = bot.real_order_gate || bot.latest_cycle?.real_order_gate || {};
   const now = new Date();
   $("updatedAt").textContent = `最后更新：${now.toLocaleString()}`;
-  const modeText = executionModeText(runtime);
-  setPill($("orderModePill"), modeText, runtime.real_worker?.mode === "submit_enabled" ? "red" : "blue");
+  const modeText = executionModeText(runtime, bot);
+  setPill($("orderModePill"), modeText, realOrderGate.enabled === true ? "red" : "gray");
   setPill($("killSwitchPill"), `熔断：${killSwitch.enabled ? "开启" : "关闭"}`, killSwitch.enabled ? "red" : "green");
   $("modeNotice").textContent = `${modeText}；审查报告只读，不参与自动下单，最终以执行链路和风控结果为准。`;
 }
@@ -1661,6 +1875,7 @@ function render(data) {
 
   renderTopbar(data);
   renderDecisionBrief(data);
+  renderGateStack(data);
   renderSummary(data);
   renderRuntime(data.runtime || {}, review);
   renderOptionalWorkers(data.optional_workers || {});
@@ -1807,16 +2022,16 @@ async function refresh() {
   const response = await fetch("/api/overview", { cache: "no-store" });
   if (!response.ok) throw new Error(`请求失败，状态码 ${response.status}`);
   render(await response.json());
+  lastSuccessfulSnapshotAt = new Date();
   setPill($("refreshState"), "刷新：正常", "green");
-  setError("");
+  clearApiUnavailableState();
 }
 
 function refreshWithBanner() {
   if (refreshPaused) return;
   refresh().catch((error) => {
     console.error(error);
-    setPill($("refreshState"), "刷新：失败", "red");
-    setError(`刷新失败：${error.message || error}`);
+    setApiUnavailableState(error);
   });
 }
 
@@ -1847,3 +2062,4 @@ window.addEventListener("resize", () => {
 });
 refreshWithBanner();
 setInterval(refreshWithBanner, 5000);
+setInterval(updateApiUnavailableBanner, 1000);

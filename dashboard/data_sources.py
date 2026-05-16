@@ -258,6 +258,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 bot_state.get("observed_position_size_pct", 0.0),
             ),
             "protective_stop_required": bool(bot_state.get("protective_stop_required", False)),
+            "real_order_gate": _real_order_gate_summary(bot_cycle.get("real_order_gate") if isinstance(bot_cycle, dict) else {}),
             "candidate_package": _candidate_summary(candidate),
             "automation_boundary": bot_cycle.get("automation_boundary", ""),
             "worker_events": worker_audit,
@@ -268,6 +269,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
                 "effective_action": bot_cycle.get("effective_action"),
                 "preflight_error": bot_cycle.get("preflight_error", ""),
                 "reason_codes": bot_cycle.get("reason_codes", []),
+                "real_order_gate": _real_order_gate_summary(bot_cycle.get("real_order_gate") if isinstance(bot_cycle, dict) else {}),
             },
         },
         "performance": performance,
@@ -573,6 +575,17 @@ def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "expires_at": candidate.get("expires_at", ""),
         "gate_allowed": bool((candidate.get("real_order_gate") or {}).get("allowed", False)),
         "command_targets": [item.get("target") for item in candidate.get("execution_commands") or []],
+    }
+
+
+def _real_order_gate_summary(gate: dict[str, Any]) -> dict[str, Any]:
+    gate = gate if isinstance(gate, dict) else {}
+    return {
+        "enabled": bool(gate.get("enabled", False)),
+        "allowed": bool(gate.get("allowed", False)),
+        "action": str(gate.get("action") or ""),
+        "automation_boundary": str(gate.get("automation_boundary") or ""),
+        "reason_codes": [str(item) for item in _list(gate.get("reason_codes"))[:8]],
     }
 
 
