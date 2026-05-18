@@ -204,6 +204,7 @@ const valueLabels = {
   research_degraded: "研究降级",
   research_freshness_degraded: "研究新鲜度降级",
   "diagnostic:data_source": "数据源异常",
+  diagnostic_optional_macro_source: "CoinGecko 宏观源限流（软警告）",
   "risk_filter:unknown": "风控状态未知",
   "risk_filter:veto": "风控否决",
   "risk_filter:degraded": "风控降级",
@@ -1054,6 +1055,8 @@ function renderProbeDiagnostics(quant) {
     ["信号仓位", compactPct(quant.signal_size_pct)],
     ["仓位上限", compactPct(quant.position_cap_pct)],
     ["研究闸门", quant.research_gate_status],
+    ["交接可信度", quant.handoff_freshness_status],
+    ["因子查找表年龄", fmtAge(quant.factor_lookup_age_seconds)],
     ["结构方向", quant.setup_direction],
     ["触发方向", quant.trigger_direction],
     ["触发就绪", boolText(quant.trigger_ready)],
@@ -1099,7 +1102,9 @@ function buildDecisionBrief(data) {
   const executionAllowed = quant.execution_allowed === true;
   const entryAction = action.startsWith("entry") || action === "small_probe";
   const researchBlocked = ["blocked", "veto"].includes(String(research.status || research.decision || "").toLowerCase());
+  const handoffFreshnessBad = ["stale", "unknown"].includes(String(quant.handoff_freshness_status || "").toLowerCase());
   const reasons = [];
+  if (handoffFreshnessBad) reasons.push("上游交接可信度异常");
   if (!triggerReady) reasons.push("触发器未就绪");
   if (!entryAction) reasons.push("未形成开仓动作");
   if (entryAction && !candidatePresent) reasons.push("候选执行包未生成");

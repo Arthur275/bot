@@ -20,6 +20,16 @@ _RESEARCH_ENTRY_DEGRADE_FLAGS = {
     "low_passed_trade_share",
 }
 
+_OPTIONAL_MACRO_DIAGNOSTIC_SOURCES = {
+    "btc_context_global",
+    "coingecko",
+}
+
+_TRADEABLE_CONSENSUS_QUALITIES = {
+    "full",
+    "restricted_two_source",
+}
+
 
 class GuardDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -61,6 +71,10 @@ class NetworkGuard:
         staleness_veto = bool((handoff or {}).get("staleness_veto"))
         conflict_veto = bool((handoff or {}).get("conflict_veto"))
         orderbook_short_pressure = bool((handoff or {}).get("orderbook_short_pressure"))
+        optional_macro_diagnostic = self._is_optional_macro_diagnostic(
+            diagnostic=diagnostic,
+            handoff=handoff or {},
+        )
 
         allow_entry = True
         allow_signal_tracking = True
@@ -92,10 +106,14 @@ class NetworkGuard:
             degraded = True
             reason_codes.append(f"bundle_status:{bundle_status}")
 
-        if diagnostic_category in {"transport", "data_source"}:
+        if diagnostic_category in {"transport", "data_source"} and not optional_macro_diagnostic:
             allow_entry = False
             degraded = True
             reason_codes.append(f"diagnostic:{diagnostic_category}")
+        elif optional_macro_diagnostic:
+            degraded = True
+            reason_codes.append(f"diagnostic:{diagnostic_category}")
+            reason_codes.append("diagnostic_optional_macro_source")
 
         if diagnostic_category == "pipeline":
             blocked = True
@@ -219,6 +237,27 @@ class NetworkGuard:
             and normalized_action == "small_probe"
             and normalized_probe_source == "trend_continuation_probe"
         )
+
+    @staticmethod
+    def _is_optional_macro_diagnostic(
+        *,
+        diagnostic: dict[str, str],
+        handoff: dict[str, Any],
+    ) -> bool:
+        diagnostic_category = str(diagnostic.get("category") or handoff.get("diagnostic_category") or "").strip().lower()
+        if diagnostic_category != "data_source":
+            return False
+        diagnostic_source = str(diagnostic.get("source") or handoff.get("diagnostic_source") or "").strip().lower()
+        source_diagnostics = handoff.get("source_diagnostics")
+        source_keys = set(source_diagnostics) if isinstance(source_diagnostics, dict) else set()
+        normalized_source_keys = {str(key).strip().lower() for key in source_keys}
+        if (
+            diagnostic_source not in _OPTIONAL_MACRO_DIAGNOSTIC_SOURCES
+            and not (normalized_source_keys & _OPTIONAL_MACRO_DIAGNOSTIC_SOURCES)
+        ):
+            return False
+        consensus_quality = str(handoff.get("consensus_quality") or "").strip().lower()
+        return consensus_quality in _TRADEABLE_CONSENSUS_QUALITIES
 
     @staticmethod
     def _parse_diagnostic(diagnostic: str) -> dict[str, str]:

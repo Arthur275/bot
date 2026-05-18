@@ -109,6 +109,7 @@ class ShadowOrchestrator:
                 exchange_min_order_qty=config.exchange_min_order_qty,
                 exchange_qty_step_size=config.exchange_qty_step_size,
                 require_execution_allowed=config.require_execution_allowed,
+                factor_lookup_stale_after_sec=config.factor_lookup_max_age_sec,
             )
         )
         if exchange_adapter is not None:

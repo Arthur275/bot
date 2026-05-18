@@ -1,12 +1,19 @@
+from datetime import datetime, timezone
+
 from bot.network_guard import GuardDecision
 from bot.position_manager import PositionManager
 from bot.execution_risk_gate import ExecutionRiskGate, ExecutionRiskGateConfig
 from bot.exchange_adapter import AdapterCapabilities, EntryOrderPayload, ExchangeAdapter
 
 
+def _fresh_handoff(**payload):
+    payload.setdefault("factor_lookup_generated_at", datetime.now(timezone.utc).isoformat())
+    return payload
+
+
 def test_position_manager_maps_entry_to_entry_plan() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={"action": "entry_long", "position_size_pct": 0.2, "initial_stop_loss": 0.98},
+        handoff=_fresh_handoff(action="entry_long", position_size_pct=0.2, initial_stop_loss=0.98),
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,
@@ -49,12 +56,12 @@ def test_position_manager_exposes_execution_risk_gate_result_on_entry_plan() -> 
             )
         )
     ).build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "position_size_pct": 0.8,
-            "initial_stop_loss": 0.98,
-            "execution_allowed": True,
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            position_size_pct=0.8,
+            initial_stop_loss=0.98,
+            execution_allowed=True,
+        ),
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,
@@ -83,13 +90,13 @@ def test_position_manager_blocks_entry_below_exchange_min_qty() -> None:
             )
         )
     ).build_execution_plan(
-        handoff={
-            "action": "small_probe",
-            "direction": "long",
-            "position_size_pct": 0.1,
-            "initial_stop_loss": 0.9844,
-            "execution_allowed": True,
-        },
+        handoff=_fresh_handoff(
+            action="small_probe",
+            direction="long",
+            position_size_pct=0.1,
+            initial_stop_loss=0.9844,
+            execution_allowed=True,
+        ),
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,
@@ -118,6 +125,7 @@ def test_entry_handoff_uses_risk_sized_executable_size_in_adapter_payload() -> N
         "execution_allowed": True,
         "max_account_risk_pct_per_trade": 0.01,
     }
+    handoff = _fresh_handoff(**handoff)
     plan = PositionManager(
         ExecutionRiskGate(
             ExecutionRiskGateConfig(
@@ -147,13 +155,13 @@ def test_entry_handoff_uses_risk_sized_executable_size_in_adapter_payload() -> N
 
 def test_position_manager_does_not_interpret_quant_sizing_tier() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "position_size_pct": 0.2,
-            "initial_stop_loss": 0.98,
-            "sizing_tier": "none",
-            "sizing_bias": "none",
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            position_size_pct=0.2,
+            initial_stop_loss=0.98,
+            sizing_tier="none",
+            sizing_bias="none",
+        ),
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,
@@ -310,18 +318,18 @@ def test_position_manager_only_advances_post_entry_stops_when_adapter_supports_i
 
 def test_position_manager_plans_take_profit_only_with_explicit_contract_and_capability() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "direction": "long",
-            "execution_allowed": True,
-            "risk_filter_status": "pass",
-            "position_size_pct": 0.2,
-            "executable_size_pct": 0.02,
-            "max_account_risk_pct_per_trade": 0.01,
-            "initial_stop_loss": 0.97,
-            "tp_ladder": [1.01, 1.02],
-            "tp_reduce_fractions": [0.5, 0.5],
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            direction="long",
+            execution_allowed=True,
+            risk_filter_status="pass",
+            position_size_pct=0.2,
+            executable_size_pct=0.02,
+            max_account_risk_pct_per_trade=0.01,
+            initial_stop_loss=0.97,
+            tp_ladder=[1.01, 1.02],
+            tp_reduce_fractions=[0.5, 0.5],
+        ),
         guard=GuardDecision(judgement_status="ok", allow_entry=True),
         adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
     )
@@ -332,17 +340,17 @@ def test_position_manager_plans_take_profit_only_with_explicit_contract_and_capa
 
 def test_position_manager_does_not_plan_take_profit_for_bare_ladder() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "direction": "long",
-            "execution_allowed": True,
-            "risk_filter_status": "pass",
-            "position_size_pct": 0.2,
-            "executable_size_pct": 0.02,
-            "max_account_risk_pct_per_trade": 0.01,
-            "initial_stop_loss": 0.97,
-            "tp_ladder": [1.01, 1.02],
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            direction="long",
+            execution_allowed=True,
+            risk_filter_status="pass",
+            position_size_pct=0.2,
+            executable_size_pct=0.02,
+            max_account_risk_pct_per_trade=0.01,
+            initial_stop_loss=0.97,
+            tp_ladder=[1.01, 1.02],
+        ),
         guard=GuardDecision(judgement_status="ok", allow_entry=True),
         adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
     )
@@ -353,17 +361,17 @@ def test_position_manager_does_not_plan_take_profit_for_bare_ladder() -> None:
 
 def test_position_manager_does_not_plan_take_profit_for_malformed_direct_orders() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "direction": "long",
-            "execution_allowed": True,
-            "risk_filter_status": "pass",
-            "position_size_pct": 0.2,
-            "executable_size_pct": 0.02,
-            "max_account_risk_pct_per_trade": 0.01,
-            "initial_stop_loss": 0.97,
-            "take_profit_orders": ["not-a-contract"],
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            direction="long",
+            execution_allowed=True,
+            risk_filter_status="pass",
+            position_size_pct=0.2,
+            executable_size_pct=0.02,
+            max_account_risk_pct_per_trade=0.01,
+            initial_stop_loss=0.97,
+            take_profit_orders=["not-a-contract"],
+        ),
         guard=GuardDecision(judgement_status="ok", allow_entry=True),
         adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
     )
@@ -374,19 +382,19 @@ def test_position_manager_does_not_plan_take_profit_for_malformed_direct_orders(
 
 def test_position_manager_does_not_plan_take_profit_for_ambiguous_ladder_size_contract() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "entry_long",
-            "direction": "long",
-            "execution_allowed": True,
-            "risk_filter_status": "pass",
-            "position_size_pct": 0.2,
-            "executable_size_pct": 0.02,
-            "max_account_risk_pct_per_trade": 0.01,
-            "initial_stop_loss": 0.97,
-            "tp_ladder": [1.01, 1.02],
-            "tp_reduce_fractions": [0.5, 0.5],
-            "tp_reduce_qtys": [0.01, 0.01],
-        },
+        handoff=_fresh_handoff(
+            action="entry_long",
+            direction="long",
+            execution_allowed=True,
+            risk_filter_status="pass",
+            position_size_pct=0.2,
+            executable_size_pct=0.02,
+            max_account_risk_pct_per_trade=0.01,
+            initial_stop_loss=0.97,
+            tp_ladder=[1.01, 1.02],
+            tp_reduce_fractions=[0.5, 0.5],
+            tp_reduce_qtys=[0.01, 0.01],
+        ),
         guard=GuardDecision(judgement_status="ok", allow_entry=True),
         adapter_capabilities=AdapterCapabilities(supports_take_profit_orders=True),
     )
@@ -540,15 +548,15 @@ def test_position_manager_exits_expired_contrarian_probe() -> None:
 
 def test_position_manager_rolls_expired_contrarian_probe_when_signal_continues() -> None:
     plan = PositionManager().build_execution_plan(
-        handoff={
-            "action": "small_probe",
-            "direction": "short",
-            "probe_source": "contrarian_short_probe",
-            "position_state": "ENTERED",
-            "position_size_pct": 0.0025,
-            "initial_stop_loss": 1.01,
-            "execution_allowed": True,
-        },
+        handoff=_fresh_handoff(
+            action="small_probe",
+            direction="short",
+            probe_source="contrarian_short_probe",
+            position_state="ENTERED",
+            position_size_pct=0.0025,
+            initial_stop_loss=1.01,
+            execution_allowed=True,
+        ),
         guard=GuardDecision(
             judgement_status="ok",
             allow_entry=True,

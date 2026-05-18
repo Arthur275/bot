@@ -38,6 +38,80 @@ def test_network_guard_degrades_transport_without_blocking_exit() -> None:
     assert guard.allow_exit is True
 
 
+def test_network_guard_treats_coingecko_global_failure_as_soft_warning_when_consensus_tradeable() -> None:
+    guard = NetworkGuard().evaluate(
+        judgement={
+            "status": "ok",
+            "diagnostic": "request_diagnostic=retry_exhausted | source=coingecko | category=data_source | boundary=strict_live_blocks_before_policy",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "action": "entry_short",
+            "direction": "short",
+            "diagnostic_source": "coingecko",
+            "diagnostic_category": "data_source",
+            "source_diagnostics": {
+                "btc_context_global": {
+                    "status": "retry_exhausted",
+                    "request_source": "coingecko",
+                    "failure_category": "data_source",
+                }
+            },
+            "consensus_quality": "full",
+            "risk_filter_status": "pass",
+            "research_gate_status": "open",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+        },
+    )
+
+    assert guard.degraded is True
+    assert guard.blocked is False
+    assert guard.allow_entry is True
+    assert guard.allow_signal_tracking is True
+    assert guard.allow_real_entry is False
+    assert "diagnostic:data_source" in guard.reason_codes
+    assert "diagnostic_optional_macro_source" in guard.reason_codes
+
+
+def test_network_guard_keeps_core_price_data_source_failure_as_entry_block() -> None:
+    guard = NetworkGuard().evaluate(
+        judgement={
+            "status": "ok",
+            "diagnostic": "request_diagnostic=retry_exhausted | source=eth_price_consensus | category=data_source | boundary=strict_live_blocks_before_policy",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "action": "entry_short",
+            "direction": "short",
+            "diagnostic_source": "eth_price_consensus",
+            "diagnostic_category": "data_source",
+            "source_diagnostics": {
+                "consensus_sources": {
+                    "okx": {"status": "retry_exhausted", "failure_category": "data_source"},
+                    "bitget": {"status": "retry_exhausted", "failure_category": "data_source"},
+                }
+            },
+            "consensus_quality": "unreliable",
+            "risk_filter_status": "pass",
+            "research_gate_status": "open",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+        },
+    )
+
+    assert guard.degraded is True
+    assert guard.blocked is False
+    assert guard.allow_entry is False
+    assert guard.allow_real_entry is False
+    assert "diagnostic:data_source" in guard.reason_codes
+    assert "diagnostic_optional_macro_source" not in guard.reason_codes
+
+
 def test_network_guard_keeps_research_degraded_as_soft_penalty_when_research_gate_open() -> None:
     guard = NetworkGuard().evaluate(
         judgement={

@@ -3,11 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from bot.exchange_adapter import AdapterCapabilities, AdapterRuntimeSnapshot, CommandExecutionResult, PositionSnapshot
 
 from scripts import run_shadow_preflight_cycle
+from scripts.ops.shadow_preflight_diagnostics import summarize_handoff
 
 
 def _write_fake_quant_modules(src_root: Path, *, handoff_payload: str) -> None:
@@ -73,6 +74,10 @@ def _args(*, quant_root: Path, output_root: Path) -> run_shadow_preflight_cycle.
     return args
 
 
+def _fresh_factor_lookup_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def test_bot_config_auto_enables_coinglass_when_api_key_is_available(monkeypatch) -> None:
     from bot.config import BotConfig
 
@@ -80,6 +85,28 @@ def test_bot_config_auto_enables_coinglass_when_api_key_is_available(monkeypatch
 
     assert BotConfig().resolved_include_coinglass_overlay is True
     assert BotConfig(include_coinglass_overlay=False).resolved_include_coinglass_overlay is False
+
+
+def test_summarize_handoff_preserves_trigger_ready_probe_hard_fault_fields() -> None:
+    summary = summarize_handoff(
+        {
+            "action": "small_probe",
+            "probe_source": "trigger_ready_small_probe",
+            "factor_lookup_version": "lookup-v1",
+            "factor_lookup_generated_at": "2026-05-18T08:00:00Z",
+            "factor_lookup_stale": True,
+            "factor_lookup_age_seconds": 14400.0,
+            "scoring_chain_frozen": True,
+            "snapshot_refs": {"eth_orderbook": "runtime/orderbook.json"},
+        }
+    )
+
+    assert summary["probe_source"] == "trigger_ready_small_probe"
+    assert summary["factor_lookup_version"] == "lookup-v1"
+    assert summary["factor_lookup_generated_at"] == "2026-05-18T08:00:00Z"
+    assert summary["factor_lookup_stale"] is True
+    assert summary["factor_lookup_age_seconds"] == 14400.0
+    assert summary["scoring_chain_frozen"] is True
 
 
 def _clear_fake_quant_modules() -> None:
@@ -98,13 +125,13 @@ class FakeOkxUsdtSwapAdapter:
         self.credentials = credentials
 
     def get_capabilities(self):
-        return AdapterCapabilities(supports_real_execution=True)
+        return AdapterCapabilities(supports_real_execution=True, supports_take_profit_orders=True)
 
     def fetch_runtime_snapshot(self):
         return AdapterRuntimeSnapshot(
             fetched_at=datetime(2026, 5, 1, 1, 5, 0),
             snapshot_valid=True,
-            account_equity=11.0,
+            account_equity=50.0,
             account_equity_source="fake",
             position=PositionSnapshot(
                 position_state="FLAT",
@@ -141,35 +168,43 @@ class FakeOkxUsdtSwapAdapter:
         return ExchangeAdapter().execute_commands(commands=commands, runtime_mode=runtime_mode)
 
     def preflight_commands(self, *, commands):
-        return [
-            CommandExecutionResult(
-                target="entry_order",
-                status="preflight_ready",
-                accepted=True,
-                simulated=True,
-                reason="effective_action:small_probe",
-                details={
-                    "prepared_request": {
-                        "method": "POST",
-                        "path": "/api/v5/trade/order",
-                        "params": {},
-                        "body": {
-                            "side": "sell",
-                            "ordType": "market",
-                            "sz": "0.031",
-                            "clOrdId": "entry_order:2026-05-01T01:05:00:small_probe:short",
-                            "resolution_mode": "okx_entry_contracts_from_size_pct",
-                            "resolved_account_equity": "11.0",
-                            "resolved_leverage": 10,
-                            "resolved_mark_price": "3150.0",
+        results = []
+        for command in commands:
+            body = {
+                "side": "sell",
+                "ordType": "market",
+                "sz": "0.015",
+                "clOrdId": "entry_order:2026-05-01T01:05:00:small_probe:short",
+                "resolution_mode": "okx_entry_contracts_from_size_pct",
+                "resolved_account_equity": "50.0",
+                "resolved_leverage": 10,
+                "resolved_mark_price": "3150.0",
+            }
+            if command.target == "maintain_protective_stop":
+                body.update({"ordType": "conditional", "algoClOrdId": "stop:key", "triggerPx": "3206.7"})
+            elif command.target == "take_profit_order":
+                body.update({"ordType": "limit", "clOrdId": f"tp:{command.idempotency_key}", "px": "3118.5"})
+            results.append(
+                CommandExecutionResult(
+                    target=command.target,
+                    status="preflight_ready",
+                    accepted=True,
+                    simulated=True,
+                    reason=command.reason,
+                    details={
+                        "prepared_request": {
+                            "method": "POST",
+                            "path": "/api/v5/trade/order",
+                            "params": {},
+                            "body": body,
+                        },
+                        "signed_request": {
+                            "body": {"sz": "0.015"},
                         },
                     },
-                    "signed_request": {
-                        "body": {"sz": "0.031"},
-                    },
-                },
-            ),
-        ]
+                )
+            )
+        return results
 
 
 def test_shadow_preflight_script_skips_preflight_when_shadow_cycle_has_no_commands(monkeypatch, tmp_path: Path) -> None:
@@ -238,6 +273,7 @@ def test_shadow_preflight_script_skips_preflight_when_shadow_cycle_has_no_comman
 
 def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, tmp_path: Path) -> None:
     quant_root = tmp_path / "fake_quant_entry"
+    factor_lookup_generated_at = _fresh_factor_lookup_generated_at()
     _write_fake_quant_modules(
         quant_root / "src",
         handoff_payload="{"
@@ -246,14 +282,17 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
         "'direction': 'short',"
         "'execution_allowed': True,"
         "'risk_filter_status': 'pass',"
-        "'position_size_pct': 0.2,"
-        "'executable_size_pct': 0.02,"
+        f"'factor_lookup_generated_at': '{factor_lookup_generated_at}',"
+        "'factor_lookup_stale': False,"
+        "'position_size_pct': 0.1,"
+        "'executable_size_pct': 0.1,"
         "'sizing_tier': 'probe',"
         "'sizing_bias': 'conservative',"
         "'max_account_risk_pct_per_trade': 0.01,"
         "'initial_stop_loss': 1.018,"
         "'stop_distance_pct': 0.018,"
         "'tp_ladder': [0.99, 0.98],"
+        "'tp_reduce_fractions': [0.6, 0.4],"
         "'reduce_conditions': ['crowding_warning'],"
         "'invalidate_conditions': ['setup_invalidated'],"
         "'trailing_rule': 'trail_with_trigger'"
@@ -276,26 +315,29 @@ def test_shadow_preflight_script_runs_preflight_for_entry_commands(monkeypatch, 
 
     assert payload["requested_action"] == "small_probe"
     assert payload["effective_action"] == "small_probe"
-    assert payload["execution_plan"]["executable_size_pct"] == 0.909091
+    assert payload["execution_plan"]["executable_size_pct"] == 0.1
     assert payload["handoff"]["sizing_tier"] == "probe"
     assert payload["handoff"]["sizing_bias"] == "conservative"
     assert payload["handoff"]["tp_ladder"] == [0.99, 0.98]
+    assert payload["handoff"]["tp_reduce_fractions"] == [0.6, 0.4]
     assert payload["handoff"]["reduce_conditions"] == ["crowding_warning"]
     assert payload["handoff"]["invalidate_conditions"] == ["setup_invalidated"]
     assert payload["handoff"]["trailing_rule"] == "trail_with_trigger"
     assert "fixed_margin_budget_sizing" in payload["execution_plan"]["notes"]
-    assert calls == [["entry_order", "maintain_protective_stop"]]
-    assert payload["command_targets"] == ["entry_order", "maintain_protective_stop"]
-    assert payload["preflight_statuses"] == ["preflight_ready"]
+    assert calls == [["entry_order", "maintain_protective_stop", "take_profit_order", "take_profit_order"]]
+    assert payload["command_targets"] == ["entry_order", "maintain_protective_stop", "take_profit_order", "take_profit_order"]
+    assert payload["preflight_statuses"] == ["preflight_ready", "preflight_ready", "preflight_ready", "preflight_ready"]
     assert payload["preflight_error"] == ""
     assert payload["preflight"][0]["target"] == "entry_order"
     assert payload["preflight"][0]["side"] == "sell"
-    assert payload["preflight"][0]["quantity"] == "0.031"
+    assert payload["preflight"][0]["quantity"] == "0.015"
     assert payload["preflight"][0]["newClientOrderId"] == "entry_order:2026-05-01T01:05:00:small_probe:short"
+    assert payload["preflight"][2]["target"] == "take_profit_order"
 
 
 def test_shadow_preflight_real_order_intent_emits_real_payload_after_simulated_validation(monkeypatch, tmp_path: Path) -> None:
     quant_root = tmp_path / "fake_quant_real_order_intent"
+    factor_lookup_generated_at = _fresh_factor_lookup_generated_at()
     _write_fake_quant_modules(
         quant_root / "src",
         handoff_payload="{"
@@ -304,8 +346,10 @@ def test_shadow_preflight_real_order_intent_emits_real_payload_after_simulated_v
         "'direction': 'short',"
         "'execution_allowed': True,"
         "'risk_filter_status': 'pass',"
-        "'position_size_pct': 0.2,"
-        "'executable_size_pct': 0.02,"
+        f"'factor_lookup_generated_at': '{factor_lookup_generated_at}',"
+        "'factor_lookup_stale': False,"
+        "'position_size_pct': 0.1,"
+        "'executable_size_pct': 0.1,"
         "'sizing_tier': 'probe',"
         "'sizing_bias': 'conservative',"
         "'max_account_risk_pct_per_trade': 0.01,"
@@ -340,7 +384,7 @@ def test_shadow_preflight_real_order_intent_emits_real_payload_after_simulated_v
     assert payload["real_order_submission_intent"] is True
     assert payload["engine_mode"] == "strict-live"
     assert payload["command_targets"] == ["entry_order", "maintain_protective_stop"]
-    assert payload["preflight_statuses"] == ["preflight_ready"]
+    assert payload["preflight_statuses"] == ["preflight_ready", "preflight_ready"]
 
 
 def test_shadow_preflight_script_blocks_entry_when_risk_filter_status_missing(monkeypatch, tmp_path: Path) -> None:

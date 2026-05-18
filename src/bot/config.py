@@ -18,6 +18,7 @@ DEFAULT_OKX_API_PASSPHRASE_ENV = "OKX_TRADE_PASSPHRASE"
 DEFAULT_BINANCE_API_KEY_ENV = "BINANCE_TRADE_API_KEY"
 DEFAULT_BINANCE_API_SECRET_ENV = "BINANCE_TRADE_API_SECRET"
 DEFAULT_BINANCE_API_PASSPHRASE_ENV = ""
+DEFAULT_FACTOR_LOOKUP_MAX_AGE_SEC = 3 * 60 * 60
 
 
 def repo_root_from_file(file_path: str | Path) -> Path:
@@ -85,10 +86,11 @@ class BotConfig(BaseModel):
     entry_margin_budget_max_equity_usdt: float | None = Field(default=50.0, gt=0.0)
     max_account_risk_pct_per_trade: float = Field(default=0.01, gt=0.0, le=0.05)
     max_probe_account_risk_pct: float = Field(default=0.002, gt=0.0, le=0.02)
-    max_probe_size_pct: float = Field(default=0.02, gt=0.0, le=1.0)
+    max_probe_size_pct: float = Field(default=0.10, gt=0.0, le=1.0)
     exchange_min_order_qty: float = Field(default=0.001, gt=0.0)
     exchange_qty_step_size: float = Field(default=0.001, gt=0.0)
     require_execution_allowed: bool = True
+    factor_lookup_max_age_sec: int = Field(default=DEFAULT_FACTOR_LOOKUP_MAX_AGE_SEC, ge=0)
     manual_entry_confirmation_required: bool = True
     manual_entry_confirmation_token: str = ""
     runtime_mode: RuntimeMode = RuntimeMode.SHADOW

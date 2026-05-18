@@ -156,9 +156,13 @@ def test_runtime_stack_manager_treats_enable_real_orders_as_cold_start_mode() ->
     start_block = script[script.index("$WorkerSubmitFlag =") :]
 
     assert '"real_worker: {0} pid={1} mode={2}' in status_block
-    assert '$workerMode = if ($EnableRealOrders -and -not $killSwitch)' in status_block
+    assert "$workerMode = Resolve-RealWorkerMode -Worker $worker -Bot $bot -KillSwitch $killSwitch" in status_block
     assert "Start-ManagedProcess" not in status_block
     assert "-SubmitRealOrders" in start_block
+    assert "$RealWorkerModePath = Join-Path $StackRoot \"real_worker_mode.json\"" in script
+    assert "function Resolve-RealWorkerMode" in script
+    assert "function Write-RealWorkerMode" in script
+    assert "Write-RealWorkerMode -Mode $WorkerStartMode" in start_block
     assert '$WorkerSubmitFlag = if ($EnableRealOrders -and -not (Test-Path -LiteralPath $KillSwitchPath))' in start_block
     assert 'manage_real_order_worker.ps1\')\' $WorkerSubmitFlag' in start_block
 

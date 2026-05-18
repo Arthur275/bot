@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 
@@ -89,6 +89,13 @@ class FailingEngineClient:
 
     def fetch_cycle(self, **_: object) -> EngineCyclePayload:
         raise self._exc
+
+
+def _fresh_handoff(payload: dict) -> dict:
+    payload = dict(payload)
+    payload.setdefault("factor_lookup_generated_at", datetime.now(timezone.utc).isoformat())
+    payload.setdefault("factor_lookup_stale", False)
+    return payload
 
 
 class FakeExchangeAdapter:
@@ -370,7 +377,7 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T12:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -385,7 +392,7 @@ def test_shadow_orchestrator_writes_state_and_audit_log(tmp_path: Path) -> None:
             "initial_stop_loss": 0.97,
             "breakeven_trigger": 1.01,
             "trailing_rule": "trail_with_trigger",
-        },
+        }),
     )
     config = BotConfig(
         state_store_path=tmp_path / "state.json",
@@ -555,7 +562,7 @@ def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mod
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T14:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -569,7 +576,7 @@ def test_shadow_orchestrator_reports_post_execution_runtime_snapshot_in_real_mod
             "execution_allowed": True,
             "direction": "long",
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.REAL,
@@ -638,7 +645,7 @@ def test_shadow_orchestrator_blocks_real_entry_without_manual_confirmation(tmp_p
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T14:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -652,7 +659,7 @@ def test_shadow_orchestrator_blocks_real_entry_without_manual_confirmation(tmp_p
             "execution_allowed": True,
             "direction": "long",
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.REAL,
@@ -707,7 +714,7 @@ def test_shadow_orchestrator_allows_real_entry_with_matching_manual_confirmation
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T14:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -721,7 +728,7 @@ def test_shadow_orchestrator_allows_real_entry_with_matching_manual_confirmation
             "execution_allowed": True,
             "direction": "long",
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     generated_at = datetime(2026, 4, 26, 14, 0, 0)
     preview_config = BotConfig(
@@ -1036,7 +1043,7 @@ def test_shadow_orchestrator_blocks_new_entry_when_recovery_is_pending(tmp_path:
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T12:02:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -1048,7 +1055,7 @@ def test_shadow_orchestrator_blocks_new_entry_when_recovery_is_pending(tmp_path:
             "current_position_direction": "neutral",
             "position_size_pct": 0.2,
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     config = BotConfig(
         state_store_path=tmp_path / "state.json",
@@ -2556,7 +2563,7 @@ def test_shadow_orchestrator_marks_rejected_execution_for_recovery(tmp_path: Pat
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T12:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -2569,7 +2576,7 @@ def test_shadow_orchestrator_marks_rejected_execution_for_recovery(tmp_path: Pat
             "position_size_pct": 0.0,
             "execution_allowed": True,
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     config = BotConfig(
         state_store_path=tmp_path / "state.json",
@@ -2747,7 +2754,7 @@ def test_shadow_orchestrator_passes_simulated_real_runtime_to_adapter(tmp_path: 
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T12:30:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -2759,7 +2766,7 @@ def test_shadow_orchestrator_passes_simulated_real_runtime_to_adapter(tmp_path: 
             "current_position_direction": "neutral",
             "position_size_pct": 0.0,
             "initial_stop_loss": 0.97,
-        },
+        }),
     )
     config = BotConfig(
         runtime_mode=RuntimeMode.SIMULATED_REAL,
@@ -2939,7 +2946,7 @@ def test_shadow_orchestrator_marks_stop_failure_for_reconciliation(tmp_path: Pat
             "diagnostic": "",
             "research_bundle": {"ready": True, "bundle_status": "healthy"},
         },
-        handoff={
+        handoff=_fresh_handoff({
             "generated_at": "2026-04-26T12:00:00",
             "action": "entry_long",
             "risk_filter_status": "pass",
@@ -2954,7 +2961,7 @@ def test_shadow_orchestrator_marks_stop_failure_for_reconciliation(tmp_path: Pat
             "initial_stop_loss": 0.97,
             "breakeven_trigger": 1.01,
             "trailing_rule": "trail_with_trigger",
-        },
+        }),
     )
     config = BotConfig(
         state_store_path=tmp_path / "state.json",

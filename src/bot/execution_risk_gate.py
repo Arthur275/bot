@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
 
@@ -13,6 +15,8 @@ ENTRY_ACTIONS = {
     PositionAction.ENTRY_SHORT.value,
     PositionAction.SMALL_PROBE.value,
 }
+DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC = 3 * 60 * 60
+FACTOR_LOOKUP_FUTURE_TOLERANCE_SEC = 60
 
 
 class ExecutionRiskGateConfig(BaseModel):
@@ -24,10 +28,11 @@ class ExecutionRiskGateConfig(BaseModel):
     entry_margin_budget_max_equity_usdt: float | None = Field(default=50.0, gt=0.0)
     max_account_risk_pct_per_trade: float = Field(default=0.01, gt=0.0, le=0.05)
     max_probe_account_risk_pct: float = Field(default=0.002, gt=0.0, le=0.02)
-    max_probe_size_pct: float = Field(default=0.02, gt=0.0, le=1.0)
+    max_probe_size_pct: float = Field(default=0.10, gt=0.0, le=1.0)
     exchange_min_order_qty: float = Field(default=0.001, gt=0.0)
     exchange_qty_step_size: float = Field(default=0.001, gt=0.0)
     require_execution_allowed: bool = False
+    factor_lookup_stale_after_sec: int = Field(default=DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC, ge=0)
 
 
 class ExecutionRiskDecision(BaseModel):
@@ -45,7 +50,9 @@ class ExecutionRiskDecision(BaseModel):
 
 class ExecutionRiskGate:
     def __init__(self, config: ExecutionRiskGateConfig | None = None) -> None:
-        self._config = config or ExecutionRiskGateConfig()
+        self._config = config or ExecutionRiskGateConfig(
+            factor_lookup_stale_after_sec=_factor_lookup_stale_after_sec_from_env()
+        )
 
     @classmethod
     def from_values(
@@ -61,6 +68,7 @@ class ExecutionRiskGate:
         exchange_min_order_qty: float,
         exchange_qty_step_size: float,
         require_execution_allowed: bool,
+        factor_lookup_stale_after_sec: int | None = None,
     ) -> "ExecutionRiskGate":
         return cls(
             ExecutionRiskGateConfig(
@@ -74,6 +82,11 @@ class ExecutionRiskGate:
                 exchange_min_order_qty=exchange_min_order_qty,
                 exchange_qty_step_size=exchange_qty_step_size,
                 require_execution_allowed=require_execution_allowed,
+                factor_lookup_stale_after_sec=(
+                    _factor_lookup_stale_after_sec_from_env()
+                    if factor_lookup_stale_after_sec is None
+                    else factor_lookup_stale_after_sec
+                ),
             )
         )
 
@@ -94,6 +107,9 @@ class ExecutionRiskGate:
             return self._blocked("execution_not_allowed_by_handoff")
         if self._config.require_execution_allowed and execution_allowed is not True:
             return self._blocked("execution_allowed_missing")
+        freshness_reason = self._handoff_freshness_block_reason(handoff)
+        if freshness_reason:
+            return self._blocked(freshness_reason)
 
         stop_distance = self._resolve_stop_distance_pct(action=action, handoff=handoff)
         if stop_distance is None:
@@ -110,6 +126,21 @@ class ExecutionRiskGate:
             executable_size = budget_size
             size_cap_source = "fixed_margin_budget"
             size_cap_reason = "entry_margin_budget_usdt"
+            if action == PositionAction.SMALL_PROBE.value:
+                probe_size_cap = min(
+                    requested_size if requested_size > 0.0 else self._config.max_probe_size_pct,
+                    self._config.max_probe_size_pct,
+                )
+                capped_budget_size = min(executable_size, probe_size_cap)
+                if capped_budget_size < executable_size:
+                    reason_codes.append("size_truncated_by_bot_risk_gate")
+                    size_cap_source = "bot_execution_risk_gate"
+                    size_cap_reason = (
+                        "requested_size_pct"
+                        if requested_size > 0.0 and requested_size <= self._config.max_probe_size_pct
+                        else "max_probe_size_pct"
+                    )
+                executable_size = capped_budget_size
             account_risk_pct = executable_size * float(self._config.leverage) * stop_distance
             reason_codes.append("fixed_margin_budget_sizing")
             if account_risk_pct > self._config.max_account_risk_pct_per_trade:
@@ -215,6 +246,35 @@ class ExecutionRiskGate:
             return "short"
         return direction
 
+    def _handoff_freshness_block_reason(self, handoff: dict[str, Any]) -> str:
+        if bool(handoff.get("scoring_chain_frozen", False)):
+            return "scoring_chain_frozen"
+        generated_at = str(handoff.get("factor_lookup_generated_at") or "").strip()
+        if not generated_at:
+            return "handoff_freshness_unknown"
+        age_seconds = ExecutionRiskGate._factor_lookup_age_seconds(generated_at)
+        if age_seconds is None:
+            return "handoff_freshness_unknown"
+        if age_seconds > self._config.factor_lookup_stale_after_sec:
+            return "factor_lookup_age_over_threshold"
+        if age_seconds < -FACTOR_LOOKUP_FUTURE_TOLERANCE_SEC:
+            return "factor_lookup_generated_at_in_future"
+        if bool(handoff.get("factor_lookup_stale", False)):
+            return "factor_lookup_stale"
+        return ""
+
+    @staticmethod
+    def _factor_lookup_age_seconds(generated_at: str) -> float | None:
+        try:
+            parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        else:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - parsed).total_seconds()
+
     @staticmethod
     def _to_float(value: Any) -> float | None:
         try:
@@ -291,3 +351,13 @@ class ExecutionRiskGate:
             account_risk_pct=round(account_risk_pct, 6) if account_risk_pct is not None else None,
             reason_codes=[reason],
         )
+
+
+def _factor_lookup_stale_after_sec_from_env() -> int:
+    raw = os.environ.get("BOT_FACTOR_LOOKUP_MAX_AGE_SEC") or os.environ.get("FACTOR_LOOKUP_MAX_AGE_SEC")
+    if not raw:
+        return DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC

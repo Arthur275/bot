@@ -34,6 +34,7 @@ $StackRoot = Join-Path $BotRoot "runtime\stack_manager"
 $PidRoot = Join-Path $StackRoot "pids"
 $LogRoot = Join-Path $StackRoot "logs"
 $WrapperRoot = Join-Path $StackRoot "wrappers"
+$RealWorkerModePath = Join-Path $StackRoot "real_worker_mode.json"
 $BotRuntimeRoot = Join-Path $BotRoot "runtime\bot_runtime_scheduler"
 $BotAnalysisDb = Join-Path $BotRuntimeRoot "analysis\bot_runtime.duckdb"
 $BotSchedulerLockPath = Join-Path $BotRuntimeRoot "scheduler.lock"
@@ -231,6 +232,23 @@ function Test-CommandLineMatches {
         return [pscustomobject]@{
             Available = $false
             Matches = $null
+        }
+    }
+}
+
+function Get-ProcessCommandLine {
+    param([int]$ProcessId)
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        return [pscustomobject]@{
+            Available = $true
+            CommandLine = [string]$cim.CommandLine
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            CommandLine = ""
         }
     }
 }
@@ -528,6 +546,50 @@ function Write-ManagedWrapper {
     return $path
 }
 
+function Write-RealWorkerMode {
+    param([string]$Mode)
+    $payload = [pscustomobject]@{
+        generated_at = [datetimeoffset]::UtcNow.ToString("o")
+        mode = $Mode
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $RealWorkerModePath -Encoding UTF8
+}
+
+function Resolve-RealWorkerMode {
+    param(
+        $Worker,
+        $Bot,
+        [bool]$KillSwitch
+    )
+    if ($KillSwitch) {
+        return "disabled_by_kill_switch"
+    }
+    if ([bool]$EnableRealOrders -eq $true) {
+        return "submit_enabled"
+    }
+    if ($null -ne $Worker -and $Worker.Alive -and $null -ne $Worker.Pid) {
+        $cmd = Get-ProcessCommandLine -ProcessId ([int]$Worker.Pid)
+        if ($cmd.Available -and ($cmd.CommandLine -like "*-SubmitRealOrders*" -or $cmd.CommandLine -like "*--submit-real-orders*")) {
+            return "submit_enabled"
+        }
+        if ($cmd.Available) {
+            return "dry_run"
+        }
+    }
+    $modePayload = Get-JsonFile $RealWorkerModePath
+    if ($null -ne $Worker -and $Worker.Alive -and $null -ne $modePayload -and [string]$modePayload.mode -eq "submit_enabled") {
+        return "submit_enabled"
+    }
+    $botSchedulerWrapper = Join-Path $WrapperRoot "bot_scheduler_loop.ps1"
+    if ($null -ne $Bot -and $Bot.Alive -and $null -ne $Worker -and $Worker.Alive -and (Test-Path -LiteralPath $botSchedulerWrapper)) {
+        $wrapperText = Get-Content -Raw -LiteralPath $botSchedulerWrapper -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($wrapperText -like "*--enable-real-orders*") {
+            return "submit_enabled"
+        }
+    }
+    return "dry_run"
+}
+
 function Start-ManagedProcess {
     param(
         [string]$Name,
@@ -813,8 +875,8 @@ function Show-Status {
         }
     }
     $killSwitch = Test-Path -LiteralPath $KillSwitchPath
-    $workerMode = if ($EnableRealOrders -and -not $killSwitch) { "submit_enabled" } elseif ($killSwitch) { "disabled_by_kill_switch" } else { "dry_run" }
     $workerState = Format-ProcessHealth $worker
+    $workerMode = Resolve-RealWorkerMode -Worker $worker -Bot $bot -KillSwitch $killSwitch
     $killSwitchState = if ($killSwitch) { "enabled" } else { "off" }
     Write-Output ("real_worker: {0} pid={1} mode={2} audit_age={3} audit_status={4} log={5}" -f $workerState, $worker.Pid, $workerMode, (Format-Age $auditAge), $auditStatus, (Get-LogErrorSummary "real_worker"))
     $reviewPath = Join-Path $BotRoot "runtime\reviews\latest_decision_review.json"
@@ -953,6 +1015,8 @@ while (`$true) {
 $BotSchedulerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BotSchedulerWrapper)
 
 $WorkerSubmitFlag = if ($EnableRealOrders -and -not (Test-Path -LiteralPath $KillSwitchPath)) { "-SubmitRealOrders" } else { "" }
+$WorkerStartMode = if ($WorkerSubmitFlag) { "submit_enabled" } else { "dry_run" }
+Write-RealWorkerMode -Mode $WorkerStartMode
 $WorkerLoopCommand = @"
 `$env:ETH_BOT_ROOT = '$(($BotRoot) -replace "'", "''")'
 `$env:QUANT_ROOT = '$(($QuantRoot) -replace "'", "''")'

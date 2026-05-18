@@ -1,6 +1,101 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
+
 from bot.automation_gate import evaluate_real_order_gate
+
+
+def _fresh_factor_lookup_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trigger_ready_small_probe_payload(
+    *,
+    handoff_overrides: dict | None = None,
+    payload_overrides: dict | None = None,
+    execution_plan_overrides: dict | None = None,
+    command_position_size_pct: float = 0.10,
+) -> dict:
+    handoff = {
+        "action": "small_probe",
+        "direction": "short",
+        "execution_allowed": True,
+        "risk_filter_status": "degraded",
+        "initial_stop_loss": 1.02,
+        "tp_ladder": [0.99, 0.98, 0.96],
+        "tp_reduce_fractions": [0.5, 0.3, 0.2],
+        "position_size_pct": 0.10,
+        "executable_size_pct": 0.10,
+        "probe_source": "trigger_ready_small_probe",
+        "research_gate_status": "open",
+        "runtime_vetoes": [],
+        "degrade_flags": ["research_degraded"],
+        "factor_lookup_generated_at": _fresh_factor_lookup_generated_at(),
+        "factor_lookup_stale": False,
+        "scoring_chain_frozen": False,
+        "staleness_veto": False,
+        "conflict_veto": False,
+    }
+    handoff.update(handoff_overrides or {})
+    execution_plan = {
+        "place_entry_order": True,
+        "maintain_protective_stop": True,
+        "place_take_profit_orders": True,
+        "executable_size_pct": 0.10,
+    }
+    execution_plan.update(execution_plan_overrides or {})
+    payload = {
+        "runtime_mode": "real",
+        "engine_mode": "strict-live",
+        "requested_action": "small_probe",
+        "effective_action": "small_probe",
+        "blocked": False,
+        "degraded": True,
+        "handoff": handoff,
+        "execution_plan": execution_plan,
+        "command_targets": ["entry_order", "maintain_protective_stop", "take_profit_order", "take_profit_order", "take_profit_order"],
+        "execution_commands": [
+            {
+                "target": "entry_order",
+                "payload": {
+                    "action": "small_probe",
+                    "direction": "short",
+                    "position_size_pct": command_position_size_pct,
+                },
+            },
+            {
+                "target": "maintain_protective_stop",
+                "payload": {"direction": "short", "initial_stop_loss": 1.02, "tp_ladder": [0.99, 0.98, 0.96]},
+            },
+            {
+                "target": "take_profit_order",
+                "payload": {"direction": "short", "price_ratio": 0.99, "reduce_fraction": 0.5, "level": 1},
+            },
+            {
+                "target": "take_profit_order",
+                "payload": {"direction": "short", "price_ratio": 0.98, "reduce_fraction": 0.3, "level": 2},
+            },
+            {
+                "target": "take_profit_order",
+                "payload": {"direction": "short", "price_ratio": 0.96, "reduce_fraction": 0.2, "level": 3},
+            },
+        ],
+        "runtime_snapshot": {
+            "snapshot_valid": True,
+            "position": {"position_state": "FLAT"},
+        },
+        "preflight": [
+            {"target": "entry_order", "status": "preflight_ready", "error": ""},
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ],
+    }
+    payload.update(payload_overrides or {})
+    return payload
 
 
 def test_real_order_gate_disabled_by_default() -> None:
@@ -126,6 +221,70 @@ def test_real_order_gate_blocks_all_non_pass_risk_filter_statuses() -> None:
 
         assert decision.allowed is False
         assert "risk_filter_not_pass" in decision.reason_codes
+
+
+def test_real_order_gate_allows_degraded_trigger_ready_small_probe_contract() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload=_trigger_ready_small_probe_payload(),
+    )
+
+    assert decision.allowed is True
+    assert decision.automation_boundary == "real_order_submission_allowed"
+    assert "cycle_blocked_or_degraded" not in decision.reason_codes
+    assert "risk_filter_not_pass" not in decision.reason_codes
+    assert "take_profit_orders_not_planned" not in decision.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("handoff_overrides", "expected_reason"),
+    [
+        ({"scoring_chain_frozen": True}, "scoring_chain_frozen"),
+        ({"factor_lookup_stale": True}, "factor_lookup_stale"),
+        ({"factor_lookup_generated_at": ""}, "factor_lookup_generated_at_missing"),
+        ({"research_gate_reasons": ["research_stale"]}, "research_stale"),
+        ({"runtime_vetoes": ["research_not_ready"]}, "research_not_ready"),
+        ({"staleness_veto": True}, "staleness_veto"),
+        ({"conflict_veto": True}, "conflict_veto"),
+    ],
+)
+def test_real_order_gate_blocks_trigger_ready_small_probe_on_hard_faults(
+    handoff_overrides: dict,
+    expected_reason: str,
+) -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload=_trigger_ready_small_probe_payload(handoff_overrides=handoff_overrides),
+    )
+
+    assert decision.allowed is False
+    assert expected_reason in decision.reason_codes
+
+
+def test_real_order_gate_blocks_trigger_ready_small_probe_over_ten_percent_cap() -> None:
+    decision = evaluate_real_order_gate(
+        enable_real_orders=True,
+        payload=_trigger_ready_small_probe_payload(
+            handoff_overrides={"position_size_pct": 0.11},
+            execution_plan_overrides={"executable_size_pct": 0.11},
+            command_position_size_pct=0.11,
+        ),
+    )
+
+    assert decision.allowed is False
+    assert "trigger_ready_probe_size_over_cap" in decision.reason_codes
+
+
+def test_real_order_gate_blocks_non_trigger_ready_small_probe_when_risk_filter_degraded() -> None:
+    payload = _trigger_ready_small_probe_payload(
+        handoff_overrides={"probe_source": "trend_continuation_probe"},
+    )
+
+    decision = evaluate_real_order_gate(enable_real_orders=True, payload=payload)
+
+    assert decision.allowed is False
+    assert "cycle_blocked_or_degraded" in decision.reason_codes
+    assert "risk_filter_not_pass" in decision.reason_codes
 
 
 def test_real_order_gate_blocks_high_risk_auto_submit_for_now() -> None:

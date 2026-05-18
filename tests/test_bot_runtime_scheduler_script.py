@@ -5,6 +5,7 @@ import json
 import os
 import time
 import pytest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from bot.audit_logger import AuditLogger
@@ -35,6 +36,112 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         max_consecutive_failures=1,
         degraded_heartbeat_interval_sec=1,
     )
+
+
+def _fresh_factor_lookup_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trigger_ready_small_probe_cycle_payload(
+    *,
+    handoff_overrides: dict | None = None,
+    payload_overrides: dict | None = None,
+) -> dict:
+    handoff = {
+        "action": "small_probe",
+        "direction": "short",
+        "execution_allowed": True,
+        "risk_filter_status": "degraded",
+        "initial_stop_loss": 1.02,
+        "tp_ladder": [0.99, 0.98, 0.96],
+        "tp_reduce_fractions": [0.5, 0.3, 0.2],
+        "position_size_pct": 0.10,
+        "executable_size_pct": 0.10,
+        "probe_source": "trigger_ready_small_probe",
+        "research_gate_status": "open",
+        "runtime_vetoes": [],
+        "degrade_flags": ["research_degraded"],
+        "factor_lookup_generated_at": _fresh_factor_lookup_generated_at(),
+        "factor_lookup_stale": False,
+        "scoring_chain_frozen": False,
+        "staleness_veto": False,
+        "conflict_veto": False,
+    }
+    handoff.update(handoff_overrides or {})
+    payload = {
+        "runtime_mode": "real",
+        "engine_mode": "strict-live",
+        "symbol": "ETH",
+        "exchange_symbol": "ETH-USDT-SWAP",
+        "requested_action": "small_probe",
+        "effective_action": "small_probe",
+        "blocked": False,
+        "degraded": True,
+        "handoff": handoff,
+        "execution_plan": {
+            "place_entry_order": True,
+            "maintain_protective_stop": True,
+            "place_take_profit_orders": True,
+            "executable_size_pct": 0.10,
+            "stop_distance_pct": 0.02,
+            "account_risk_pct": 0.002,
+        },
+        "command_targets": ["entry_order", "maintain_protective_stop", "take_profit_order", "take_profit_order", "take_profit_order"],
+        "execution_commands": [
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "entry_order",
+                "idempotency_key": "entry:key",
+                "reason": "effective_action:small_probe",
+                "payload": {"action": "small_probe", "direction": "short", "position_size_pct": 0.10},
+            },
+            {
+                "command_type": "order",
+                "operation": "upsert",
+                "target": "maintain_protective_stop",
+                "idempotency_key": "stop:key",
+                "reason": "protective_stop_required",
+                "payload": {"direction": "short", "initial_stop_loss": 1.02, "tp_ladder": [0.99, 0.98, 0.96]},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key:1",
+                "reason": "take_profit_level:1",
+                "payload": {"direction": "short", "price_ratio": 0.99, "reduce_fraction": 0.5, "level": 1},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key:2",
+                "reason": "take_profit_level:2",
+                "payload": {"direction": "short", "price_ratio": 0.98, "reduce_fraction": 0.3, "level": 2},
+            },
+            {
+                "command_type": "order",
+                "operation": "place",
+                "target": "take_profit_order",
+                "idempotency_key": "tp:key:3",
+                "reason": "take_profit_level:3",
+                "payload": {"direction": "short", "price_ratio": 0.96, "reduce_fraction": 0.2, "level": 3},
+            },
+        ],
+        "preflight": [
+            {"target": "entry_order", "status": "preflight_ready", "error": ""},
+            {"target": "maintain_protective_stop", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+            {"target": "take_profit_order", "status": "preflight_ready", "error": ""},
+        ],
+        "audit_log_path": "",
+        "state_path": "",
+        "runtime_snapshot": {"snapshot_valid": True, "position": {"position_state": "FLAT"}},
+    }
+    payload.update(payload_overrides or {})
+    return payload
 
 
 def test_bot_runtime_scheduler_run_once_records_shadow_preflight_boundary(tmp_path: Path) -> None:
@@ -324,6 +431,64 @@ def test_bot_runtime_scheduler_writes_candidate_execution_package_when_gate_allo
     assert package["real_order_gate"]["allowed"] is True
     assert package["execution_commands"][0]["target"] == "entry_order"
     assert (expires_at - generated_at).total_seconds() == 180
+
+
+def test_bot_runtime_scheduler_writes_candidate_for_degraded_trigger_ready_small_probe(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: _trigger_ready_small_probe_cycle_payload(
+            payload_overrides={
+                "audit_log_path": str(tmp_path / "audit.jsonl"),
+                "state_path": str(tmp_path / "state.json"),
+            }
+        ),
+    )
+
+    package_summary = payload["candidate_execution_package"]
+    package = json.loads(Path(package_summary["latest_path"]).read_text(encoding="utf-8"))
+
+    assert payload["real_order_gate"]["allowed"] is True
+    assert package_summary["status"] == "written"
+    assert package["action"] == "small_probe"
+    assert package["handoff"]["probe_source"] == "trigger_ready_small_probe"
+    assert package["handoff"]["risk_filter_status"] == "degraded"
+    assert package["handoff"]["tp_reduce_fractions"] == [0.5, 0.3, 0.2]
+    assert [command["target"] for command in package["execution_commands"]] == [
+        "entry_order",
+        "maintain_protective_stop",
+        "take_profit_order",
+        "take_profit_order",
+        "take_profit_order",
+    ]
+    assert package["real_order_gate"]["allowed"] is True
+
+
+def test_bot_runtime_scheduler_skips_degraded_trigger_ready_small_probe_with_hard_fault(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.enable_real_orders = True
+
+    payload = bot_runtime_scheduler.run_once(
+        args=args,
+        bot_root=Path(__file__).resolve().parents[1],
+        cycle_runner=lambda **_: _trigger_ready_small_probe_cycle_payload(
+            handoff_overrides={
+                "factor_lookup_stale": True,
+                "transition_reason_codes": ["factor_lookup_stale"],
+            }
+        ),
+    )
+
+    assert payload["real_order_gate"]["allowed"] is False
+    assert "factor_lookup_stale" in payload["real_order_gate"]["reason_codes"]
+    assert payload["candidate_execution_package"] == {
+        "status": "skipped",
+        "reason": "candidate_execution_package_not_allowed",
+    }
+    assert not (Path(args.runtime_root) / "latest_candidate_execution_package.json").exists()
 
 
 def test_bot_runtime_scheduler_blocks_candidate_when_runtime_snapshot_missing(tmp_path: Path) -> None:

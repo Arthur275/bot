@@ -25,6 +25,7 @@ REASON_CODE_TEXT: dict[str, str] = {
     "research_issue_present": "research 存在待处理问题",
     "diagnostic:transport": "传输层异常",
     "diagnostic:data_source": "数据源异常",
+    "diagnostic_optional_macro_source": "CoinGecko 宏观源限流（软警告）",
     "diagnostic:pipeline": "量化流水线异常",
     "market_data_consensus_unreliable": "市场数据共识不可靠，禁止开仓",
     "market_data_source_unreliable": "市场数据源不足或不可用，不等同于行情确认转坏",

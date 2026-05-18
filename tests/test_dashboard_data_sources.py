@@ -12,6 +12,7 @@ import dashboard.app as dashboard_app
 from dashboard.app import DashboardHandler, OverviewSnapshotCache
 from dashboard.data_sources import DashboardPaths, load_dashboard_snapshot
 from dashboard.decision_review import build_daily_review, build_decision_review, normalize_decision_review, write_governance_suggestions
+from dashboard.reason_text import reason_text
 from dashboard.status_rules import age_seconds, kill_switch_status, lookup_status, runtime_status
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,10 @@ def test_age_seconds_treats_naive_timestamps_as_local_time() -> None:
     utc_now = local_now.astimezone(timezone.utc)
 
     assert age_seconds(local_now.isoformat(), now=utc_now) == 0
+
+
+def test_reason_text_maps_optional_macro_source_warning() -> None:
+    assert reason_text("diagnostic_optional_macro_source") == "CoinGecko 宏观源限流（软警告）"
 
 
 def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Path) -> None:
@@ -341,6 +346,7 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "veto_factor_codes": [],
             "regime_bucket": "trend_long",
             "factor_lookup_version": "lookup-20260504",
+            "factor_lookup_generated_at": generated_at,
             "execution_warnings": ["route_c_missing"],
         },
     )
@@ -424,6 +430,8 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["supporting_factors"] == ["trend_aligned"]
     assert snapshot["quant"]["regime_bucket"] == "trend_long"
     assert snapshot["quant"]["factor_lookup_version"] == "lookup-20260504"
+    assert snapshot["quant"]["factor_lookup_stale"] is False
+    assert snapshot["quant"]["handoff_freshness_status"] == "fresh"
     assert snapshot["quant"]["execution_warnings"] == ["route_c_missing"]
     assert snapshot["quant"]["automation_boundary"] == "real_order_submission_candidate"
     assert snapshot["quant"]["execution_block_reason"] == "not_entry_action"
@@ -554,6 +562,66 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["quant"]["binance_source_failure_reason"] == "HTTP 451"
     assert snapshot["decision_review"]["review_status"] == "unavailable"
     assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
+
+
+def test_dashboard_recomputes_factor_lookup_staleness_from_handoff_timestamp(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    now = datetime.now(timezone.utc)
+    generated_at = now.isoformat()
+    stale_lookup_at = (now - timedelta(hours=30)).isoformat()
+
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json", {"finished_at": generated_at})
+    _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(quant_root / "runtime" / "scheduler" / "research_health.json", {"status": "ok"})
+    _write_json(
+        quant_root / "runtime" / "cycles" / "latest_strict_live" / "execution_handoff.json",
+        {
+            "generated_at": generated_at,
+            "factor_lookup_version": "lookup-stale",
+            "factor_lookup_generated_at": stale_lookup_at,
+            "factor_lookup_stale": False,
+            "transition_reason_codes": ["entry_thesis_below_floor"],
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["quant"]["factor_lookup_stale"] is True
+    assert snapshot["quant"]["factor_lookup_producer_stale"] is False
+    assert snapshot["quant"]["handoff_freshness_status"] == "stale"
+    assert "factor_lookup_age_over_threshold" in snapshot["quant"]["handoff_freshness_reason_codes"]
+    assert "factor_lookup_stale_flag_conflict" in snapshot["quant"]["handoff_freshness_reason_codes"]
+    assert snapshot["quant"]["factor_lookup_age_seconds"] >= 30 * 60 * 60
+
+
+def test_dashboard_uses_three_hour_factor_lookup_age_floor_by_default(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    now = datetime.now(timezone.utc)
+    generated_at = now.isoformat()
+    stale_lookup_at = (now - timedelta(hours=4)).isoformat()
+
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json", {"finished_at": generated_at})
+    _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(quant_root / "runtime" / "scheduler" / "research_health.json", {"status": "ok"})
+    _write_json(
+        quant_root / "runtime" / "cycles" / "latest_strict_live" / "handoff.json",
+        {
+            "generated_at": generated_at,
+            "factor_lookup_version": "lookup-four-hours-old",
+            "factor_lookup_generated_at": stale_lookup_at,
+            "factor_lookup_stale": False,
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["quant"]["factor_lookup_stale"] is True
+    assert snapshot["quant"]["handoff_freshness_status"] == "stale"
+    assert "factor_lookup_age_over_threshold" in snapshot["quant"]["handoff_freshness_reason_codes"]
 
 
 def test_dashboard_trigger_watch_tracks_high_confidence_wait_shadow_outcomes(tmp_path: Path) -> None:
@@ -1057,6 +1125,7 @@ def test_dashboard_static_dom_contract_is_complete() -> None:
     assert "function clearElement(el)" in app_js
     assert "judgement_not_ok: \"量化判断未返回可执行结果\"" in app_js
     assert '"diagnostic:data_source": "数据源异常"' in app_js
+    assert 'diagnostic_optional_macro_source: "CoinGecko 宏观源限流（软警告）"' in app_js
     assert '"risk_filter:unknown": "风控状态未知"' in app_js
     assert 'waiting: "等待"' in app_js
     assert '.replace(/\\bunavailable\\b/gi, "不可用")' in app_js

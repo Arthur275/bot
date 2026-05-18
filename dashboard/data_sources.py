@@ -20,6 +20,8 @@ DEFAULT_QUANT_ROOT = BOT_ROOT.parent / "quant_system_rebuild"
 INCOMPLETE_QUANT_STATUSES = {"incomplete_snapshot_only", "incomplete_missing_scheduler_status"}
 TRIGGER_WATCH_CONFIDENCE_THRESHOLD = 0.60
 TRIGGER_WATCH_HORIZONS = (1, 3, 6)
+DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC = 3 * 60 * 60
+FACTOR_LOOKUP_FUTURE_TOLERANCE_SEC = 60
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
     candidate_scan = _read_json(quant_runtime / "reports" / "candidate_scan_feature_matrix_smoke.json")
     parameter_scan = _read_json(quant_runtime / "reports" / "parameter_scan_feature_matrix_smoke.json")
     quant_handoff = _read_latest_handoff(paths.quant_root)
+    quant_handoff_freshness = _handoff_factor_lookup_freshness(quant_handoff)
     quant_cycle = _read_latest_quant_cycle(paths.quant_root)
     quant_incomplete_cycle = _read_latest_incomplete_quant_cycle(paths.quant_root)
     quant_decision = quant_cycle.get("decision", {})
@@ -234,7 +237,12 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "latest_incomplete_cycle": quant_incomplete_cycle,
             "regime_bucket": quant_handoff.get("regime_bucket", "") or _regime_bucket(quant_regime),
             "factor_lookup_version": quant_handoff.get("factor_lookup_version", "") or factor_lookup.get("lookup_version", ""),
-            "factor_lookup_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
+            "factor_lookup_generated_at": _first_present(quant_handoff.get("factor_lookup_generated_at"), factor_lookup.get("generated_at")),
+            "factor_lookup_age_seconds": quant_handoff_freshness["age_seconds"],
+            "factor_lookup_stale": bool(quant_handoff_freshness["stale"]),
+            "factor_lookup_producer_stale": bool(quant_handoff.get("factor_lookup_stale", False)),
+            "handoff_freshness_status": quant_handoff_freshness["status"],
+            "handoff_freshness_reason_codes": quant_handoff_freshness["reason_codes"],
             "execution_warnings": quant_handoff.get("execution_warnings", []),
             "automation_boundary": bot_cycle.get("automation_boundary", ""),
             "trigger_watch": trigger_watch,
@@ -1468,6 +1476,48 @@ def _parse_timestamp(value: Any) -> float | None:
         return datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None
+
+
+def _handoff_factor_lookup_freshness(handoff: dict[str, Any]) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    generated_at = handoff.get("factor_lookup_generated_at")
+    timestamp = _parse_timestamp(generated_at)
+    if timestamp is None:
+        reason_codes.append("handoff_freshness_unknown")
+        return {
+            "age_seconds": None,
+            "stale": True,
+            "status": "unknown",
+            "reason_codes": reason_codes,
+        }
+    age_seconds = round(datetime.now(timezone.utc).timestamp() - timestamp, 3)
+    if age_seconds > _factor_lookup_stale_after_sec():
+        reason_codes.append("factor_lookup_age_over_threshold")
+    if age_seconds < -FACTOR_LOOKUP_FUTURE_TOLERANCE_SEC:
+        reason_codes.append("factor_lookup_generated_at_in_future")
+    producer_stale = bool(handoff.get("factor_lookup_stale", False))
+    stale = producer_stale or bool(reason_codes)
+    if not producer_stale and reason_codes:
+        reason_codes.append("factor_lookup_stale_flag_conflict")
+    if producer_stale:
+        reason_codes.append("factor_lookup_stale")
+    status = "stale" if stale else "fresh"
+    return {
+        "age_seconds": age_seconds,
+        "stale": stale,
+        "status": status,
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+    }
+
+
+def _factor_lookup_stale_after_sec() -> int:
+    raw = os.environ.get("DASHBOARD_FACTOR_LOOKUP_MAX_AGE_SEC") or os.environ.get("FACTOR_LOOKUP_MAX_AGE_SEC")
+    if not raw:
+        return DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return DEFAULT_FACTOR_LOOKUP_STALE_AFTER_SEC
 
 
 def _nested(payload: dict[str, Any], *keys: str) -> Any:
