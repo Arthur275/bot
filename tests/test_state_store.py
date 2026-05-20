@@ -780,6 +780,65 @@ def test_state_store_records_active_contrarian_probe_metadata(tmp_path: Path) ->
     assert updated.metadata["active_probe_risk_tier"] == "technical"
 
 
+def test_state_store_records_active_trigger_ready_probe_metadata(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    updated = store.record_shadow_cycle(
+        state=store.load(),
+        judgement={"status": "ok"},
+        handoff={
+            "generated_at": "2026-05-02T03:00:00",
+            "action": "small_probe",
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.10,
+            "probe_source": "trigger_ready_small_probe",
+            "probe_expiry_bars": 3,
+            "probe_expiry_timeframe": "15m",
+            "probe_invalid_if_no_followthrough": True,
+            "probe_risk_tier": "trigger_ready",
+            "invalidate_conditions": [
+                "trigger_ready_long_failed_followthrough",
+                "trigger_reversal_15m",
+                "no_followthrough_after_3x15m",
+                "hard_risk_veto",
+            ],
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="small_probe",
+        execution_results=[
+            CommandExecutionResult(
+                target="entry_order",
+                status="simulated",
+                accepted=True,
+                simulated=True,
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(snapshot_valid=False),
+    )
+
+    assert updated.observed_position_state == "ENTERED"
+    assert updated.metadata["active_probe_source"] == "trigger_ready_small_probe"
+    assert updated.metadata["active_probe_started_at"] == "2026-05-02T03:00:00+00:00"
+    assert updated.metadata["active_probe_expires_at"] == "2026-05-02T03:45:00+00:00"
+    assert updated.metadata["active_probe_expiry_bars"] == 3
+    assert updated.metadata["active_probe_expiry_timeframe"] == "15m"
+    assert updated.metadata["active_probe_invalid_if_no_followthrough"] is True
+    assert updated.metadata["active_probe_risk_tier"] == "trigger_ready"
+    assert updated.metadata["active_probe_invalidate_conditions"] == [
+        "trigger_ready_long_failed_followthrough",
+        "trigger_reversal_15m",
+        "no_followthrough_after_3x15m",
+        "hard_risk_veto",
+    ]
+
+
 def test_state_store_clears_active_probe_metadata_when_flat(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.json")
     state = store.load()
@@ -818,6 +877,7 @@ def test_state_store_clears_active_probe_metadata_when_flat(tmp_path: Path) -> N
     assert updated.observed_position_state == "FLAT"
     assert "active_probe_source" not in updated.metadata
     assert "active_probe_expires_at" not in updated.metadata
+    assert "active_probe_invalidate_conditions" not in updated.metadata
 
 
 def test_state_store_rolls_active_contrarian_probe_expiry_without_new_entry_order(tmp_path: Path) -> None:

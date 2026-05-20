@@ -10,6 +10,8 @@ from .execution_risk_gate import ExecutionRiskGate
 from .network_guard import GuardDecision
 from .time_utils import parse_datetime_utc
 
+ACTIVE_PROBE_SOURCES = {"contrarian_short_probe", "trigger_ready_small_probe"}
+
 
 class ExecutionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -100,8 +102,12 @@ class PositionManager:
 
         risk_decision = self._execution_risk_gate.evaluate(handoff=handoff, runtime_state=runtime_state)
 
-        if self._contrarian_probe_expired(runtime_state=runtime_state, has_open_risk=has_open_risk):
-            if self._continues_active_contrarian_probe(handoff=handoff):
+        expired_probe_source = self._expired_active_probe_source(runtime_state=runtime_state, has_open_risk=has_open_risk)
+        if expired_probe_source:
+            if expired_probe_source == "contrarian_short_probe" and self._continues_active_probe(
+                handoff=handoff,
+                probe_source=expired_probe_source,
+            ):
                 return ExecutionPlan(
                     requested_action=requested_action,
                     effective_action=PositionAction.SMALL_PROBE.value,
@@ -111,15 +117,16 @@ class PositionManager:
                     recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
                     notes=["contrarian_probe_expiry_rolled_forward"],
                 )
+            expiry_reason = self._probe_expiry_reason(expired_probe_source)
             return ExecutionPlan(
                 requested_action=requested_action,
                 effective_action=PositionAction.EXIT.value,
-                plan_reason="contrarian_probe_expired",
+                plan_reason=expiry_reason,
                 place_exit_order=True,
                 maintain_protective_stop=needs_protective_stop,
                 needs_reconciliation=needs_recovery_reconciliation,
                 recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
-                notes=["contrarian_probe_expired"],
+                notes=[expiry_reason],
             )
 
         if requested_action in entry_actions and not risk_decision.allowed:
@@ -246,28 +253,35 @@ class PositionManager:
         return has_ratio and (has_fraction != has_qty)
 
     @staticmethod
-    def _contrarian_probe_expired(*, runtime_state: dict[str, Any], has_open_risk: bool) -> bool:
+    def _expired_active_probe_source(*, runtime_state: dict[str, Any], has_open_risk: bool) -> str:
         if not has_open_risk:
-            return False
+            return ""
         metadata = runtime_state.get("metadata")
         if not isinstance(metadata, dict):
-            return False
-        if str(metadata.get("active_probe_source") or "") != "contrarian_short_probe":
-            return False
+            return ""
+        probe_source = str(metadata.get("active_probe_source") or "")
+        if probe_source not in ACTIVE_PROBE_SOURCES:
+            return ""
         expires_at = PositionManager._parse_datetime(metadata.get("active_probe_expires_at"))
         runtime_now = PositionManager._parse_datetime(runtime_state.get("runtime_now"))
         if expires_at is None or runtime_now is None:
-            return False
-        return runtime_now >= expires_at
+            return ""
+        return probe_source if runtime_now >= expires_at else ""
 
     @staticmethod
-    def _continues_active_contrarian_probe(*, handoff: dict[str, Any] | None) -> bool:
+    def _continues_active_probe(*, handoff: dict[str, Any] | None, probe_source: str) -> bool:
         handoff = handoff or {}
         return (
             str(handoff.get("action") or "") == PositionAction.SMALL_PROBE.value
             and str(handoff.get("direction") or "") == "short"
-            and str(handoff.get("probe_source") or "") == "contrarian_short_probe"
+            and str(handoff.get("probe_source") or "") == probe_source
         )
+
+    @staticmethod
+    def _probe_expiry_reason(probe_source: str) -> str:
+        if probe_source == "trigger_ready_small_probe":
+            return "trigger_ready_probe_expired"
+        return "contrarian_probe_expired"
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:

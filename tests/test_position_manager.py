@@ -579,3 +579,35 @@ def test_position_manager_rolls_expired_contrarian_probe_when_signal_continues()
     assert plan.place_exit_order is False
     assert plan.plan_reason == "contrarian_probe_rolled_forward"
     assert plan.notes == ["contrarian_probe_expiry_rolled_forward"]
+
+
+def test_position_manager_exits_expired_trigger_ready_probe() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={"action": "wait", "position_state": "ENTERED", "position_size_pct": 0.10},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_size_pct": 0.10,
+            "runtime_now": "2026-05-02T03:46:00",
+            "metadata": {
+                "active_probe_source": "trigger_ready_small_probe",
+                "active_probe_expires_at": "2026-05-02T03:45:00",
+                "active_probe_invalidate_conditions": [
+                    "trigger_ready_long_failed_followthrough",
+                    "trigger_reversal_15m",
+                    "no_followthrough_after_3x15m",
+                    "hard_risk_veto",
+                ],
+            },
+        },
+    )
+
+    assert plan.effective_action == "exit"
+    assert plan.place_exit_order is True
+    assert plan.plan_reason == "trigger_ready_probe_expired"
+    assert plan.notes == ["trigger_ready_probe_expired"]

@@ -196,6 +196,25 @@ def load_dashboard_snapshot(paths: DashboardPaths | None = None) -> dict[str, An
             "runtime_vetoes": _first_list_present(bot_cycle.get("runtime_vetoes"), quant_risk.get("runtime_vetoes"), quant_handoff.get("runtime_vetoes")),
             "research_gate_status": _first_present(bot_cycle.get("research_gate_status"), quant_risk.get("research_gate_status"), quant_handoff.get("research_gate_status")),
             "research_gate_reasons": _first_list_present(bot_cycle.get("research_gate_reasons"), quant_risk.get("research_gate_reasons"), quant_handoff.get("research_gate_reasons")),
+            "research_score": _first_present(bot_cycle.get("research_score"), quant_handoff.get("research_score"), quant_metadata.get("research_score")),
+            "research_candidate_count": _first_present(bot_cycle.get("research_candidate_count"), quant_handoff.get("research_candidate_count"), quant_metadata.get("research_candidate_count")),
+            "qualified_candidate_count": _first_present(bot_cycle.get("qualified_candidate_count"), quant_handoff.get("qualified_candidate_count"), quant_metadata.get("qualified_candidate_count")),
+            "research_top_candidate_id": _first_present(bot_cycle.get("research_top_candidate_id"), quant_handoff.get("research_top_candidate_id"), quant_metadata.get("research_top_candidate_id")),
+            "research_top_candidate_win_rate": _first_present(
+                bot_cycle.get("research_top_candidate_win_rate"),
+                quant_handoff.get("research_top_candidate_win_rate"),
+                quant_metadata.get("research_top_candidate_win_rate"),
+            ),
+            "research_top_candidate_total_triggers": _first_present(
+                bot_cycle.get("research_top_candidate_total_triggers"),
+                quant_handoff.get("research_top_candidate_total_triggers"),
+                quant_metadata.get("research_top_candidate_total_triggers"),
+            ),
+            "candidate_pool_diagnostics": _first_dict_present(
+                bot_cycle.get("candidate_pool_diagnostics"),
+                quant_handoff.get("candidate_pool_diagnostics"),
+                quant_metadata.get("candidate_pool_diagnostics"),
+            ),
             "execution_allowed": _first_present(bot_cycle.get("execution_allowed"), quant_handoff.get("execution_allowed")),
             "position_size_pct": _first_present(bot_cycle.get("position_size_pct"), quant_decision.get("position_size_pct"), quant_handoff.get("position_size_pct")),
             "executable_size_pct": _first_present(bot_cycle.get("executable_size_pct"), quant_handoff.get("executable_size_pct")),
@@ -753,12 +772,26 @@ def _read_latest_lookup(quant_root: Path) -> dict[str, Any]:
 
 
 def _read_latest_handoff(quant_root: Path) -> dict[str, Any]:
-    cycle_roots = [
-        quant_root / "runtime" / "cycles" / "latest_strict_live",
-        quant_root / "runtime" / "cycles" / "latest_strict_live_after_research_refresh",
-        quant_root / "runtime" / "cycles" / "latest_strict_live_research_impact_check",
+    cycles_root = quant_root / "runtime" / "cycles"
+    try:
+        cycle_roots = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and not path.name.startswith("latest_")],
+            key=lambda path: _cycle_sort_timestamp(path),
+            reverse=True,
+        )
+    except OSError:
+        cycle_roots = []
+
+    fallback_roots = [
+        cycles_root / "latest_strict_live",
+        cycles_root / "latest_strict_live_after_research_refresh",
+        cycles_root / "latest_strict_live_research_impact_check",
     ]
-    for root in cycle_roots:
+    seen: set[Path] = set()
+    for root in [*cycle_roots[:30], *fallback_roots]:
+        if root in seen:
+            continue
+        seen.add(root)
         for name in ("handoff.json", "execution_handoff.json"):
             payload = _read_json(root / name)
             if payload:
@@ -1473,7 +1506,10 @@ def _parse_timestamp(value: Any) -> float | None:
         raw = str(value)
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
-        return datetime.fromisoformat(raw).timestamp()
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
     except ValueError:
         return None
 
@@ -1541,6 +1577,13 @@ def _first_list_present(*values: Any) -> list[Any]:
         if isinstance(value, list) and value:
             return value
     return []
+
+
+def _first_dict_present(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return value
+    return {}
 
 
 def _list(value: Any) -> list[Any]:

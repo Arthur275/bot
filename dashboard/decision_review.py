@@ -281,17 +281,24 @@ def _case_from_codes(value: Any, *, label: str) -> list[dict[str, str]]:
 
 
 def _read_latest_handoff(quant_root: Path) -> tuple[dict[str, Any], Path | None]:
-    candidates = [
-        quant_root / "runtime" / "cycles" / "latest_strict_live" / "handoff.json",
-        quant_root / "runtime" / "cycles" / "latest_strict_live" / "execution_handoff.json",
-    ]
     cycles_root = quant_root / "runtime" / "cycles"
     try:
-        cycle_dirs = sorted([path for path in cycles_root.iterdir() if path.is_dir()], key=lambda path: path.stat().st_mtime, reverse=True)
+        cycle_dirs = sorted(
+            [path for path in cycles_root.iterdir() if path.is_dir() and not path.name.startswith("latest_")],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
     except OSError:
         cycle_dirs = []
+    candidates: list[Path] = []
     for cycle_dir in cycle_dirs[:30]:
         candidates.extend([cycle_dir / "handoff.json", cycle_dir / "execution_handoff.json"])
+    candidates.extend(
+        [
+            quant_root / "runtime" / "cycles" / "latest_strict_live" / "handoff.json",
+            quant_root / "runtime" / "cycles" / "latest_strict_live" / "execution_handoff.json",
+        ]
+    )
     for path in candidates:
         payload = _read_json(path)
         if payload:

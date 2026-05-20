@@ -10,3 +10,8 @@ debug_*/
 *.duckdb
 *.pid
 *.lock
+
+docs/daily_reviews/artifacts/missed_opportunity_audit_*.json
+docs/daily_reviews/artifacts/missed_opportunity_audit_*.md
+docs/daily_reviews/artifacts/missed_opportunity_shadow_outcomes_*.json
+docs/daily_reviews/artifacts/missed_opportunity_shadow_outcomes_*.md

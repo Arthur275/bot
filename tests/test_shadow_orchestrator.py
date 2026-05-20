@@ -1697,6 +1697,95 @@ def test_risk_assist_cycle_keeps_exit_available_during_recovery(tmp_path: Path) 
     assert fake_client.fetch_cycle_calls == 1
 
 
+def test_risk_assist_cycle_exits_active_trigger_ready_probe_on_quant_exit_handoff(tmp_path: Path) -> None:
+    payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-05-20T03:46:00",
+            "action": "exit",
+            "direction": "long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "EXITED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.0,
+            "initial_stop_loss": 0.982,
+            "probe_source": "trigger_ready_small_probe",
+            "invalidate_conditions": [
+                "manage:exit",
+                "manage_detail:exit:probe_trigger_reversal",
+                "transition:probe_trigger_reversal_exit",
+            ],
+        },
+    )
+    config = BotConfig(
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    state_store = StateStore(config.state_store_path)
+    state = state_store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.08
+    state.metadata = {
+        "active_probe_source": "trigger_ready_small_probe",
+        "active_probe_started_at": "2026-05-20T03:00:00+00:00",
+        "active_probe_expires_at": "2026-05-20T04:00:00+00:00",
+        "active_probe_invalid_if_no_followthrough": True,
+        "active_probe_invalidate_conditions": [
+            "trigger_ready_long_failed_followthrough",
+            "trigger_reversal_15m",
+            "no_followthrough_after_3x15m",
+            "hard_risk_veto",
+        ],
+    }
+    state_store.save(state)
+    fake_client = FakeEngineClient(payload)
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=fake_client,
+        network_guard=NetworkGuard(),
+        state_store=state_store,
+        exchange_adapter=FakeExchangeAdapter(
+            snapshot=AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.08),
+                protective_stop_present=True,
+            ),
+            reconciliation=ReconciliationResult(
+                in_sync=True,
+                protective_stop_present=True,
+            ),
+        ),
+    )
+
+    report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 5, 20, 3, 46, 0))
+
+    assert report.runtime_mode == "shadow"
+    assert report.eligible is True
+    assert report.effective_action == "exit"
+    assert report.plan_reason == "quant_action_passthrough"
+    assert report.command_summary == [
+        {"target": "exit_order", "reason": "effective_action:exit", "operation": "place"},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "operation": "upsert"},
+    ]
+    assert report.command_result_summary == [
+        {"target": "exit_order", "reason": "effective_action:exit", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "exit_order:2026-05-20T03:46:00:exit:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+        {"target": "maintain_protective_stop", "reason": "protective_stop_required", "status": "simulated", "accepted": True, "simulated": True, "idempotency_key": "maintain_protective_stop:2026-05-20T03:46:00:exit:long", "client_order_id": "", "exchange_order_id": "", "error_kind": ""},
+    ]
+    assert "exit_order" in report.adapter_action_types
+    assert "exit_order" in report.command_types
+    assert all(status == "simulated" for status in report.command_result_statuses)
+    assert fake_client.fetch_cycle_calls == 1
+
+
 
 
 def test_risk_assist_cycle_audit_log_persists_recovery_metadata_fields(tmp_path: Path) -> None:

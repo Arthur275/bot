@@ -42,11 +42,10 @@ def test_runtime_status_marks_running_stale_and_error() -> None:
     assert lookup_status(generated_at=now.isoformat())["label"] == "FRESH"
 
 
-def test_age_seconds_treats_naive_timestamps_as_local_time() -> None:
-    local_now = datetime.now().replace(microsecond=0)
-    utc_now = local_now.astimezone(timezone.utc)
+def test_age_seconds_treats_naive_timestamps_as_utc() -> None:
+    utc_now = datetime(2026, 5, 18, 15, 10, tzinfo=timezone.utc)
 
-    assert age_seconds(local_now.isoformat(), now=utc_now) == 0
+    assert age_seconds("2026-05-18T15:00:00", now=utc_now) == 600
 
 
 def test_reason_text_maps_optional_macro_source_warning() -> None:
@@ -348,6 +347,17 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
             "factor_lookup_version": "lookup-20260504",
             "factor_lookup_generated_at": generated_at,
             "execution_warnings": ["route_c_missing"],
+            "research_score": 0.72,
+            "research_candidate_count": 20,
+            "qualified_candidate_count": 3,
+            "research_top_candidate_id": "funding_rate:101",
+            "research_top_candidate_win_rate": 0.63,
+            "research_top_candidate_total_triggers": 48,
+            "candidate_pool_diagnostics": {
+                "candidate_count": 20,
+                "qualified_candidate_count": 3,
+                "dominant_failure_reason": "qualified",
+            },
         },
     )
     _write_json(
@@ -433,6 +443,13 @@ def test_load_dashboard_snapshot_reads_bot_and_quant_runtime_files(tmp_path: Pat
     assert snapshot["quant"]["factor_lookup_stale"] is False
     assert snapshot["quant"]["handoff_freshness_status"] == "fresh"
     assert snapshot["quant"]["execution_warnings"] == ["route_c_missing"]
+    assert snapshot["quant"]["research_score"] == 0.72
+    assert snapshot["quant"]["research_candidate_count"] == 20
+    assert snapshot["quant"]["qualified_candidate_count"] == 3
+    assert snapshot["quant"]["research_top_candidate_id"] == "funding_rate:101"
+    assert snapshot["quant"]["research_top_candidate_win_rate"] == 0.63
+    assert snapshot["quant"]["research_top_candidate_total_triggers"] == 48
+    assert snapshot["quant"]["candidate_pool_diagnostics"]["dominant_failure_reason"] == "qualified"
     assert snapshot["quant"]["automation_boundary"] == "real_order_submission_candidate"
     assert snapshot["quant"]["execution_block_reason"] == "not_entry_action"
     assert snapshot["quant"]["execution_layer_reasoning"] == "higher_timeframe_not_ready"
@@ -535,6 +552,17 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
                 "consensus_sources": ["OKX", "Bitget"],
                 "binance_source_health": "unavailable",
                 "binance_source_failure_reason": "HTTP 451",
+                "research_score": 0.48,
+                "research_candidate_count": 12,
+                "qualified_candidate_count": 2,
+                "research_top_candidate_id": "entry_timing_score:9",
+                "research_top_candidate_win_rate": 0.57,
+                "research_top_candidate_total_triggers": 31,
+                "candidate_pool_diagnostics": {
+                    "candidate_count": 12,
+                    "qualified_candidate_count": 2,
+                    "dominant_failure_reason": "wf_quality_insufficient",
+                },
             },
         },
     )
@@ -560,6 +588,13 @@ def test_load_dashboard_snapshot_reads_latest_quant_cycle_without_handoff(tmp_pa
     assert snapshot["quant"]["consensus_sources"] == ["OKX", "Bitget"]
     assert snapshot["quant"]["binance_source_health"] == "unavailable"
     assert snapshot["quant"]["binance_source_failure_reason"] == "HTTP 451"
+    assert snapshot["quant"]["research_score"] == 0.48
+    assert snapshot["quant"]["research_candidate_count"] == 12
+    assert snapshot["quant"]["qualified_candidate_count"] == 2
+    assert snapshot["quant"]["research_top_candidate_id"] == "entry_timing_score:9"
+    assert snapshot["quant"]["research_top_candidate_win_rate"] == 0.57
+    assert snapshot["quant"]["research_top_candidate_total_triggers"] == 31
+    assert snapshot["quant"]["candidate_pool_diagnostics"]["dominant_failure_reason"] == "wf_quality_insufficient"
     assert snapshot["decision_review"]["review_status"] == "unavailable"
     assert snapshot["decision_review"]["data_source_quality"]["handoff_available"] is False
 
@@ -622,6 +657,45 @@ def test_dashboard_uses_three_hour_factor_lookup_age_floor_by_default(tmp_path: 
     assert snapshot["quant"]["factor_lookup_stale"] is True
     assert snapshot["quant"]["handoff_freshness_status"] == "stale"
     assert "factor_lookup_age_over_threshold" in snapshot["quant"]["handoff_freshness_reason_codes"]
+
+
+def test_dashboard_prefers_latest_real_cycle_handoff_over_stale_alias(tmp_path: Path) -> None:
+    bot_root = tmp_path / "eth_trading_bot"
+    quant_root = tmp_path / "quant_system_rebuild"
+    now = datetime.now(timezone.utc)
+    generated_at = now.isoformat()
+    old_lookup_at = (now - timedelta(days=15)).isoformat()
+
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(bot_root / "runtime" / "bot_runtime_scheduler" / "latest_cycle.json", {"finished_at": generated_at})
+    _write_json(quant_root / "runtime" / "scheduler" / "heartbeat.json", {"generated_at": generated_at, "status": "ok"})
+    _write_json(quant_root / "runtime" / "scheduler" / "research_health.json", {"status": "ok"})
+    _write_json(
+        quant_root / "runtime" / "cycles" / "latest_strict_live" / "handoff.json",
+        {
+            "generated_at": old_lookup_at,
+            "factor_lookup_version": "old-alias",
+        },
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "eth-15m-20260518T153252Z-current" / "scheduler_status.json",
+        {"generated_at": generated_at, "status": "ok"},
+    )
+    _write_json(
+        quant_root / "runtime" / "cycles" / "eth-15m-20260518T153252Z-current" / "handoff.json",
+        {
+            "generated_at": generated_at,
+            "factor_lookup_version": "current-run",
+            "factor_lookup_generated_at": generated_at,
+            "factor_lookup_stale": False,
+        },
+    )
+
+    snapshot = load_dashboard_snapshot(DashboardPaths(bot_root=bot_root, quant_root=quant_root))
+
+    assert snapshot["quant"]["factor_lookup_version"] == "current-run"
+    assert snapshot["quant"]["handoff_freshness_status"] == "fresh"
+    assert snapshot["quant"]["handoff_freshness_reason_codes"] == []
 
 
 def test_dashboard_trigger_watch_tracks_high_confidence_wait_shadow_outcomes(tmp_path: Path) -> None:

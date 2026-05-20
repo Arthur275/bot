@@ -157,6 +157,7 @@ class ShadowOrchestrator:
                 handoff=cycle.handoff,
                 runtime_snapshot=runtime_snapshot,
                 reconciliation=reconciliation,
+                runtime_now=cycle_generated_at,
             ),
         )
         adapter_actions = self._exchange_adapter.plan_actions(
@@ -336,6 +337,7 @@ class ShadowOrchestrator:
                 handoff=cycle.handoff,
                 runtime_snapshot=runtime_snapshot,
                 reconciliation=reconciliation,
+                runtime_now=cycle_generated_at,
             ),
         )
         adapter_actions = self._exchange_adapter.plan_actions(
@@ -640,9 +642,10 @@ class ShadowOrchestrator:
         handoff: dict[str, object] | None,
         runtime_snapshot: AdapterRuntimeSnapshot,
         reconciliation: ReconciliationResult,
+        runtime_now: datetime,
     ) -> dict[str, object]:
         payload = state.model_dump(mode="json")
-        payload["runtime_now"] = utc_now().isoformat()
+        payload["runtime_now"] = runtime_now.isoformat()
         runtime_snapshot_valid = ShadowOrchestrator._is_runtime_snapshot_valid(runtime_snapshot)
         runtime_position = runtime_snapshot.position
         runtime_position_state = str(runtime_position.position_state or "") if runtime_snapshot_valid else ""

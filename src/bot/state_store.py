@@ -17,6 +17,8 @@ from .execution_summary import summarize_execution_results
 from .network_guard import GuardDecision
 from .time_utils import parse_datetime_utc, utc_now
 
+ACTIVE_PROBE_SOURCES = {"contrarian_short_probe", "trigger_ready_small_probe"}
+
 
 class ExecutionLayerState(str, Enum):
     IDLE = "idle"
@@ -478,11 +480,16 @@ class StateStore:
             StateStore._clear_active_probe_metadata(metadata)
             next_state.metadata = metadata
             return
-        if not StateStore._is_active_contrarian_probe_entry(
+        probe_source = StateStore._active_probe_source_from_handoff(handoff)
+        if not probe_source:
+            next_state.metadata = metadata
+            return
+        if not StateStore._is_active_probe_entry(
             next_state=next_state,
             handoff=handoff,
             effective_action=effective_action,
             execution_results=execution_results,
+            probe_source=probe_source,
         ):
             next_state.metadata = metadata
             return
@@ -497,32 +504,39 @@ class StateStore:
         )
         metadata.update(
             {
-                "active_probe_source": "contrarian_short_probe",
+                "active_probe_source": probe_source,
                 "active_probe_started_at": started_at.isoformat(),
                 "active_probe_expiry_bars": expiry_bars,
                 "active_probe_expiry_timeframe": expiry_timeframe,
                 "active_probe_expires_at": expires_at.isoformat() if expires_at else "",
                 "active_probe_invalid_if_no_followthrough": bool(handoff.get("probe_invalid_if_no_followthrough")),
                 "active_probe_risk_tier": str(handoff.get("probe_risk_tier") or ""),
+                "active_probe_invalidate_conditions": StateStore._normalize_string_list(handoff.get("invalidate_conditions")),
             }
         )
         next_state.metadata = metadata
 
     @staticmethod
-    def _is_active_contrarian_probe_entry(
+    def _active_probe_source_from_handoff(handoff: dict[str, Any] | None) -> str:
+        source = str((handoff or {}).get("probe_source") or "")
+        return source if source in ACTIVE_PROBE_SOURCES else ""
+
+    @staticmethod
+    def _is_active_probe_entry(
         *,
         next_state: BotRuntimeState,
         handoff: dict[str, Any] | None,
         effective_action: str,
         execution_results: Sequence[CommandExecutionResult] | None,
+        probe_source: str,
     ) -> bool:
         if effective_action != PositionAction.SMALL_PROBE.value:
             return False
-        if str((handoff or {}).get("probe_source") or "") != "contrarian_short_probe":
+        if str((handoff or {}).get("probe_source") or "") != probe_source:
             return False
         if StateStore._has_accepted_entry_order(execution_results):
             return True
-        return str(next_state.metadata.get("active_probe_source") or "") == "contrarian_short_probe"
+        return str(next_state.metadata.get("active_probe_source") or "") == probe_source
 
     @staticmethod
     def _has_accepted_entry_order(execution_results: Sequence[CommandExecutionResult] | None) -> bool:
@@ -541,8 +555,15 @@ class StateStore:
             "active_probe_expires_at",
             "active_probe_invalid_if_no_followthrough",
             "active_probe_risk_tier",
+            "active_probe_invalidate_conditions",
         ):
             metadata.pop(key, None)
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        return [str(item) for item in value if str(item)]
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
