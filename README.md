@@ -1,5 +1,22 @@
 # ETH Trading Bot
 
+## 当前状况与困境（2026-06-27）
+
+本仓库当前定位是 **真实交易执行壳**，不是策略研究仓库。它消费 `quant_system_rebuild` 输出的 judgement / execution handoff，把量化侧已经审计过的判断转换成可降级、可审计、可人工接管的执行流程。默认执行场所是 OKX USDT swap，默认合约是 `ETH-USDT-SWAP`；Binance USDT perpetual 仍保留为显式配置下的 legacy fallback。
+
+当前代码已经补强了执行前的触发探针和防误触边界：trigger-ready probe 会在状态变化、过期、网络异常或证据不足时失效，避免把旧信号误当成新授权；daily review 和 runtime stack 工具用于复盘本地状态、审计日志和执行链路。真实下单仍然受严格 gate 约束：必须是 `strict-live` 来源，kill switch、network guard、preflight、人工确认、真实 API 环境变量和 submit 标志都满足后才允许进入真实提交路径。
+
+和 `quant_system_rebuild` 的边界要继续保持清楚：量化仓库负责判断“该不该做、做多大、证据质量如何”，本仓库只负责“在严格边界内如何安全执行”。bot 内部不重新发明策略，不把 sample-fallback 当实时交易信号，不自行放宽仓位、止损或执行条件。
+
+主要困境与限制：
+
+- **执行安全故意保守**：自动 entry / reduce / exit / trailing 不能因为工具链变顺就扩大权限；真实执行必须继续由明确 gate 控制。
+- **运行状态和交易所状态必须持续校验**：本地 state store、audit log、保护单状态和交易所仓位一旦不一致，优先降级或人工确认，而不是自动修正扩大风险。
+- **长期常驻需要外部监督**：bot 或配套调度器进程如果被杀、机器关机或网络断开，进程内逻辑无法自证死亡；生产化需要外部 watchdog 或系统级服务管理。
+- **凭据不能进入仓库**：README 可以记录 `OKX_TRADE_API_KEY`、`OKX_TRADE_API_SECRET`、`OKX_TRADE_PASSPHRASE` 这些环境变量名，但真实值必须只存在本地环境或密钥管理工具里。
+- **本地索引和运行产物不提交**：`.codegraph/`、runtime 状态、浏览器 profile、审计输出和临时报告默认留在本机，除非某个文件被明确设计为可审计样例。
+- **当前价值仍偏“安全执行框架”**：它能降低误下单和失控风险，但不能替代策略质量；如果量化侧 handoff 质量不足，bot 应该拒绝执行，而不是在执行层补策略判断。
+
 ## Current Execution Venue
 
 Default real-execution venue is now OKX USDT swap:
