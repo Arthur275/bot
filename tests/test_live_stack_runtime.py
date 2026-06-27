@@ -97,3 +97,34 @@ def test_build_bot_runtime_passes_okx_passphrase_env_to_credentials(tmp_path, mo
 
     assert runtime.adapter is captured["credentials"] or isinstance(runtime.adapter, FakeOkxAdapter)
     assert captured["credentials"].api_passphrase_env == "OKX_TRADE_PASSPHRASE"
+
+
+def test_build_bot_runtime_passes_incomplete_snapshot_status_dir(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeEngineClient:
+        def __init__(self, config, **_kwargs) -> None:
+            captured["config"] = config
+
+    class FakeOkxAdapter:
+        def __init__(self, _credentials) -> None:
+            pass
+
+    monkeypatch.setattr(live_stack_runtime, "EngineClient", FakeEngineClient)
+    monkeypatch.setattr(live_stack_runtime, "OkxUsdtSwapAdapter", FakeOkxAdapter)
+
+    telemetry_dir = tmp_path / "telemetry" / "snapshot_only"
+    live_stack_runtime.build_bot_runtime(
+        paths={
+            "bot_state_path": tmp_path / "state.json",
+            "bot_audit_path": tmp_path / "audit.jsonl",
+            "bot_artifacts_dir": tmp_path / "artifacts",
+            "incomplete_snapshot_status_dir": telemetry_dir,
+        },
+        proxy_url=None,
+        run_live_judgement_fn=lambda **_: {"status": "blocked"},
+        build_execution_handoff_fn=lambda envelope: {},
+        decision_envelope_factory=lambda payload: payload,
+    )
+
+    assert captured["config"].incomplete_snapshot_status_dir == telemetry_dir

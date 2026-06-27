@@ -880,6 +880,59 @@ def test_state_store_clears_active_probe_metadata_when_flat(tmp_path: Path) -> N
     assert "active_probe_invalidate_conditions" not in updated.metadata
 
 
+def test_state_store_clears_active_probe_metadata_when_exit_order_is_accepted(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.08
+    state.metadata = {
+        "active_probe_source": "trigger_ready_small_probe",
+        "active_probe_started_at": "2026-05-20T03:00:00+00:00",
+        "active_probe_expires_at": "2026-05-20T04:00:00+00:00",
+        "active_probe_invalidate_conditions": [
+            "trigger_ready_long_failed_followthrough",
+            "trigger_reversal_15m",
+            "no_followthrough_after_3x15m",
+            "hard_risk_veto",
+        ],
+    }
+
+    updated = store.record_shadow_cycle(
+        state=state,
+        judgement={"status": "ok"},
+        handoff={"generated_at": "2026-05-20T03:46:00", "action": "wait"},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+            degraded=False,
+            blocked=False,
+        ),
+        effective_action="exit",
+        plan_reason="trigger_ready_probe_invalidated",
+        execution_results=[
+            CommandExecutionResult(
+                target="exit_order",
+                status="simulated",
+                accepted=True,
+                simulated=True,
+            )
+        ],
+        runtime_snapshot=AdapterRuntimeSnapshot(
+            position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.08),
+            snapshot_valid=True,
+        ),
+    )
+
+    assert updated.execution_state is ExecutionLayerState.EXIT_PENDING
+    assert updated.pending_action == "exit"
+    assert "active_probe_source" not in updated.metadata
+    assert "active_probe_expires_at" not in updated.metadata
+    assert "active_probe_invalidate_conditions" not in updated.metadata
+
+
 def test_state_store_rolls_active_contrarian_probe_expiry_without_new_entry_order(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.json")
     state = store.load()

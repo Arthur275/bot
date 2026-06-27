@@ -1,0 +1,431 @@
+{
+  "bot_root": "D:\\开发\\eth_trading_bot",
+  "date": "2026-05-18",
+  "difference_categories": {
+    "category_counts": {
+      "observability_gap": 891,
+      "reasonable_risk_control": 31,
+      "strategy_choice": 162
+    },
+    "shadow_outcomes": {
+      "evaluated_item_count": 0,
+      "logic_gap_count": 0,
+      "status": "blocked",
+      "unique_available_count": 0,
+      "unique_net_favorable_rate": 0.0
+    },
+    "top_reasons": {
+      "below_probe_floor": 5,
+      "decision_artifact_missing": 891,
+      "net_edge_below_cost": 31,
+      "scheduler_status:blocked": 2,
+      "scheduler_status:incomplete_snapshot_only": 887,
+      "waiting_for_trigger": 157
+    }
+  },
+  "gate_layers": [
+    {
+      "evidence": "trigger_ready_count=5, execution_ready_count=0",
+      "layer": "quant",
+      "reason": "audit_summary",
+      "status": "trigger_seen_no_execution"
+    },
+    {
+      "evidence": "decision_artifact_missing,scheduler_status:incomplete_snapshot_only,waiting_for_trigger,net_edge_below_cost,below_probe_floor,scheduler_status:blocked",
+      "layer": "risk_gate",
+      "reason": "diagnostics_stale_not_used_as_target_day_conclusion",
+      "status": "unknown_stale_diagnostics"
+    },
+    {
+      "evidence": "decision_artifact_missing,scheduler_status:incomplete_snapshot_only,waiting_for_trigger,net_edge_below_cost,below_probe_floor,scheduler_status:blocked",
+      "layer": "bot_order",
+      "reason": "diagnostics_stale_not_used_as_target_day_conclusion",
+      "status": "unknown_stale_diagnostics"
+    }
+  ],
+  "generated_at": "2026-05-19T04:39:53+00:00",
+  "inputs": [
+    {
+      "name": "market_data",
+      "path": "",
+      "source": "binance_api",
+      "status": "ok",
+      "trace": "count=96 15m candles, window=2026-05-18T00:00:00+00:00..2026-05-19T00:00:00+00:00"
+    },
+    {
+      "name": "missed_opportunity_audit",
+      "path": "D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\missed_opportunity_audit_20260518.json",
+      "source": "existing_local_artifact",
+      "status": "ok",
+      "trace": "source_path=D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\missed_opportunity_audit_20260518.json; start_ts=20260518T000000Z; end_ts=20260519T000000Z"
+    },
+    {
+      "name": "live_ready_diagnostics",
+      "path": "D:\\开发\\quant_system_rebuild\\runtime\\analysis\\live_ready_blocking_diagnostics.json",
+      "source": "existing_artifact",
+      "status": "stale",
+      "trace": "source_path=D:\\开发\\quant_system_rebuild\\runtime\\analysis\\live_ready_blocking_diagnostics.json; decision_cycle_ts=20260505T160027Z"
+    },
+    {
+      "name": "scheduler_daily_review",
+      "path": "D:\\开发\\quant_system_rebuild\\runtime\\scheduler\\daily_review.json",
+      "source": "existing_artifact",
+      "status": "stale",
+      "trace": "source_path=D:\\开发\\quant_system_rebuild\\runtime\\scheduler\\daily_review.json; generated_at=2026-05-04T06:32:30+00:00"
+    },
+    {
+      "name": "shadow_outcomes",
+      "path": "D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\missed_opportunity_shadow_outcomes_20260518.json",
+      "source": "existing_local_artifact",
+      "status": "ok",
+      "trace": "source_path=D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\missed_opportunity_shadow_outcomes_20260518.json; audit_path=D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\missed_opportunity_audit_20260518.json"
+    }
+  ],
+  "market": {
+    "bar_count_for_timeline": 96,
+    "candle_count_15m": 96,
+    "candle_count_1h": 24,
+    "close": 2130.08,
+    "date_utc": "2026-05-18",
+    "day_return_pct": -0.0432,
+    "high": 2157.24,
+    "high_time": "12:45",
+    "intraday_range_pct": 3.7546,
+    "low": 2077.23,
+    "low_time": "18:15",
+    "main_regime": "volatile",
+    "market_data_status": "ok",
+    "max_15m_range_pct": 1.6293,
+    "notable_windows": [
+      "high@12:45",
+      "low@18:15"
+    ],
+    "open": 2131.0,
+    "source": "binance_api",
+    "symbol": "ETHUSDT"
+  },
+  "output_paths": {
+    "markdown": "D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\2026-05-18_market_vs_system.md",
+    "summary_json": "D:\\开发\\eth_trading_bot\\docs\\daily_reviews\\artifacts\\2026-05-18_summary.json"
+  },
+  "quant_root": "D:\\开发\\quant_system_rebuild",
+  "reviewer": "codex",
+  "symbol": "ETHUSDT",
+  "system_health": {
+    "diagnostics_status": "stale",
+    "dominant_blocking_reason": "diagnostics_stale; audit_top_reason=decision_artifact_missing",
+    "gates": {
+      "candidate_package": {
+        "blocking": true,
+        "live_candidate_count": 0,
+        "qualified_candidate_count": 0,
+        "reason_codes": [
+          "valid_for_live_decision_false",
+          "qualified_candidate_count_zero",
+          "live_candidate_count_zero"
+        ],
+        "review_candidate_count": 0,
+        "status": "blocked",
+        "valid_for_live_decision": false
+      },
+      "execution_guard": {
+        "blocking": true,
+        "reason_codes": [
+          "not_entry_action"
+        ],
+        "status": "blocked"
+      },
+      "factor_governance": {
+        "blocking": false,
+        "reason_codes": [
+          "factor_lookup_stale"
+        ],
+        "status": "watch"
+      },
+      "research_gate": {
+        "blocking": true,
+        "reason_codes": [
+          "research_stale",
+          "research_not_ready"
+        ],
+        "status": "blocked"
+      },
+      "risk_filter": {
+        "blocking": true,
+        "reason_codes": [
+          "okx_taker_volume_experimental",
+          "overlay_present",
+          "overlay_source:okx",
+          "overlay_bias:neutral",
+          "consensus:long",
+          "crowding_warning",
+          "high_regime_risk",
+          "wf_return_drift_high",
+          "truth_candidate_source:all_results_fallback",
+          "truth_candidate_unqualified",
+          "research_stale",
+          "research_issue_present"
+        ],
+        "status": "veto"
+      }
+    },
+    "primary_fault_domain": "unknown",
+    "stale_diagnostics_reference": "research_gate:research_stale",
+    "system_health": "unknown"
+  },
+  "timeframe": "15m",
+  "timeline": [
+    {
+      "category": "observability_gap",
+      "cycle_count": 65,
+      "cycle_id": "eth-15m-20260518T000040Z-87f1b2e7",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@00:00, range_pct=0.94, move=down",
+      "risk": "unknown",
+      "system": "action=unknown continued 65 cycles; category=observability_gap",
+      "time_utc": "00:00-01:44",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T014504Z-992aeeda",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@01:45, range_pct=0.66, move=up",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "01:45",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 28,
+      "cycle_id": "eth-15m-20260518T014504Z-58050b24",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@01:45, range_pct=0.66, move=up",
+      "risk": "unknown",
+      "system": "action=unknown continued 28 cycles; category=observability_gap",
+      "time_utc": "01:45-02:27",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T023021Z-eed3e237",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@02:30, range_pct=0.31, move=down",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "02:30",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 12,
+      "cycle_id": "eth-15m-20260518T023021Z-f6847468",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@02:30, range_pct=0.31, move=down",
+      "risk": "unknown",
+      "system": "action=unknown continued 12 cycles; category=observability_gap",
+      "time_utc": "02:30-02:46",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T024712Z-3aeb7d1f",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@02:45, range_pct=0.36, move=down",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "02:47",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 16,
+      "cycle_id": "eth-15m-20260518T024712Z-9a00d52a",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@02:45, range_pct=0.36, move=down",
+      "risk": "unknown",
+      "system": "action=unknown continued 16 cycles; category=observability_gap",
+      "time_utc": "02:47-03:11",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T031523Z-637b9ae5",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@03:15, range_pct=0.17, move=up",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "03:15",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 29,
+      "cycle_id": "eth-15m-20260518T031523Z-e6e974ca",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@03:15, range_pct=0.17, move=up",
+      "risk": "unknown",
+      "system": "action=unknown continued 29 cycles; category=observability_gap",
+      "time_utc": "03:15-03:59",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T040114Z-1710b814",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@04:00, range_pct=0.23, move=up",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "04:01",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 18,
+      "cycle_id": "eth-15m-20260518T040114Z-8abdc06a",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@04:00, range_pct=0.23, move=up",
+      "risk": "unknown",
+      "system": "action=unknown continued 18 cycles; category=observability_gap",
+      "time_utc": "04:01-04:26",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T042952Z-ec41599f",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@04:15, range_pct=0.37, move=down",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "04:29",
+      "trigger": "false"
+    },
+    {
+      "category": "observability_gap",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T042952Z-535a227b",
+      "event_review_label": "needs_review",
+      "gate": "decision_artifact_missing",
+      "market": "volatile@04:15, range_pct=0.37, move=down",
+      "risk": "unknown",
+      "system": "action=unknown; category=observability_gap",
+      "time_utc": "04:29",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 3,
+      "cycle_id": "eth-15m-20260518T051540Z-8dc6b02e",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@05:15, range_pct=0.24, move=up",
+      "risk": "degraded",
+      "system": "action=observe_only continued 3 cycles; category=reasonable_risk_control",
+      "time_utc": "05:15-06:46",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T071459Z-9b1380b0",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@07:00, range_pct=0.28, move=down",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "07:14",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 3,
+      "cycle_id": "eth-15m-20260518T073044Z-9543113e",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@07:30, range_pct=0.40, move=down",
+      "risk": "degraded",
+      "system": "action=observe_only continued 3 cycles; category=reasonable_risk_control",
+      "time_utc": "07:30-08:19",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T083020Z-c8b8fe8d",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@08:30, range_pct=0.17, move=down",
+      "risk": "degraded",
+      "system": "action=wait; category=reasonable_risk_control",
+      "time_utc": "08:30",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 2,
+      "cycle_id": "eth-15m-20260518T084704Z-be392db4",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@08:45, range_pct=0.21, move=up",
+      "risk": "degraded",
+      "system": "action=observe_only continued 2 cycles; category=reasonable_risk_control",
+      "time_utc": "08:47-09:20",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 5,
+      "cycle_id": "eth-15m-20260518T093309Z-33bee505",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@09:30, range_pct=0.19, move=down",
+      "risk": "degraded",
+      "system": "action=wait continued 5 cycles; category=reasonable_risk_control",
+      "time_utc": "09:33-11:04",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 1,
+      "cycle_id": "eth-15m-20260518T111608Z-e8602669",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@11:15, range_pct=0.15, move=up",
+      "risk": "degraded",
+      "system": "action=observe_only; category=reasonable_risk_control",
+      "time_utc": "11:16",
+      "trigger": "false"
+    },
+    {
+      "category": "reasonable_risk_control",
+      "cycle_count": 9,
+      "cycle_id": "eth-15m-20260518T143032Z-6a67d9b6",
+      "event_review_label": "needs_review",
+      "gate": "not_entry_action",
+      "market": "volatile@14:30, range_pct=0.99, move=down",
+      "risk": "degraded",
+      "system": "action=wait continued 9 cycles; category=reasonable_risk_control",
+      "time_utc": "14:30-23:00",
+      "trigger": "false"
+    }
+  ]
+}

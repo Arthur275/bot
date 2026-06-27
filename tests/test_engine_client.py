@@ -125,3 +125,33 @@ def test_engine_client_fetch_cycle_reuses_current_position_state(tmp_path) -> No
     assert observed_calls["current_state"] == "ENTERED"
     assert observed_calls["current_position_size_pct"] == 0.3
     assert observed_calls["current_position_direction"] == "long"
+
+
+def test_engine_client_forwards_incomplete_snapshot_status_dir(tmp_path) -> None:
+    observed_calls: dict = {}
+    telemetry_dir = tmp_path / "telemetry" / "snapshot_only"
+
+    def fake_run_live_judgement(**kwargs):
+        observed_calls.update(kwargs)
+        return {
+            "status": "blocked",
+            "decision": None,
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+            "diagnostic": "request_diagnostic=transport | category=transport",
+        }
+
+    client = EngineClient(
+        BotConfig(
+            state_store_path=tmp_path / "state.json",
+            audit_log_path=tmp_path / "audit.jsonl",
+            artifacts_root=tmp_path / "runtime",
+            incomplete_snapshot_status_dir=telemetry_dir,
+        ),
+        run_live_judgement_fn=fake_run_live_judgement,
+        build_execution_handoff_fn=lambda envelope: envelope,
+        decision_envelope_factory=lambda payload: payload,
+    )
+
+    client.fetch_cycle(generated_at=datetime(2026, 4, 26, 12, 5, 0))
+
+    assert observed_calls["incomplete_snapshot_status_dir"] == str(telemetry_dir)

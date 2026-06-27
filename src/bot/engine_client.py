@@ -67,6 +67,11 @@ class EngineClient:
             current_position_size_pct=current_position_size_pct,
             current_position_direction=current_position_direction,
             generated_at=generated_at,
+            incomplete_snapshot_status_dir=(
+                str(self._config.incomplete_snapshot_status_dir)
+                if self._config.incomplete_snapshot_status_dir
+                else None
+            ),
         )
         if judgement.get("status") != "ok" or not judgement.get("decision"):
             return EngineCyclePayload(judgement=judgement, handoff=None)

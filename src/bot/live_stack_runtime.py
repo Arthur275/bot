@@ -82,6 +82,7 @@ def build_bot_runtime(
         state_store_path=paths["bot_state_path"],
         audit_log_path=paths["bot_audit_path"],
         artifacts_root=paths["bot_artifacts_dir"],
+        incomplete_snapshot_status_dir=paths.get("incomplete_snapshot_status_dir"),
     )
     credentials = AdapterCredentials(
         venue=config.exchange_venue,

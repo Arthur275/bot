@@ -106,6 +106,7 @@ class BotConfig(BaseModel):
     artifacts_root: Path = DEFAULT_RUNTIME_ROOT
     audit_log_path: Path = DEFAULT_AUDIT_LOG_PATH
     state_store_path: Path = DEFAULT_STATE_STORE_PATH
+    incomplete_snapshot_status_dir: Path | None = None
     calibration_path: Path | None = None
     sample_root: Path | None = None
     research_sync_request_path: Path | None = None

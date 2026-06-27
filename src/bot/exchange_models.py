@@ -189,6 +189,29 @@ class ExecutionCommand(BaseModel):
     reason: str = ""
     payload: EntryOrderPayload | ReduceOrderPayload | ExitOrderPayload | ProtectiveStopPayload | TakeProfitOrderPayload | ReconciliationPayload | BreakevenPayload | TrailingStopPayload | RecentFillsPayload
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_payload_by_target(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload_by_target = {
+            "entry_order": EntryOrderPayload,
+            "reduce_order": ReduceOrderPayload,
+            "exit_order": ExitOrderPayload,
+            "maintain_protective_stop": ProtectiveStopPayload,
+            "take_profit_order": TakeProfitOrderPayload,
+            "reconcile_position_and_orders": ReconciliationPayload,
+            "advance_breakeven_stop": BreakevenPayload,
+            "advance_trailing_stop": TrailingStopPayload,
+            "sync_recent_fills": RecentFillsPayload,
+        }
+        expected_model = payload_by_target.get(str(data.get("target") or ""))
+        if expected_model is None or "payload" not in data:
+            return data
+        coerced = dict(data)
+        coerced["payload"] = expected_model.model_validate(coerced["payload"])
+        return coerced
+
 
 class CommandExecutionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")

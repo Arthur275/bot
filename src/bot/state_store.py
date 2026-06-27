@@ -195,6 +195,10 @@ class StateStore:
             effective_action=effective_action,
             execution_results=execution_results,
         )
+        if self._accepted_exit_order(execution_results):
+            metadata = dict(next_state.metadata)
+            self._clear_active_probe_metadata(metadata)
+            next_state.metadata = metadata
         return self.save(next_state)
 
     @staticmethod
@@ -542,6 +546,13 @@ class StateStore:
     def _has_accepted_entry_order(execution_results: Sequence[CommandExecutionResult] | None) -> bool:
         return any(
             result.target == "entry_order" and result.accepted
+            for result in execution_results or []
+        )
+
+    @staticmethod
+    def _accepted_exit_order(execution_results: Sequence[CommandExecutionResult] | None) -> bool:
+        return any(
+            result.target == "exit_order" and result.accepted
             for result in execution_results or []
         )
 

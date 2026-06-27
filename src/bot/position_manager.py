@@ -11,6 +11,36 @@ from .network_guard import GuardDecision
 from .time_utils import parse_datetime_utc
 
 ACTIVE_PROBE_SOURCES = {"contrarian_short_probe", "trigger_ready_small_probe"}
+TRIGGER_READY_PROBE_SOURCE = "trigger_ready_small_probe"
+TRIGGER_READY_PROBE_INVALIDATED_REASON = "trigger_ready_probe_invalidated"
+TRIGGER_READY_PROBE_INVALIDATE_CONDITIONS = {
+    "trigger_ready_long_failed_followthrough",
+    "trigger_ready_short_failed_followthrough",
+    "trigger_reversal_15m",
+    "no_followthrough_after_3x15m",
+    "hard_risk_veto",
+}
+TRIGGER_READY_PROBE_REVERSAL_CODES = {
+    "probe_trigger_reversal_exit",
+    "trigger_reversal_15m",
+    "trigger_reversal",
+    "transition:probe_trigger_reversal_exit",
+    "manage_detail:exit:probe_trigger_reversal",
+}
+TRIGGER_READY_PROBE_HARD_RISK_CODES = {
+    "conflict_veto",
+    "data_health_veto",
+    "force_exit",
+    "hard_risk_veto",
+    "position_exit_veto",
+    "risk_filter:blocked",
+    "risk_filter:research_unavailable",
+    "risk_filter:unavailable",
+    "risk_filter:veto",
+    "risk_filter_not_pass",
+    "runtime_entry_veto",
+    "staleness_veto",
+}
 
 
 class ExecutionPlan(BaseModel):
@@ -67,6 +97,28 @@ class PositionManager:
             or (has_open_risk and not protective_stop_present)
         )
         entry_actions = {PositionAction.ENTRY_LONG.value, PositionAction.ENTRY_SHORT.value, PositionAction.SMALL_PROBE.value}
+        active_probe_invalidation = ""
+        if requested_action != PositionAction.EXIT.value:
+            active_probe_invalidation = self._active_probe_invalidation(
+                runtime_state=runtime_state,
+                handoff=handoff,
+                guard=guard,
+                has_open_risk=has_open_risk,
+            )
+        if active_probe_invalidation and guard.allow_exit:
+            return ExecutionPlan(
+                requested_action=requested_action,
+                effective_action=PositionAction.EXIT.value,
+                plan_reason=TRIGGER_READY_PROBE_INVALIDATED_REASON,
+                place_exit_order=True,
+                maintain_protective_stop=needs_protective_stop,
+                needs_reconciliation=needs_recovery_reconciliation,
+                recovery_action="reconcile_runtime_state" if needs_recovery_reconciliation else "",
+                notes=[
+                    TRIGGER_READY_PROBE_INVALIDATED_REASON,
+                    f"matched_invalidate_condition:{active_probe_invalidation}",
+                ],
+            )
 
         if guard.blocked:
             return ExecutionPlan(
@@ -279,10 +331,182 @@ class PositionManager:
 
     @staticmethod
     def _probe_expiry_reason(probe_source: str) -> str:
-        if probe_source == "trigger_ready_small_probe":
+        if probe_source == TRIGGER_READY_PROBE_SOURCE:
             return "trigger_ready_probe_expired"
         return "contrarian_probe_expired"
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
         return parse_datetime_utc(value)
+
+    @staticmethod
+    def _active_probe_invalidation(
+        *,
+        runtime_state: dict[str, Any],
+        handoff: dict[str, Any] | None,
+        guard: GuardDecision,
+        has_open_risk: bool,
+    ) -> str:
+        if not has_open_risk:
+            return ""
+        metadata = runtime_state.get("metadata")
+        if not isinstance(metadata, dict):
+            return ""
+        if str(metadata.get("active_probe_source") or "") != TRIGGER_READY_PROBE_SOURCE:
+            return ""
+        active_conditions = PositionManager._normalize_string_list(
+            metadata.get("active_probe_invalidate_conditions")
+        )
+        if not active_conditions:
+            return ""
+        known_conditions = [
+            condition
+            for condition in active_conditions
+            if PositionManager._normalize_code(condition) in TRIGGER_READY_PROBE_INVALIDATE_CONDITIONS
+        ]
+        if not known_conditions:
+            return ""
+        reason_codes = PositionManager._handoff_reason_codes(handoff)
+        reason_codes.update(PositionManager._normalize_code(code) for code in guard.reason_codes)
+        if guard.blocked:
+            reason_codes.add("hard_risk_veto")
+
+        for condition in PositionManager._ordered_trigger_ready_invalidation_conditions(known_conditions):
+            normalized_condition = PositionManager._normalize_code(condition)
+            if normalized_condition == "hard_risk_veto" and PositionManager._has_hard_risk_veto(reason_codes):
+                return normalized_condition
+            if normalized_condition == "trigger_reversal_15m" and PositionManager._has_trigger_reversal(reason_codes):
+                return normalized_condition
+            if normalized_condition == "no_followthrough_after_3x15m" and normalized_condition in reason_codes:
+                return normalized_condition
+            if normalized_condition in {
+                "trigger_ready_long_failed_followthrough",
+                "trigger_ready_short_failed_followthrough",
+            } and PositionManager._has_failed_followthrough(
+                reason_codes=reason_codes,
+                condition=normalized_condition,
+                runtime_state=runtime_state,
+                handoff=handoff,
+            ):
+                return normalized_condition
+        return ""
+
+    @staticmethod
+    def _ordered_trigger_ready_invalidation_conditions(conditions: list[str]) -> list[str]:
+        priority = {
+            "hard_risk_veto": 0,
+            "trigger_reversal_15m": 1,
+            "trigger_ready_long_failed_followthrough": 2,
+            "trigger_ready_short_failed_followthrough": 2,
+            "no_followthrough_after_3x15m": 3,
+        }
+        return sorted(
+            conditions,
+            key=lambda item: priority.get(PositionManager._normalize_code(item), 99),
+        )
+
+    @staticmethod
+    def _handoff_reason_codes(handoff: dict[str, Any] | None) -> set[str]:
+        handoff = handoff or {}
+        codes: set[str] = set()
+        for key in (
+            "transition_reason_codes",
+            "risk_reason_codes",
+            "reason_codes",
+            "runtime_vetoes",
+            "degrade_flags",
+            "invalidate_conditions",
+            "reduce_conditions",
+        ):
+            codes.update(
+                PositionManager._normalize_code(item)
+                for item in PositionManager._normalize_string_list(handoff.get(key))
+            )
+        risk_report = handoff.get("risk_report")
+        if isinstance(risk_report, dict):
+            for key in ("reason_codes", "runtime_vetoes", "degrade_flags"):
+                codes.update(
+                    PositionManager._normalize_code(item)
+                    for item in PositionManager._normalize_string_list(risk_report.get(key))
+                )
+        exit_plan = handoff.get("exit_plan")
+        if isinstance(exit_plan, dict):
+            codes.update(
+                PositionManager._normalize_code(item)
+                for item in PositionManager._normalize_string_list(exit_plan.get("invalidate_conditions"))
+            )
+            codes.update(
+                PositionManager._normalize_code(item)
+                for item in PositionManager._normalize_string_list(exit_plan.get("reduce_conditions"))
+            )
+        if bool(handoff.get("staleness_veto")):
+            codes.add("staleness_veto")
+        if bool(handoff.get("conflict_veto")):
+            codes.add("conflict_veto")
+        risk_filter_status = PositionManager._normalize_code(handoff.get("risk_filter_status"))
+        if risk_filter_status and risk_filter_status not in {"pass", "degraded"}:
+            codes.add(f"risk_filter:{risk_filter_status}")
+        action = PositionManager._normalize_code(handoff.get("action"))
+        if action:
+            codes.add(f"action:{action}")
+        return {code for code in codes if code}
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _normalize_code(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _has_hard_risk_veto(reason_codes: set[str]) -> bool:
+        if reason_codes.intersection(TRIGGER_READY_PROBE_HARD_RISK_CODES):
+            return True
+        return any(
+            code.startswith("risk_filter:")
+            and code not in {"risk_filter:pass", "risk_filter:degraded"}
+            for code in reason_codes
+        )
+
+    @staticmethod
+    def _has_trigger_reversal(reason_codes: set[str]) -> bool:
+        if reason_codes.intersection(TRIGGER_READY_PROBE_REVERSAL_CODES):
+            return True
+        return any("probe_trigger_reversal" in code or code.endswith(":trigger_reversal") for code in reason_codes)
+
+    @staticmethod
+    def _has_failed_followthrough(
+        *,
+        reason_codes: set[str],
+        condition: str,
+        runtime_state: dict[str, Any],
+        handoff: dict[str, Any] | None,
+    ) -> bool:
+        if condition in reason_codes:
+            return True
+        if not any("failed_followthrough" in code or "no_followthrough" in code for code in reason_codes):
+            return False
+        expected_direction = "long" if condition == "trigger_ready_long_failed_followthrough" else "short"
+        active_direction = PositionManager._active_probe_direction(runtime_state=runtime_state, handoff=handoff)
+        return active_direction == expected_direction
+
+    @staticmethod
+    def _active_probe_direction(*, runtime_state: dict[str, Any], handoff: dict[str, Any] | None) -> str:
+        handoff = handoff or {}
+        for value in (
+            handoff.get("current_position_direction"),
+            handoff.get("direction"),
+            runtime_state.get("observed_position_direction"),
+        ):
+            direction = PositionManager._normalize_code(value)
+            if direction in {"long", "short"}:
+                return direction
+        return ""

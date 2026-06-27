@@ -611,3 +611,140 @@ def test_position_manager_exits_expired_trigger_ready_probe() -> None:
     assert plan.place_exit_order is True
     assert plan.plan_reason == "trigger_ready_probe_expired"
     assert plan.notes == ["trigger_ready_probe_expired"]
+
+
+def test_position_manager_invalidates_active_trigger_ready_probe_on_reversal_reason() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "wait",
+            "position_state": "ENTERED",
+            "position_size_pct": 0.10,
+            "transition_reason_codes": ["probe_trigger_reversal_exit"],
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_direction": "long",
+            "observed_position_size_pct": 0.10,
+            "runtime_now": "2026-05-02T03:30:00",
+            "metadata": {
+                "active_probe_source": "trigger_ready_small_probe",
+                "active_probe_expires_at": "2026-05-02T03:45:00",
+                "active_probe_invalidate_conditions": [
+                    "trigger_ready_long_failed_followthrough",
+                    "trigger_reversal_15m",
+                    "no_followthrough_after_3x15m",
+                    "hard_risk_veto",
+                ],
+            },
+        },
+    )
+
+    assert plan.effective_action == "exit"
+    assert plan.place_exit_order is True
+    assert plan.plan_reason == "trigger_ready_probe_invalidated"
+    assert plan.notes == [
+        "trigger_ready_probe_invalidated",
+        "matched_invalidate_condition:trigger_reversal_15m",
+    ]
+
+
+def test_position_manager_does_not_invalidate_active_probe_on_unknown_condition() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "wait",
+            "position_state": "ENTERED",
+            "position_size_pct": 0.10,
+            "transition_reason_codes": ["probe_trigger_reversal_exit"],
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_direction": "long",
+            "observed_position_size_pct": 0.10,
+            "runtime_now": "2026-05-02T03:30:00",
+            "metadata": {
+                "active_probe_source": "trigger_ready_small_probe",
+                "active_probe_expires_at": "2026-05-02T03:45:00",
+                "active_probe_invalidate_conditions": ["unknown_condition"],
+            },
+        },
+    )
+
+    assert plan.effective_action == "wait"
+    assert plan.plan_reason == "quant_action_passthrough"
+    assert plan.place_exit_order is False
+
+
+def test_position_manager_does_not_invalidate_active_probe_without_open_risk() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={
+            "action": "wait",
+            "position_state": "FLAT",
+            "position_size_pct": 0.0,
+            "transition_reason_codes": ["probe_trigger_reversal_exit"],
+        },
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=True,
+            allow_reduce=True,
+            allow_exit=True,
+        ),
+        runtime_state={
+            "observed_position_state": "FLAT",
+            "observed_position_direction": "neutral",
+            "observed_position_size_pct": 0.0,
+            "runtime_now": "2026-05-02T03:30:00",
+            "metadata": {
+                "active_probe_source": "trigger_ready_small_probe",
+                "active_probe_expires_at": "2026-05-02T03:45:00",
+                "active_probe_invalidate_conditions": ["trigger_reversal_15m"],
+            },
+        },
+    )
+
+    assert plan.effective_action == "wait"
+    assert plan.plan_reason == "quant_action_passthrough"
+    assert plan.place_exit_order is False
+
+
+def test_position_manager_invalidates_active_trigger_ready_probe_on_hard_risk_veto() -> None:
+    plan = PositionManager().build_execution_plan(
+        handoff={"action": "wait", "position_state": "ENTERED", "position_size_pct": 0.10},
+        guard=GuardDecision(
+            judgement_status="ok",
+            allow_entry=False,
+            allow_reduce=True,
+            allow_exit=True,
+            reason_codes=["runtime_entry_veto"],
+        ),
+        runtime_state={
+            "observed_position_state": "ENTERED",
+            "observed_position_direction": "long",
+            "observed_position_size_pct": 0.10,
+            "runtime_now": "2026-05-02T03:30:00",
+            "metadata": {
+                "active_probe_source": "trigger_ready_small_probe",
+                "active_probe_expires_at": "2026-05-02T03:45:00",
+                "active_probe_invalidate_conditions": ["hard_risk_veto"],
+            },
+        },
+    )
+
+    assert plan.effective_action == "exit"
+    assert plan.place_exit_order is True
+    assert plan.plan_reason == "trigger_ready_probe_invalidated"
+    assert plan.notes == [
+        "trigger_ready_probe_invalidated",
+        "matched_invalidate_condition:hard_risk_veto",
+    ]

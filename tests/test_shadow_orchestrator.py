@@ -83,6 +83,18 @@ class FakeEngineClient:
         return self._payload
 
 
+class SequenceEngineClient:
+    def __init__(self, payloads: list[EngineCyclePayload]) -> None:
+        self._payloads = list(payloads)
+        self.fetch_cycle_calls = 0
+
+    def fetch_cycle(self, **_: object) -> EngineCyclePayload:
+        self.fetch_cycle_calls += 1
+        if not self._payloads:
+            raise AssertionError("No fake engine payload remains")
+        return self._payloads.pop(0)
+
+
 class FailingEngineClient:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
@@ -1786,6 +1798,206 @@ def test_risk_assist_cycle_exits_active_trigger_ready_probe_on_quant_exit_handof
     assert fake_client.fetch_cycle_calls == 1
 
 
+
+def test_risk_assist_cycle_consumes_active_trigger_ready_probe_invalidate_condition(tmp_path: Path) -> None:
+    payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-05-20T03:46:00",
+            "action": "wait",
+            "direction": "long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.08,
+            "initial_stop_loss": 0.982,
+            "transition_reason_codes": ["probe_trigger_reversal_exit"],
+        },
+    )
+    config = BotConfig(
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    state_store = StateStore(config.state_store_path)
+    state = state_store.load()
+    state.observed_position_state = "ENTERED"
+    state.observed_position_direction = "long"
+    state.observed_position_size_pct = 0.08
+    state.metadata = {
+        "active_probe_source": "trigger_ready_small_probe",
+        "active_probe_started_at": "2026-05-20T03:00:00+00:00",
+        "active_probe_expires_at": "2026-05-20T04:00:00+00:00",
+        "active_probe_invalid_if_no_followthrough": True,
+        "active_probe_invalidate_conditions": [
+            "trigger_ready_long_failed_followthrough",
+            "trigger_reversal_15m",
+            "no_followthrough_after_3x15m",
+            "hard_risk_veto",
+        ],
+    }
+    state_store.save(state)
+    fake_client = FakeEngineClient(payload)
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=fake_client,
+        network_guard=NetworkGuard(),
+        state_store=state_store,
+        exchange_adapter=FakeExchangeAdapter(
+            snapshot=AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.08),
+                protective_stop_present=True,
+            ),
+            reconciliation=ReconciliationResult(
+                in_sync=True,
+                protective_stop_present=True,
+            ),
+        ),
+    )
+
+    report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 5, 20, 3, 46, 0))
+
+    assert report.runtime_mode == "shadow"
+    assert report.eligible is True
+    assert report.requested_action == "wait"
+    assert report.effective_action == "exit"
+    assert report.plan_reason == "trigger_ready_probe_invalidated"
+    assert report.action_summary["plan_reason"] == "trigger_ready_probe_invalidated"
+    assert report.command_summary == [
+        {"target": "exit_order", "reason": "effective_action:exit", "operation": "place"},
+    ]
+    assert "exit_order" in report.adapter_action_types
+    assert "exit_order" in report.command_types
+    assert all(status == "simulated" for status in report.command_result_statuses)
+    updated = state_store.load()
+    assert updated.last_handoff_action == "wait"
+    assert updated.last_effective_action == "exit"
+    assert updated.last_plan_reason == "trigger_ready_probe_invalidated"
+    assert "active_probe_source" not in updated.metadata
+    assert fake_client.fetch_cycle_calls == 1
+
+
+
+
+def test_trigger_ready_probe_opens_records_active_then_invalidates_on_shadow_cycles(tmp_path: Path) -> None:
+    open_payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff=_fresh_handoff({
+            "generated_at": "2026-05-20T03:00:00+00:00",
+            "action": "small_probe",
+            "direction": "long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ARMED",
+            "current_position_direction": "neutral",
+            "position_size_pct": 0.08,
+            "initial_stop_loss": 0.982,
+            "execution_allowed": True,
+            "probe_source": "trigger_ready_small_probe",
+            "probe_expiry_bars": 3,
+            "probe_expiry_timeframe": "15m",
+            "probe_invalid_if_no_followthrough": True,
+            "probe_risk_tier": "trigger_ready",
+            "invalidate_conditions": [
+                "trigger_ready_long_failed_followthrough",
+                "trigger_reversal_15m",
+                "no_followthrough_after_3x15m",
+                "hard_risk_veto",
+            ],
+        }),
+    )
+    invalidate_payload = EngineCyclePayload(
+        judgement={
+            "status": "ok",
+            "diagnostic": "",
+            "research_bundle": {"ready": True, "bundle_status": "healthy"},
+        },
+        handoff={
+            "generated_at": "2026-05-20T03:15:00+00:00",
+            "action": "wait",
+            "direction": "long",
+            "risk_filter_status": "pass",
+            "runtime_vetoes": [],
+            "degrade_flags": [],
+            "staleness_veto": False,
+            "conflict_veto": False,
+            "position_state": "ENTERED",
+            "current_position_direction": "long",
+            "position_size_pct": 0.08,
+            "initial_stop_loss": 0.982,
+            "transition_reason_codes": ["probe_trigger_reversal_exit"],
+        },
+    )
+    config = BotConfig(
+        state_store_path=tmp_path / "state.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        artifacts_root=tmp_path / "runtime",
+    )
+    state_store = StateStore(config.state_store_path)
+    fake_client = SequenceEngineClient([open_payload, invalidate_payload])
+    adapter = FakeExchangeAdapter(
+        snapshot_sequence=[
+            AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="FLAT", direction="neutral", size_pct=0.0),
+                protective_stop_present=False,
+                snapshot_valid=False,
+            ),
+            AdapterRuntimeSnapshot(
+                position=PositionSnapshot(position_state="ENTERED", direction="long", size_pct=0.08),
+                protective_stop_present=True,
+            ),
+        ]
+    )
+    orchestrator = ShadowOrchestrator(
+        config,
+        engine_client=fake_client,
+        network_guard=NetworkGuard(),
+        state_store=state_store,
+        exchange_adapter=adapter,
+    )
+
+    open_report = orchestrator.run_cycle(generated_at=datetime(2026, 5, 20, 3, 0, 0))
+    active_state = state_store.load()
+
+    assert open_report.effective_action == "small_probe"
+    assert "entry_order" in open_report.command_types
+    assert active_state.observed_position_size_pct == 0.08
+    assert active_state.metadata["active_probe_source"] == "trigger_ready_small_probe"
+    assert active_state.metadata["active_probe_expires_at"] == "2026-05-20T03:45:00+00:00"
+    assert active_state.metadata["active_probe_invalidate_conditions"] == [
+        "trigger_ready_long_failed_followthrough",
+        "trigger_reversal_15m",
+        "no_followthrough_after_3x15m",
+        "hard_risk_veto",
+    ]
+
+    invalidate_report = orchestrator.run_risk_assist_cycle(generated_at=datetime(2026, 5, 20, 3, 15, 0))
+    exited_state = state_store.load()
+
+    assert invalidate_report.requested_action == "wait"
+    assert invalidate_report.effective_action == "exit"
+    assert invalidate_report.plan_reason == "trigger_ready_probe_invalidated"
+    assert "exit_order" in invalidate_report.command_types
+    assert exited_state.last_handoff_action == "wait"
+    assert exited_state.last_effective_action == "exit"
+    assert exited_state.last_plan_reason == "trigger_ready_probe_invalidated"
+    assert "active_probe_source" not in exited_state.metadata
+    assert fake_client.fetch_cycle_calls == 2
 
 
 def test_risk_assist_cycle_audit_log_persists_recovery_metadata_fields(tmp_path: Path) -> None:
